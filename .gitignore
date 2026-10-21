@@ -6,3 +6,15 @@ __pycache__/
 *.tar.gz
 *.zip
 .impeccable/
+
+.migration-starter/
+.sites-runtime/
+.wrangler/
+.next/
+.dev.vars
+.env*
+!.env.example
+
+dist/
+.vinext/
+outputs/

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   addDays, createSeedState, memberStats, projectProgress, today, transact, weekRange,
-} from '../dist/domain.js';
+} from '../public/client/domain.js';
 
 const byId = (list, id) => list.find((item) => item.id === id);
 const seed = () => createSeedState();
@@ -135,10 +135,43 @@ test('approval rejects a stale schedule or a task that completed while waiting',
 test('task cannot be marked done directly and only permitted assignees can submit', () => {
   const state = seed();
   assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'done' }, 'u-engineer'), /通过验收/);
-  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-design'), /自己负责/);
-  assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '成果' }, 'u-design'), /任务负责人/);
+  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-qa'), /自己负责/);
+  assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '成果' }, 'u-qa'), /任务负责人/);
+  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-design'), /无权访问该项目/);
+  assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '成果' }, 'u-design'), /无权访问该项目/);
   assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '' }, 'u-engineer'), /成果说明/);
   assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'blocked' }, 'u-engineer'), /阻塞原因/);
+});
+
+test('revoked project members cannot update or submit tasks still assigned to them', () => {
+  const state = seed();
+  const project = byId(state.projects, 'p-pcb');
+  project.memberIds = project.memberIds.filter((id) => id !== 'u-engineer');
+  const before = structuredClone(state);
+  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-engineer'), /无权访问该项目/);
+  assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '撤权后提交' }, 'u-engineer'), /无权访问该项目/);
+  assert.deepEqual(state, before);
+});
+
+test('revoked project reviewers cannot review old assignments while administrators retain access', () => {
+  const state = seed();
+  const project = byId(state.projects, 'p-mower');
+  byId(state.tasks, 't-04').reviewerId = 'u-qa';
+  project.memberIds = project.memberIds.filter((id) => id !== 'u-qa');
+  assert.throws(() => transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-qa'), /无权访问该项目/);
+  assert.ok(!project.memberIds.includes('u-admin'));
+  const approved = transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-admin');
+  assert.equal(byId(approved.tasks, 't-04').status, 'done');
+});
+
+test('project owners retain task management and assigned review access without membership entries', () => {
+  const state = seed();
+  const project = byId(state.projects, 'p-mower');
+  project.memberIds = project.memberIds.filter((id) => id !== 'u-manager');
+  const updated = transact(state, 'updateTask', { id: 't-03', status: 'doing' }, 'u-manager');
+  assert.equal(byId(updated.tasks, 't-03').status, 'doing');
+  const approved = transact(updated, 'reviewTask', { id: 't-04', approve: true }, 'u-manager');
+  assert.equal(byId(approved.tasks, 't-04').status, 'done');
 });
 
 test('submission and review preserve first-review result across rejection and resubmission', () => {

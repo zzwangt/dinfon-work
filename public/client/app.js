@@ -1,28 +1,33 @@
 import { renderProjectFlow, bindFlowCanvas } from './flow.js';
-import { today, addDays, weekRange, createSeedState, transact, projectProgress, memberStats } from './domain.js';
+import { today, addDays, weekRange, projectProgress, memberStats } from './domain.js';
+import { canAccessRoute } from './access.js';
 
-const KEY = 'dinfon.management.v1';
-const ACTOR_KEY = 'dinfon.management.actor';
+const LEGACY_KEY = 'dinfon.management.v1';
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
 const toastEl = document.querySelector('#toast');
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const e = escapeHTML;
-const currentDay = () => typeof today === 'function' ? today() : today;
+const currentDay = () => today();
 const shift = (date, days) => addDays(date, days);
-let state, actorId, storageIssue = '', toastTimer, weekOffset = 0, taskFilter = 'mine', projectFilter = 'all', approvalFilter = 'pending', searchTerm = '', flowProjectId = '', projectView = 'flow';
-const validState = s => s && s.version === 1 && ['users','projects','tasks','milestones','extensions','logs'].every(k => Array.isArray(s[k])) && s.users.length;
-try {
-  const saved = localStorage.getItem(KEY);
-  state = saved ? JSON.parse(saved) : createSeedState();
-  if (!validState(state)) throw new Error('数据结构不兼容');
-  actorId = localStorage.getItem(ACTOR_KEY) || 'u-admin';
-} catch (error) {
-  state = createSeedState();
-  storageIssue = '浏览器中的数据无法读取，当前展示初始演示数据。可在平台设置中导出当前数据或重置演示。';
+let state = null, actorId = '', revision = 0, accountInfo = null, accountsData = null, accountsLoading = false;
+let storageIssue = '', toastTimer, weekOffset = 0, taskFilter = 'mine', projectFilter = 'all', approvalFilter = 'pending', searchTerm = '', flowProjectId = '', projectView = 'flow', flowScope = 'all', expandedFlowIds = new Set(), saving = false;
+async function api(path, options = {}) {
+  const response = await fetch(path, {credentials:'same-origin', cache:'no-store', ...options, headers:{'Content-Type':'application/json', ...(options.headers||{})}});
+  const data = await response.json().catch(()=>({error:'服务器响应异常，请稍后重试。'}));
+  if(!response.ok){const error=new Error(data.error || data.message || '操作未成功，请重试。');error.status=response.status;throw error;}
+  return data;
 }
-if (!state.users.some(u => u.id === actorId)) actorId = state.users.find(u => u.role === 'admin')?.id || state.users[0].id;
-const user = id => state.users.find(u => u.id === id);
+function acceptSession(data) { state=data.state; actorId=data.actor.id; revision=data.revision; accountInfo=data.account; }
+function authScreen(message='', denied=false) {
+  state=null;actorId='';accountsData=null;modal.close();
+  app.innerHTML=`<main class="auth-page"><div class="auth-brand">鼎峰<span>协同管理平台</span></div><section class="auth-card"><span class="account-eyebrow">${denied?'访问权限':'团队工作空间'}</span><h1>${denied?'账号尚未获准访问':'使用你的账号进入工作空间'}</h1><p>${e(message||'管理员与员工使用各自的 ChatGPT 账号登录，平台会自动进入对应的工作台。')}</p><div class="auth-role-explainer"><div><strong>管理端</strong><span>项目安排 · 全局统计 · 延期审批 · 账号管理</span></div><div><strong>员工端</strong><span>我的任务 · 成果提交 · 项目流程 · 周计划</span></div></div><a class="button primary" href="${denied?'/signout-with-chatgpt?return_to=/':'/signin-with-chatgpt?return_to=/'}" target="_top">${denied?'退出并更换账号':'使用 ChatGPT 登录'}</a><button class="button ghost" data-action="reload-session">重新检查</button><small>账号权限由管理员分配。无法访问时，请将登录邮箱告知公司管理员。</small></section></main>`;
+}
+async function loadSession(silent=false) {
+  try{ const data=await api('/api/session'); const wasReady=!!state,changed=data.revision!==revision; acceptSession(data); storageIssue=''; if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks'); if(!silent||(changed&&!modal.open))render(); }
+  catch(error){if(error.status===401)authScreen();else if(error.status===403)authScreen(error.message,true);else if(!state)authScreen(error.message);else if(!silent)toast(error.message,true);}
+}
+const user = id => state?.users.find(u => u.id === id);
 const actor = () => user(actorId);
 const project = id => state.projects.find(p => p.id === id);
 const task = id => state.tasks.find(t => t.id === id);
@@ -49,7 +54,7 @@ const fullDate = date => date ? localDate(date).replaceAll('-', '.') : '—';
 const milestoneShare = m => { const sum=state.milestones.filter(x=>x.projectId===m.projectId).reduce((s,x)=>s+Number(x.weight),0); return sum ? Math.round(Number(m.weight)/sum*100) : 0; };
 const roleLabel = role => ({admin:'管理员',manager:'项目负责人',member:'项目成员'}[role] || role);
 const statusLabel = status => ({todo:'未开始',doing:'进行中',review:'待验收',done:'已完成',blocked:'受阻',pending:'待审批',approved:'已批准',rejected:'已驳回'}[status] || status);
-const statusClass = status => ({todo:'gray',doing:'blue',review:'amber',done:'green',blocked:'red',pending:'amber',approved:'green',rejected:'gray'}[status] || 'gray');
+const statusClass = status => ({todo:'gray',doing:'blue',review:'purple',done:'green',blocked:'red',pending:'amber',approved:'green',rejected:'gray'}[status] || 'gray');
 const statusPill = (status, text) => `<span class="status ${statusClass(status)}">${e(text || statusLabel(status))}</span>`;
 const iconPaths = {
   home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/>',
@@ -90,27 +95,32 @@ function toast(message, error = false) {
   clearTimeout(toastTimer); toastEl.hidden = false; toastEl.classList.toggle('error', error); toastEl.textContent = message;
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, 4000);
 }
-function save(next) {
-  try { localStorage.setItem(KEY, JSON.stringify(next)); } catch (_) { throw new Error('数据未保存：浏览器存储空间不足或已禁用。请先导出备份，再检查浏览器设置。'); }
+async function commit(action, payload, message) {
+  if(saving)return;
+  saving=true; const submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
+  try {const data=await api('/api/command',{method:'POST',body:JSON.stringify({action,payload,revision})});acceptSession(data);storageIssue='';modal.close();render();toast(message);}
+  catch(error){if(error.status===409){await loadSession(true);error.message+=' 已刷新最新数据，请核对后重试。';}if(error.status===401||error.status===403)await loadSession(true);throw error;}
+  finally{saving=false;if(submit)submit.disabled=false;}
 }
-function commit(action, payload, message) {
-  const next = transact(state, action, payload, actorId);
-  save(next); state = next; storageIssue = ''; modal.close(); render(); toast(message);
-}
-const routes = [{id:'overview',name:'项目流程',icon:'grid'},{id:'dashboard',name:'管理后台',icon:'home'},{id:'projects',name:'项目管理',icon:'grid'},{id:'tasks',name:'我的任务',icon:'task'},{id:'weekly',name:'周计划与汇总',icon:'calendar'},{id:'approvals',name:'延期审批',icon:'approval'},{id:'team',name:'团队与效能',icon:'users'}];
-function route() { return (location.hash.slice(1) || 'overview').split('/'); }
+const routes = [{id:'overview',name:'项目流程',icon:'grid'},{id:'dashboard',name:'管理后台',icon:'home'},{id:'projects',name:'项目管理',icon:'grid'},{id:'tasks',name:'我的任务',icon:'task'},{id:'weekly',name:'周计划与汇总',icon:'calendar'},{id:'approvals',name:'延期审批',icon:'approval'},{id:'team',name:'团队与效能',icon:'users'},{id:'accounts',name:'账号管理',icon:'users'},{id:'my-account',name:'我的账号',icon:'settings'}];
+function route() { return (location.hash.slice(1) || (isAdmin()?'overview':'tasks')).split('/'); }
+function navigationRoutes() {const list=routes.filter(r=>canAccessRoute(actor(),r.id));return isAdmin()?list:list.sort((a,b)=>['tasks','overview','projects','weekly','approvals','my-account'].indexOf(a.id)-['tasks','overview','projects','weekly','approvals','my-account'].indexOf(b.id)).map(r=>r.id==='approvals'?{...r,name:'延期记录'}:r);}
 function render() {
-  const [page] = route(); const a = actor();
+  if(!state)return;
+  const [page] = route(), a = actor(), nav=navigationRoutes();
   const pending = visibleExtensions().filter(x => x.status === 'pending').length;
-  app.innerHTML = `<div class="app-shell"><aside class="sidebar"><a href="#overview" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">鼎峰工作空间 <span class="workspace-badge">内部</span></div><div class="nav-section-label">工作空间</div><nav aria-label="主导航">${routes.map(r => `<a href="#${r.id}" class="nav-item ${page === r.id ? 'active' : ''}" ${page === r.id ? 'aria-current="page"' : ''}>${icon(r.icon)}<span class="nav-label">${r.name}</span>${r.id === 'approvals' && pending ? `<span class="nav-count">${pending}</span>` : ''}</a>`).join('')}</nav><div class="sidebar-bottom"><a href="#settings" class="nav-item ${page === 'settings' ? 'active' : ''}">${icon('settings')}<span class="nav-label">平台设置</span></a><div class="demo-note"><span class="demo-dot"></span><strong>框架演示</strong><span>数据仅保存在当前浏览器</span></div><div class="profile">${avatar(a.id)}<div><strong>${e(a.name)}</strong><span>${roleLabel(a.role)}</span></div></div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><span>工作空间</span>${icon('chevron')}<strong>${routes.find(r => r.id === page)?.name || '平台设置'}</strong></div><div class="topbar-actions"><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><label class="actor-switch"><span>演示身份</span><select id="actor-select" aria-label="切换演示身份">${state.users.map(u => `<option value="${e(u.id)}" ${u.id === actorId ? 'selected' : ''}>${e(u.name)} · ${roleLabel(u.role)}</option>`).join('')}</select></label>${avatar(a.id,'top-avatar')}</div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${[...routes,{id:'settings',name:'平台设置',icon:'settings'}].map(r => `<a href="#${r.id}" class="nav-item ${page === r.id ? 'active' : ''}">${icon(r.icon)}<span class="nav-label">${({overview:'流程',dashboard:'总览',projects:'项目',tasks:'任务',weekly:'周计划',approvals:'审批',team:'团队',settings:'设置'})[r.id]}</span></a>`).join('')}</nav></div></div>`;
+  const mobile=(isAdmin()?[routes.find(r=>r.id==='overview'),routes.find(r=>r.id==='dashboard'),routes.find(r=>r.id==='tasks'),routes.find(r=>r.id==='accounts'),routes.find(r=>r.id==='my-account')]:nav.filter(r=>r.id!=='approvals'));
+  const navLink=r=>`<a href="#${r.id}" class="nav-item ${page===r.id?'active':''}" ${page===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${r.name}</span>${r.id==='approvals'&&pending?`<span class="nav-count">${pending}</span>`:''}</a>`;
+  app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'} <span class="workspace-badge">${isAdmin()?'管理端':'员工端'}</span></div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>云端保存 · 独立账号</div><div class="profile">${avatar(a.id)}<div><strong>${e(a.name)}</strong><span>${roleLabel(a.role)}</span></div></div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><span>${isAdmin()?'管理端':'员工端'}</span>${icon('chevron')}<strong>${routes.find(r=>r.id===page)?.name||'平台设置'}</strong></div><div class="topbar-actions"><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${roleLabel(a.role)}</small></span></a><a href="/signout-with-chatgpt?return_to=/" target="_top" class="signout-link" aria-label="退出登录">${icon('logout')}</a></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" class="nav-item ${page===r.id?'active':''}">${icon(r.icon)}<span class="nav-label">${({overview:'流程',dashboard:'总览',tasks:'任务',projects:'项目',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span></a>`).join('')}</nav></div></div>`;
   renderContent();
 }
 function renderContent() {
   const [page,id] = route();
+  if(!canAccessRoute(actor(),page)){document.title='无访问权限 · 鼎峰协同管理';document.querySelector('#content').innerHTML=empty('当前账号没有此页面的访问权限','管理员与员工使用不同工作台。','<a class="button primary" href="#tasks">返回我的任务</a>');return;}
   let html;
   if (searchTerm.trim()) html = searchPage();
   else if (page === 'projects' && id) html = projectDetail(id);
-  else html = ({overview:overviewPage,dashboard:dashboardPage,projects:projectsPage,tasks:tasksPage,weekly:weeklyPage,approvals:approvalsPage,team:teamPage,settings:settingsPage}[page] || overviewPage)();
+  else html = ({overview:overviewPage,dashboard:dashboardPage,projects:projectsPage,tasks:tasksPage,weekly:weeklyPage,approvals:approvalsPage,team:teamPage,settings:settingsPage,accounts:accountsPage,'my-account':myAccountPage}[page] || overviewPage)();
   document.querySelector('#content').innerHTML = (storageIssue ? `<div class="notice warning">${icon('alert')}<span>${e(storageIssue)}</span></div>` : '') + html;
   document.querySelectorAll('[data-project-flow]').forEach(bindFlowCanvas);
   document.title = `${searchTerm ? '搜索' : routes.find(r => r.id === page)?.name || '平台设置'} · 鼎峰协同管理`;
@@ -134,7 +144,7 @@ function dashboardPage() {
   const projects=visibleProjects(),tasks=visibleTasks(),w=weekRange(currentDay());
   const nodes=visibleMilestones(),required=nodes.filter(m=>m.status!=='done'&&m.dueDate<=w.end),pending=visibleExtensions().filter(x=>x.status==='pending');
   const logs=state.logs.filter(l=>isAdmin()||projects.some(p=>p.id===l.projectId)).slice().sort((a,b)=>b.at.localeCompare(a.at)).slice(0,10);
-  return heading('管理后台',isAdmin()?'全公司项目、节点、人员与审批数据，在这里统一汇总。':'当前显示与你相关的项目数据；管理员可查看全公司数据。',button(isAdmin()?'导出全部演示数据':'导出可见项目数据','export-data','','secondary','download'))+`<div class="metrics"><a class="metric" href="#projects"><div class="metric-label">项目总数 ${icon('grid')}</div><div class="metric-value">${projects.length}<span class="metric-unit">个</span></div><div class="metric-foot">${projects.filter(p=>projectProgress(state,p.id)>=100).length} 个已完成 · ${tasks.length} 项任务</div></a><a class="metric" href="#weekly"><div class="metric-label">本周待完成大节点 ${icon('calendar')}</div><div class="metric-value metric-warning">${required.length}<span class="metric-unit">个</span></div><div class="metric-foot">${required.filter(m=>m.dueDate<currentDay()).length} 个已逾期，需优先处理</div></a><button type="button" class="metric" data-action="show-overdue"><div class="metric-label">逾期任务 ${icon('clock')}</div><div class="metric-value">${tasks.filter(overdue).length}<span class="metric-unit">项</span></div><div class="metric-foot">另有 ${tasks.filter(t=>t.status==='review').length} 项成果待验收</div></button><a class="metric" href="#approvals"><div class="metric-label">待审批延期 ${icon('approval')}</div><div class="metric-value">${pending.length}<span class="metric-unit">项</span></div><div class="metric-foot">批准前，原执行计划继续生效</div></a></div><div class="admin-quicklinks"><a href="#team">${icon('users')}人员完成率与工作量 ${icon('arrow')}</a><a href="#weekly">${icon('calendar')}周节点与汇总 ${icon('arrow')}</a><a href="#approvals">${icon('approval')}所有延期与审批记录 ${icon('arrow')}</a></div>${weeklyRequiredPanel(projects)}${adminProjectTable(projects)}<section class="panel admin-data-panel"><div class="panel-header"><div><h2>全局操作记录</h2><p class="panel-subtitle">任务、节点、计划变更与审批均可追溯 · 最近 10 条</p></div></div><div class="activity-list">${logs.map(l=>`<div class="activity-item"><span class="activity-dot"></span><div class="activity-body"><p><strong>${e(user(l.actorId)?.name||'系统')}</strong> ${e(l.message)}</p><span class="activity-time">${fullDate(l.at)}${l.projectId?` · ${e(project(l.projectId)?.name)}`:''}</span></div></div>`).join('')||'<p class="muted">暂无操作记录。</p>'}</div></section>`;
+  return heading('管理后台',isAdmin()?'全公司项目、节点、人员与审批数据，在这里统一汇总。':'当前显示与你相关的项目数据；管理员可查看全公司数据。',button(isAdmin()?'导出全部项目数据':'导出可见项目数据','export-data','','secondary','download'))+`<div class="metrics"><a class="metric" href="#projects"><div class="metric-label">项目总数 ${icon('grid')}</div><div class="metric-value">${projects.length}<span class="metric-unit">个</span></div><div class="metric-foot">${projects.filter(p=>projectProgress(state,p.id)>=100).length} 个已完成 · ${tasks.length} 项任务</div></a><a class="metric" href="#weekly"><div class="metric-label">本周待完成大节点 ${icon('calendar')}</div><div class="metric-value metric-warning">${required.length}<span class="metric-unit">个</span></div><div class="metric-foot">${required.filter(m=>m.dueDate<currentDay()).length} 个已逾期，需优先处理</div></a><button type="button" class="metric" data-action="show-overdue"><div class="metric-label">逾期任务 ${icon('clock')}</div><div class="metric-value">${tasks.filter(overdue).length}<span class="metric-unit">项</span></div><div class="metric-foot">另有 ${tasks.filter(t=>t.status==='review').length} 项成果待验收</div></button><a class="metric" href="#approvals"><div class="metric-label">待审批延期 ${icon('approval')}</div><div class="metric-value">${pending.length}<span class="metric-unit">项</span></div><div class="metric-foot">批准前，原执行计划继续生效</div></a></div><div class="admin-quicklinks"><a href="#team">${icon('users')}人员完成率与工作量 ${icon('arrow')}</a><a href="#weekly">${icon('calendar')}周节点与汇总 ${icon('arrow')}</a><a href="#approvals">${icon('approval')}所有延期与审批记录 ${icon('arrow')}</a></div>${weeklyRequiredPanel(projects)}${adminProjectTable(projects)}<section class="panel admin-data-panel"><div class="panel-header"><div><h2>全局操作记录</h2><p class="panel-subtitle">任务、节点、计划变更与审批均可追溯 · 最近 10 条</p></div></div><div class="activity-list">${logs.map(l=>`<div class="activity-item"><span class="activity-dot"></span><div class="activity-body"><p><strong>${e(user(l.actorId)?.name||'系统')}</strong> ${e(l.message)}</p><span class="activity-time">${fullDate(l.at)}${l.projectId?` · ${e(project(l.projectId)?.name)}`:''}</span></div></div>`).join('')||'<p class="muted">暂无操作记录。</p>'}</div></section>`;
 }
 function projectsPage() {
   let projects = visibleProjects();
@@ -173,7 +183,7 @@ function projectWorkspace(p,home=false) {
   let view;
   if(projectView==='list')view=`<div class="detail-grid"><section class="panel"><div class="panel-header"><h2>任务计划 <span class="count">${ts.length}</span></h2></div><div class="task-list">${ts.map(t=>taskRow(t,false)).join('')||empty('还没有任务','先添加一个阶段节点，再拆分具体任务。')}</div></section><section class="panel milestone-panel"><div class="panel-header"><h2>阶段节点</h2></div><div class="milestone-list">${ms.map(m=>milestoneCard(m,true)).join('')||empty('规划第一个大节点','每周对应一个可验收成果。')}</div></section></div>`;
   else if(projectView==='history')view=`<section class="panel"><div class="panel-header"><h2>项目操作记录</h2><span class="muted">最近 ${logs.length} 条</span></div><div class="activity-list">${logs.map(l=>`<div class="activity-item"><span class="activity-dot"></span><div class="activity-body"><p><strong>${e(user(l.actorId)?.name||'系统')}</strong> ${e(l.message)}</p><span class="activity-time">${fullDate(l.at)}</span></div></div>`).join('')||'<p class="muted">暂无记录。</p>'}</div></section>`;
-  else view=renderProjectFlow(state,p,{canManage:canManage(p)});
+  else view=renderProjectFlow(state,p,{canManage:canManage(p),actorId,scope:flowScope,expandedIds:[...expandedFlowIds]});
   return `<div class="project-workspace">${projectHeader}${summary}${extension}${tabs}${view}</div>`;
 }
 function milestoneDetail(id) {
@@ -189,7 +199,7 @@ function tasksPage() {
   if(taskFilter==='overdue') tasks=tasks.filter(overdue);
   if(taskFilter==='done') tasks=tasks.filter(t=>t.status==='done');
   tasks=tasks.slice().sort((a,b)=>(a.status==='done')-(b.status==='done') || a.dueDate.localeCompare(b.dueDate));
-  return heading('我的任务','明确今天的重点，让每一份交付都有着落。',visibleProjects().some(canManage)?button('新建任务','new-task','','primary','plus'):'')+`<div class="filters"><div class="filter-tabs">${[['mine','我负责的'],['review',`待我验收 ${all.filter(t=>t.status==='review'&&canReview(t)).length}`],['all','全部任务'],['overdue','已逾期'],['done','已完成']].map(([id,label])=>`<button class="filter-tab ${taskFilter===id?'active':''}" data-action="task-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${tasks.length} 项任务</span></div><section class="panel"><div class="task-list">${tasks.map(t=>taskRow(t)).join('')||empty('当前没有此类任务',taskFilter==='mine'?'你负责的任务会出现在这里。可切换演示身份体验成员工作台。':'调整筛选条件，或继续推进其他任务。')}</div></section><p class="page-note">任务可以跨多天进行；每天更新进展，提交后由指定验收人确认。</p>`;
+  return heading('我的任务','明确今天的重点，让每一份交付都有着落。',visibleProjects().some(canManage)?button('新建任务','new-task','','primary','plus'):'')+`<div class="filters"><div class="filter-tabs">${[['mine','我负责的'],['review',`待我验收 ${all.filter(t=>t.status==='review'&&canReview(t)).length}`],['all','全部任务'],['overdue','已逾期'],['done','已完成']].map(([id,label])=>`<button class="filter-tab ${taskFilter===id?'active':''}" data-action="task-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${tasks.length} 项任务</span></div><section class="panel"><div class="task-list">${tasks.map(t=>taskRow(t)).join('')||empty('当前没有此类任务',taskFilter==='mine'?'管理员分配给你的任务会出现在这里。':'调整筛选条件，或继续推进其他任务。')}</div></section><p class="page-note">任务可以跨多天进行；每天更新进展，提交后由指定验收人确认。</p>`;
 }
 function milestoneCard(m, compact=false) {
   const ts=state.tasks.filter(t=>t.milestoneId===m.id), done=ts.filter(t=>t.status==='done').length, p=project(m.projectId);
@@ -210,11 +220,47 @@ function approvalCard(x) {
 }
 function teamPage() {
   const r=range(), ids=new Set(visibleProjects().flatMap(p=>[p.ownerId,...p.memberIds])); const people=isAdmin()?state.users:actor().role==='member'?[actor()]:state.users.filter(u=>ids.has(u.id)); const scopedState={...state,tasks:visibleTasks()};
-  return heading('团队与效能','同时关注完成、及时与质量，让每一份贡献清晰可见。',isAdmin()?button('添加成员','new-user','','primary','plus'):'')+`<div class="toolbar"><div><strong>本周执行情况</strong><span class="muted"> ${fullDate(r.start)} — ${fullDate(r.end)}</span></div><div>${button('上一周','previous-week','','small ghost')}${button('本周','current-week','','small secondary')}${button('下一周','next-week','','small ghost')}</div></div><div class="notice info">${icon('users')}<span>按所选周截止日期统计，包含本周尚未到期任务；用于观察计划执行，非员工绩效排名。按时率以提交时间为准，验收等待不算作成员提交延误。</span></div><section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>团队成员</th><th>部门 / 角色</th><th>本周计划完成率</th><th>按时提交率</th><th>一次验收通过率</th><th>当前负荷</th></tr></thead><tbody>${people.map(u=>{const s=memberStats(scopedState,u.id,r.start,r.end), pending=scopedState.tasks.filter(t=>t.ownerId===u.id&&t.status!=='done');return `<tr><td>${person(u.id)}<span class="cell-subtext person-title">${e(u.title)}</span></td><td>${e(u.department)}<span class="cell-subtext">${roleLabel(u.role)}</span></td><td>${rate(s.completionRate,s.completed,s.due)}</td><td>${rate(s.onTimeRate,s.onTime,s.due)}</td><td>${rate(s.firstPassRate,s.firstPassed,s.firstReviewed)}</td><td><strong>${pending.length}</strong> 项<span class="cell-subtext">${pending.filter(t=>t.status==='review').length} 项待验收 · ${pending.filter(overdue).length} 项逾期</span></td></tr>`}).join('')}</tbody></table></div></section><div class="metrics-note"><h3>指标如何计算</h3><p>本周计划完成率 = 所选周内截止且已验收任务 ÷ 所选周内截止任务（包含尚未到期任务）。按时提交率 = 截止时间前提交的任务 ÷ 本周到期任务。一次验收通过率 = 本周计划任务中首次验收通过的任务 ÷ 这些任务中已发生首次验收的任务。没有可统计任务时显示「—」。</p><p>获批调整的任务按新日期统计；项目原截止日期和全部审批记录仍然保留。</p></div>`;
+  return heading('团队与效能','同时关注完成、及时与质量，让每一份贡献清晰可见。',isAdmin()?'<a class="button primary" href="#accounts">管理团队账号</a>':'')+`<div class="toolbar"><div><strong>本周执行情况</strong><span class="muted"> ${fullDate(r.start)} — ${fullDate(r.end)}</span></div><div>${button('上一周','previous-week','','small ghost')}${button('本周','current-week','','small secondary')}${button('下一周','next-week','','small ghost')}</div></div><div class="notice info">${icon('users')}<span>按所选周截止日期统计，包含本周尚未到期任务；用于观察计划执行，非员工绩效排名。按时率以提交时间为准，验收等待不算作成员提交延误。</span></div><section class="panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>团队成员</th><th>部门 / 角色</th><th>本周计划完成率</th><th>按时提交率</th><th>一次验收通过率</th><th>当前负荷</th></tr></thead><tbody>${people.map(u=>{const s=memberStats(scopedState,u.id,r.start,r.end), pending=scopedState.tasks.filter(t=>t.ownerId===u.id&&t.status!=='done');return `<tr><td>${person(u.id)}<span class="cell-subtext person-title">${e(u.title)}</span></td><td>${e(u.department)}<span class="cell-subtext">${roleLabel(u.role)}</span></td><td>${rate(s.completionRate,s.completed,s.due)}</td><td>${rate(s.onTimeRate,s.onTime,s.due)}</td><td>${rate(s.firstPassRate,s.firstPassed,s.firstReviewed)}</td><td><strong>${pending.length}</strong> 项<span class="cell-subtext">${pending.filter(t=>t.status==='review').length} 项待验收 · ${pending.filter(overdue).length} 项逾期</span></td></tr>`}).join('')}</tbody></table></div></section><div class="metrics-note"><h3>指标如何计算</h3><p>本周计划完成率 = 所选周内截止且已验收任务 ÷ 所选周内截止任务（包含尚未到期任务）。按时提交率 = 截止时间前提交的任务 ÷ 本周到期任务。一次验收通过率 = 本周计划任务中首次验收通过的任务 ÷ 这些任务中已发生首次验收的任务。没有可统计任务时显示「—」。</p><p>获批调整的任务按新日期统计；项目原截止日期和全部审批记录仍然保留。</p></div>`;
 }
 const rate=(pct,n,d)=>`<span class="rate ${pct!==null&&pct>=80?'positive':''}">${pct===null || pct===undefined?'—':`${Math.round(pct)}%`}</span><span class="cell-subtext">${n ?? 0} / ${d ?? 0} 项</span>`;
 function settingsPage() {
-  return heading('平台设置','管理演示数据，了解当前框架的使用边界。')+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>当前版本</dt><dd>框架演示 v1.0</dd></div><div><dt>存储方式</dt><dd>当前浏览器本地存储</dd></div><div><dt>当前身份</dt><dd>${e(actor().name)} · ${roleLabel(actor().role)}</dd></div></dl><p class="muted">顶部「演示身份」用于体验角色权限；当前版本没有真实登录、服务器或多人同步。</p></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>数据与备份</h2><p>管理员可导出全部项目数据，其他演示身份导出其可见的项目、任务、成员、延期申请和操作记录。备份为 JSON 文件，方便后续迁移到正式后台。</p><div class="settings-actions">${button('导出演示数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务 · ${dataForExport().users.length} 位成员</p></section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>项目进度 = 已达成节点权重 ÷ 全部节点权重。</li><li>延期申请只有管理员可以批准，申请人与审批人分离。</li><li>调整后的日期与原始计划同时保留。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('settings')}</div><h2>重置演示</h2><p>恢复初始项目和示例任务。你在当前浏览器新增或修改的数据会被覆盖，建议先导出备份。</p>${button('重置演示数据','reset-confirm','','danger')}</section></div>`;
+  let hasLegacy=false;try{hasLegacy=!!localStorage.getItem(LEGACY_KEY);}catch{}
+  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>ChatGPT 独立账号</dd></div><div><dt>数据存储</dt><dd>云端数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>数据备份</h2><p>导出当前可见的项目、任务、成员和审批记录。备份不包含账号登录信息。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到云端。可先导出备份，避免覆盖云端记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部大节点验收通过，项目进度才达到 100%。</li><li>延期申请与审批人分离，批准后才调整日期。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>先在账号管理中登记员工的 ChatGPT 登录邮箱，再在站点共享设置中允许同一邮箱访问本站。两处都开通后，员工才可登录。</p><p class="cell-subtext">当前站点仍保留私有访问范围；创建平台账号不会自动发送邀请或开放站点。</p></section></div>`;
+}
+function myAccountPage() {
+  const a=actor(),w=weekRange(currentDay()),s=memberStats(state,a.id,w.start,w.end);
+  return heading('我的账号','当前身份由 ChatGPT 登录确认，权限由平台管理员分配。')+`<div class="account-profile-card"><div class="account-profile-head">${avatar(a.id)}<div><h2>${e(a.name)}</h2><span>${e(a.title||roleLabel(a.role))} · ${e(a.department||'工作空间')}</span></div><span class="status ${isAdmin()?'green':'blue'}">${isAdmin()?'管理端':'员工端'}</span></div><dl class="account-profile-details"><div><dt>登录邮箱</dt><dd>${e(accountInfo?.email||'—')}</dd></div><div><dt>平台角色</dt><dd>${roleLabel(a.role)}</dd></div><div><dt>可见项目</dt><dd>${visibleProjects().length} 个${isAdmin()?' · 全部项目':' · 仅参与的项目'}</dd></div><div><dt>数据存储</dt><dd>云端保存</dd></div></dl><p class="field-help">${isAdmin()?'你可以管理项目、审批延期、查看团队数据，并开通员工账号。':'你可以查看参与项目、处理自己的任务并提交成果。项目负责人可安排所负责项目的计划。'}</p><div class="my-account-links">${isAdmin()?'<a href="#settings" class="text-link">平台设置与数据备份</a><a href="#team" class="text-link">团队与效能</a>':'<a href="#approvals" class="text-link">查看延期记录</a>'}</div><a class="button secondary" href="/signout-with-chatgpt?return_to=/" target="_top">退出当前账号</a></div><section class="panel personal-stats"><div class="panel-header"><h2>我本周的执行情况</h2><span class="muted">${shortDate(w.start)} — ${shortDate(w.end)}</span></div><div class="personal-stats-grid"><div><span>计划完成率</span>${rate(s.completionRate,s.completed,s.due)}</div><div><span>按时提交率</span>${rate(s.onTimeRate,s.onTime,s.due)}</div><div><span>一次验收通过率</span>${rate(s.firstPassRate,s.firstPassed,s.firstReviewed)}</div></div></section>`;
+}
+async function loadAccounts() {
+  if(!isAdmin()||accountsLoading)return;
+  accountsLoading=true;
+  try{accountsData=await api('/api/accounts');if(route()[0]==='accounts'&&!modal.open)renderContent();}
+  catch(error){toast(error.message,true);if(error.status===401||error.status===403)await loadSession(true);}
+  finally{accountsLoading=false;}
+}
+function accountsPage() {
+  if(!accountsData){if(!accountsLoading)queueMicrotask(loadAccounts);return heading('账号管理','管理员与员工分别登录，权限由服务器执行。')+'<div class="panel session-loading" role="status">正在加载账号…</div>';}
+  const list=accountsData.accounts,active=list.filter(x=>x.status==='active'),unlinked=state.users.filter(u=>!list.some(x=>x.userId===u.id));
+  return heading('账号管理','登记员工的登录邮箱，分配角色，并关联已有项目成员。',button('开通账号','new-account','','primary','plus'))+`<div class="account-summary"><span><strong>${active.length}</strong> 已启用账号</span><span><strong>${list.filter(x=>x.role==='admin').length}</strong> 管理员</span><span><strong>${unlinked.length}</strong> 位成员尚未关联账号</span><button class="text-link" data-action="refresh-accounts">刷新列表</button></div><div class="account-access-note">${icon('users')}<div><strong>管理端与员工端独立使用</strong><p>开通账号后，还需在本站的共享设置中授权同一邮箱访问。员工用自己的 ChatGPT 账号登录，系统自动进入员工工作台；这里不会自动发送邀请。</p></div></div><section class="panel"><div class="table-wrap"><table class="data-table account-table"><thead><tr><th>姓名 / 登录邮箱</th><th>角色与工作台</th><th>账号状态</th><th>登录关联</th><th>操作</th></tr></thead><tbody>${list.map(a=>`<tr><td><strong>${e(a.name)}</strong><span class="cell-subtext">${e(a.email)}</span></td><td>${roleLabel(a.role)}<span class="cell-subtext">${a.role==='admin'?'管理端 · 全局数据':'员工端 · 参与项目'}</span></td><td>${statusPill(a.status==='active'?'done':'blocked',a.status==='active'?'已启用':'已停用')}</td><td>${a.linked?'已绑定 ChatGPT':'等待首次登录'}<span class="cell-subtext">${a.lastLoginAt?`最近登录 ${fullDate(a.lastLoginAt)}`:'请使用登记的邮箱登录'}</span></td><td>${button('管理','edit-account',a.id,'small secondary')}${a.userId===actorId?'<span class="cell-subtext">当前账号</span>':''}</td></tr>`).join('')}</tbody></table></div></section>${unlinked.length?`<section class="panel unlinked-members"><div class="panel-header"><div><h2>尚未开通账号的项目成员</h2><p class="panel-subtitle">业务中的负责人记录不会自动成为登录账号。开通时选择“关联已有成员”即可保留原有任务归属。</p></div></div><div class="unlinked-member-list">${unlinked.map(u=>`<span>${avatar(u.id)}${e(u.name)}<small>${roleLabel(u.role)}</small></span>`).join('')}</div></section>`:''}`;
+}
+function accountRoleOptions(selected='member') {return [['member','员工'],['manager','项目负责人'],['admin','管理员']].map(([id,label])=>`<option value="${id}" ${selected===id?'selected':''}>${label}</option>`).join('');}
+function newAccount() {
+  if(!isAdmin())return;
+  const linked=new Set((accountsData?.accounts||[]).map(a=>a.userId));
+  showModal('开通独立账号',`<p class="form-intro">登记对方实际用于 ChatGPT 登录的邮箱。员工无法自己选择或提升角色。</p><div class="form-grid">${field('登录邮箱','email','','email','required maxlength="254" autocomplete="off"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号角色','role',accountRoleOptions())}${selectField('关联项目成员','existingUserId','<option value="new">创建新成员</option>'+state.users.filter(u=>!linked.has(u.id)).map(u=>`<option value="${e(u.id)}">${e(u.name)} · ${roleLabel(u.role)}</option>`).join(''))}${field('职位','title','','text','maxlength="40"')}${field('部门','department','','text','maxlength="40"')}</div><p class="field-help">关联已有成员将保留其任务和项目归属，并使用上面的姓名、角色。管理员可以访问全部公司数据，请谨慎分配。</p>`,'开通账号','create-account');
+}
+function editAccount(id) {
+  const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
+  const own=a.userId===actorId;
+  showModal('管理账号',`<p class="form-intro"><strong>${e(a.name)}</strong><br>${e(a.email)}</p>${selectField('账号角色','role',accountRoleOptions(a.role))}${selectField('账号状态','status',`<option value="active" ${a.status==='active'?'selected':''}>启用</option><option value="disabled" ${a.status==='disabled'?'selected':''} ${own?'disabled':''}>停用</option>`)}<p class="field-help">${own?'不能停用当前账号，也不能移除最后一名管理员。':'停用后，该账号立即失去平台数据访问和操作权限。项目与任务历史记录仍会保留。'} 修改角色不会自动变更项目负责人或任务归属。</p>`,'保存账号设置','edit-account',id);
+}
+async function saveAccount(action,payload,id) {
+  if(saving)return;saving=true;const submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
+  try{
+    if(!payload.existingUserId||payload.existingUserId==='new')delete payload.existingUserId;
+    const data=await api(action==='create-account'?'/api/accounts':`/api/accounts/${encodeURIComponent(id)}`,{method:action==='create-account'?'POST':'PATCH',body:JSON.stringify({...payload,revision:accountsData?.revision??revision})});
+    acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();render();toast(action==='create-account'?'账号已开通；请确认站点共享权限也已授予该邮箱。':'账号设置已保存。');
+  }catch(error){if(error.status===409)await loadAccounts();throw error;}finally{saving=false;if(submit)submit.disabled=false;}
 }
 function searchPage() {
   const q=searchTerm.trim().toLowerCase(), ps=visibleProjects().filter(p=>`${p.name} ${p.description} ${p.code}`.toLowerCase().includes(q)),ts=visibleTasks().filter(t=>`${t.title} ${t.description} ${user(t.ownerId)?.name}`.toLowerCase().includes(q));
@@ -265,7 +311,7 @@ function newExtension(projectId) {
   showModal('申请项目延期',`<p class="form-intro">填写特殊原因和后续安排，由另一位管理员审批后生效。</p>${selectField('申请延期的项目','projectId',projectOptions(p.id))}<div id="extension-dates">${extensionFields(p.id)}</div><div class="form-grid">${textarea('延期原因','reason','说明造成延期的特殊情况。')}${textarea('后续推进安排','plan','如何解决问题，延长期间将完成哪些工作？')}${textarea('影响范围','impact','对交付、人员安排和其他项目有什么影响？')}</div>`,'提交延期申请','requestExtension');
 }
 function reviewExtension(id,approve) { const x=state.extensions.find(x=>x.id===id);showModal(approve?'批准项目延期':'驳回延期申请',`<p class="form-intro">${e(project(x.projectId)?.name)}</p><div class="date-change"><div class="date-box"><span>当前截止</span><strong>${fullDate(x.originalDueDate)}</strong></div>${icon('arrow')}<div class="date-box"><span>申请调整至</span><strong>${fullDate(x.newDueDate)}</strong></div></div><p class="field-help">${approve?`批准后同步修改 ${(x.affectedMilestones||[]).length} 个节点与 ${(x.affectedTasks||[]).length} 项任务，保留原始截止日期。`:'驳回后所有日期保持不变，申请人可查看审批意见。'}</p>${textarea('审批意见','comment',approve?'说明批准理由及需要注意的事项。':'请说明驳回原因及建议。')}`,approve?'确认批准':'确认驳回',approve?'approveExtension':'rejectExtension',id); }
-function newUser() { showModal('添加团队成员',`<p class="form-intro">成员添加到当前演示工作空间，可在新建项目时加入项目组。</p><div class="form-grid">${field('姓名','name','','text','required maxlength="30"')}${field('职位','title','','text','required maxlength="40"')}${field('部门','department','','text','required maxlength="40"')}${selectField('角色','role','<option value="member">项目成员</option><option value="manager">项目负责人</option><option value="admin">管理员</option>')}</div><p class="field-help">添加成员不会发送邀请，也不会创建真实登录账号。</p>`,'添加成员','addUser'); }
+
 function dataForExport() {
   if(isAdmin()) return state;
   const projects=visibleProjects(),ids=new Set(projects.map(p=>p.id));
@@ -277,26 +323,34 @@ function dataForExport() {
   return {...state,projects,tasks,milestones,extensions,logs,users:state.users.filter(u=>users.has(u.id))};
 }
 function exportFile(name,body,type) {const blob=new Blob([body],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('文件已生成，请查看浏览器下载。');}
-function exportWeek() {const {r,ts,ms,done,blocked,late}=reportData();const lines=[`# 鼎峰项目周报`,`${r.start} — ${r.end}`,'',`统计范围：${isAdmin()?'所有项目':`${actor().name} 可见项目`}`,'',`## 本周概况`,`- 到期任务：${ts.length} 项`,`- 已验收完成：${done.length} 项`,`- 周节点达成：${ms.filter(m=>m.status==='done').length}/${ms.length}`,`- 逾期任务：${late.length} 项；受阻任务：${blocked.length} 项`,'','## 已完成工作',...done.map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${project(t.projectId)?.name}）`),'','## 本周里程碑',...ms.map(m=>`- ${m.title}：${m.status==='done'?'已达成':'未达成'}；截止 ${m.dueDate}`),'','## 风险与待协调',...[...new Map([...late,...blocked].map(t=>[t.id,t])).values()].map(t=>`- ${t.title}：${t.blocker || `超过截止日期 ${t.dueDate}`}`),'','## 下周到期任务',...visibleTasks().filter(t=>inRange(t.dueDate,{start:shift(r.start,7),end:shift(r.end,7)})).map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${t.dueDate}）`),'','## 负责人补充与确认','请补充延期原因、需要协调的资源与下周重点。','','此文件为浏览器本地演示数据自动汇总。'];exportFile(`鼎峰周报_${r.start}.md`,lines.join('\n'),'text/markdown;charset=utf-8');}
+function exportWeek() {const {r,ts,ms,done,blocked,late}=reportData();const lines=[`# 鼎峰项目周报`,`${r.start} — ${r.end}`,'',`统计范围：${isAdmin()?'所有项目':`${actor().name} 可见项目`}`,'',`## 本周概况`,`- 到期任务：${ts.length} 项`,`- 已验收完成：${done.length} 项`,`- 周节点达成：${ms.filter(m=>m.status==='done').length}/${ms.length}`,`- 逾期任务：${late.length} 项；受阻任务：${blocked.length} 项`,'','## 已完成工作',...done.map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${project(t.projectId)?.name}）`),'','## 本周里程碑',...ms.map(m=>`- ${m.title}：${m.status==='done'?'已达成':'未达成'}；截止 ${m.dueDate}`),'','## 风险与待协调',...[...new Map([...late,...blocked].map(t=>[t.id,t])).values()].map(t=>`- ${t.title}：${t.blocker || `超过截止日期 ${t.dueDate}`}`),'','## 下周到期任务',...visibleTasks().filter(t=>inRange(t.dueDate,{start:shift(r.start,7),end:shift(r.end,7)})).map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${t.dueDate}）`),'','## 负责人补充与确认','请补充延期原因、需要协调的资源与下周重点。','','此文件根据当前可见的云端项目数据自动汇总。'];exportFile(`鼎峰周报_${r.start}.md`,lines.join('\n'),'text/markdown;charset=utf-8');}
 
-document.addEventListener('click',event=>{
+document.addEventListener('click',async event=>{
   if(event.target.closest('.skip-link')){event.preventDefault();document.querySelector('#content')?.focus();return;}
   const el=event.target.closest('[data-action]');if(!el)return;const {action,id}=el.dataset;
   if(el.closest('form')&&el.type!=='submit')event.preventDefault();
   try {
+    if(action==='reload-session'){await loadSession();if(state&&route()[0]==='accounts')await loadAccounts();return;}
+    if(action==='refresh-accounts'){await loadAccounts();return;}
+    if(!state)return;
+    if(action==='flow-filter'){flowScope=['all','week','mine'].includes(id)?id:'all';renderContent();document.querySelector(`[data-action="flow-filter"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
+    if(action==='flow-toggle'){const viewport=document.querySelector('.flow-scroll'),pos=viewport&&[viewport.scrollLeft,viewport.scrollTop];expandedFlowIds.has(id)?expandedFlowIds.delete(id):expandedFlowIds.add(id);renderContent();const next=document.querySelector('.flow-scroll');if(next&&pos){next.scrollLeft=pos[0];next.scrollTop=pos[1];}document.querySelector(`[data-action="flow-toggle"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
+    if(action==='new-account')return newAccount();
+    if(action==='edit-account')return editAccount(id);
+    if(action==='export-legacy'){const old=localStorage.getItem(LEGACY_KEY);if(old)exportFile('鼎峰旧版浏览器备份.json',old,'application/json;charset=utf-8');return;}
     if(action==='close-modal'){modal.close();return;}
     if(action==='new-project')return newProject();
     if(action==='new-task'){newTask(id,el.dataset.milestoneId);if(el.dataset.milestoneId){const f=modal.querySelector('form[data-form="createTask"]');if(f){f.elements.milestoneId.value=el.dataset.milestoneId;const m=milestone(el.dataset.milestoneId);if(m){f.elements.dueDate.max=m.dueDate;if(f.elements.dueDate.value>m.dueDate)f.elements.dueDate.value=m.dueDate;}}}return;}
     if(action==='new-milestone')return newMilestone(id);
     if(action==='new-extension')return newExtension(id);
-    if(action==='new-user')return newUser();
+    if(action==='new-user')return newAccount();
     if(action==='milestone-detail')return milestoneDetail(id);
     if(action==='project-view'){projectView=id;renderContent();return;}
     if(action==='task-detail')return taskDetail(id);
     if(action==='submit-task')return submitTask(id);
     if(action==='approve-task'||action==='reject-task')return reviewTask(id,action==='approve-task');
     if(action==='approve-extension'||action==='reject-extension')return reviewExtension(id,action==='approve-extension');
-    if(action==='start-task')return commit('updateTask',{id,status:'doing'},'任务已开始，进度已保存。');
+    if(action==='start-task')return await commit('updateTask',{id,status:'doing'},'任务已开始，进度已保存。');
     if(action==='block-task')return showModal('标记任务受阻',`<p class="form-intro">${e(task(id)?.title)}</p>${textarea('受阻原因与需要的支持','blocker','例如：等待客户确认尺寸，需要项目负责人协调。')}`,'保存受阻情况','blockTask',id);
     if(action==='complete-milestone')return showModal('确认节点达成',`<p class="form-intro">${e(milestone(id)?.title)}</p><p>确认这个节点的交付成果已达到要求。系统会检查所有关联任务是否已验收，确认后计入项目总进度。</p>`,'确认达成','completeMilestone',id);
     if(action==='project-filter'){projectFilter=id;renderContent();return;}
@@ -309,31 +363,32 @@ document.addEventListener('click',event=>{
     if(action==='clear-search'){searchTerm='';render();return;}
     if(action==='export-week')return exportWeek();
     if(action==='export-data')return exportFile(`鼎峰管理平台备份_${currentDay()}.json`,JSON.stringify(dataForExport(),null,2),'application/json;charset=utf-8');
-    if(action==='reset-confirm')return showModal('重置当前浏览器的演示数据',`<div class="notice warning">${icon('alert')}<span>你新增或修改的项目、任务和审批记录会被初始示例覆盖。</span></div><p>此操作无法撤销。请先在平台设置导出备份。</p><label class="checkbox-label reset-checkbox"><input name="confirmReset" type="checkbox" required>我已了解，并确认重置演示数据</label>`,'确认重置','reset');
+
   } catch(error){toast(error.message,true);}
 });
-document.addEventListener('submit',event=>{
+document.addEventListener('submit',async event=>{
   const form=event.target.closest('form[data-form]');if(!form)return;event.preventDefault();const data=new FormData(form),payload=Object.fromEntries(data),action=form.dataset.form,id=form.dataset.id;const err=form.querySelector('.form-error');
   try {
-    if(action==='createProject'){payload.memberIds=data.getAll('memberIds');return commit(action,payload,'项目已创建，可以开始添加里程碑与任务。');}
-    if(action==='createTask'){return commit(action,payload,'任务已创建并分配。');}
-    if(action==='createMilestone'){return commit(action,{...payload,projectId:id,weight:Number(payload.weight)},'里程碑已添加。');}
-    if(action==='submitTask')return commit(action,{id,deliverable:payload.deliverable},'成果已提交，等待验收。');
-    if(action==='approveTask'||action==='rejectTask')return commit('reviewTask',{id,approve:action==='approveTask',comment:payload.comment},action==='approveTask'?'任务已通过验收。':'任务已退回，等待负责人修改。');
-    if(action==='blockTask')return commit('updateTask',{id,status:'blocked',blocker:payload.blocker},'受阻原因已记录。');
-    if(action==='completeMilestone')return commit(action,{id},'里程碑已达成，项目总进度已更新。');
-    if(action==='requestExtension'){payload.affectedTasks=data.getAll('taskIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));payload.affectedMilestones=data.getAll('milestoneIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));return commit(action,payload,'延期申请已提交，等待管理员审批。');}
-    if(action==='approveExtension'||action==='rejectExtension')return commit('reviewExtension',{id,approve:action==='approveExtension',comment:payload.comment},action==='approveExtension'?'延期已批准，相关计划已同步更新。':'延期申请已驳回，原计划保持不变。');
-    if(action==='addUser')return commit(action,payload,'团队成员已添加，可切换演示身份体验。');
-    if(action==='reset'){if(!data.get('confirmReset'))throw new Error('请先确认重置。');const next=createSeedState();save(next);state=next;actorId=state.users.find(u=>u.role==='admin')?.id||state.users[0].id;storageIssue='';modal.close();searchTerm='';render();toast('演示数据已恢复。');}
-  } catch(error){err.hidden=false;err.textContent=error.message;err.scrollIntoView({block:'nearest'});}
+    if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
+    if(action==='createProject'){payload.memberIds=data.getAll('memberIds');return await commit(action,payload,'项目已创建，可以开始添加里程碑与任务。');}
+    if(action==='createTask'){return await commit(action,payload,'任务已创建并分配。');}
+    if(action==='createMilestone'){return await commit(action,{...payload,projectId:id,weight:Number(payload.weight)},'里程碑已添加。');}
+    if(action==='submitTask')return await commit(action,{id,deliverable:payload.deliverable},'成果已提交，等待验收。');
+    if(action==='approveTask'||action==='rejectTask')return await commit('reviewTask',{id,approve:action==='approveTask',comment:payload.comment},action==='approveTask'?'任务已通过验收。':'任务已退回，等待负责人修改。');
+    if(action==='blockTask')return await commit('updateTask',{id,status:'blocked',blocker:payload.blocker},'受阻原因已记录。');
+    if(action==='completeMilestone')return await commit(action,{id},'里程碑已达成，项目总进度已更新。');
+    if(action==='requestExtension'){payload.affectedTasks=data.getAll('taskIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));payload.affectedMilestones=data.getAll('milestoneIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));return await commit(action,payload,'延期申请已提交，等待管理员审批。');}
+    if(action==='approveExtension'||action==='rejectExtension')return await commit('reviewExtension',{id,approve:action==='approveExtension',comment:payload.comment},action==='approveExtension'?'延期已批准，相关计划已同步更新。':'延期申请已驳回，原计划保持不变。');
+
+  } catch(error){if(err&&modal.open){err.hidden=false;err.textContent=error.message;err.scrollIntoView({block:'nearest'});}else toast(error.message,true);}
 });
 document.addEventListener('change',event=>{
   const el=event.target;
-  if(el.id==='flow-project-select'){flowProjectId=el.value;projectView='flow';renderContent();return;}
-  if(el.id==='actor-select'){actorId=el.value;try{localStorage.setItem(ACTOR_KEY,actorId);}catch(_){}searchTerm='';modal.close();render();toast(`已切换为 ${actor().name} · ${roleLabel(actor().role)}`);return;}
+  if(el.id==='flow-project-select'){flowProjectId=el.value;projectView='flow';expandedFlowIds.clear();renderContent();return;}
+
   if(el.dataset.reschedule){const input=modal.querySelector(`[data-reschedule-date="${CSS.escape(el.dataset.reschedule)}"]`);if(input){input.disabled=!el.checked;input.required=el.checked;}return;}
   const form=el.closest('form');if(!form)return;
+  if(form.dataset.form==='create-account'&&el.name==='existingUserId'){const u=user(el.value);if(u){form.elements.name.value=u.name;form.elements.role.value=u.role;form.elements.title.value=u.title||'';form.elements.department.value=u.department||'';}return;}
   if(el.name==='projectId'&&form.dataset.form==='requestExtension'){document.querySelector('#extension-dates').innerHTML=extensionFields(el.value);return;}
   if(form.dataset.form==='createTask'&&el.name==='projectId'){
     const p=project(el.value),ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done');
@@ -348,7 +403,9 @@ document.addEventListener('change',event=>{
 });
 document.addEventListener('input',event=>{if(event.target.id==='global-search'){searchTerm=event.target.value;renderContent();}});
 document.addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();document.querySelector('#global-search')?.focus();}});
-window.addEventListener('hashchange',()=>{searchTerm='';modal.close();render();window.scrollTo({top:0,behavior:'instant'});});
-window.addEventListener('storage',event=>{if(event.key===KEY&&event.newValue){try{const next=JSON.parse(event.newValue);if(validState(next)){state=next;if(!user(actorId))actorId=state.users[0].id;modal.close();render();toast('已同步当前浏览器另一个标签页的数据。');}}catch(_){toast('其他标签页的数据无法读取，请先导出当前备份。',true);}}});
+window.addEventListener('hashchange',()=>{searchTerm='';modal.close();render();if(route()[0]==='accounts')loadAccounts();window.scrollTo({top:0,behavior:'instant'});});
+
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)modal.close();}});
-render();
+app.innerHTML='<div class="session-loading" role="status">正在载入你的工作台…</div>';
+await loadSession();
+setInterval(()=>{if(state&&!document.hidden&&!modal.open&&!saving&&route()[0]!=='accounts'&&!searchTerm)loadSession(true);},45000);

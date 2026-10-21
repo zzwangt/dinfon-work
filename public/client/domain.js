@@ -1,6 +1,6 @@
 /**
- * 鼎峰项目协作 · 演示领域模型。
- * 这些权限校验用于本地交互演示；正式环境必须由服务端认证、鉴权和存储。
+ * 鼎峰项目协作 · 共享领域模型。
+ * 正式环境由 server/service.mjs 在受信任的登录身份和云端数据上执行这些规则。
  */
 
 const ROLES = ['admin', 'manager', 'member'];
@@ -70,7 +70,12 @@ function manageProject(actor, project) {
   check(actor.role === 'admin' || actor.id === project.ownerId, '仅项目负责人或管理员可以执行此操作');
 }
 
+function requireProjectAccess(actor, project) {
+  check(actor.role === 'admin' || actor.id === project.ownerId || project.memberIds.includes(actor.id), '你已无权访问该项目，请联系项目负责人');
+}
+
 function canChangeTask(actor, task, project) {
+  requireProjectAccess(actor, project);
   check(actor.role === 'admin' || actor.id === task.ownerId || actor.id === project.ownerId, '只能更新自己负责的任务');
   check(task.status !== 'done', '已验收任务不能直接修改');
   check(task.status !== 'review', '任务正在等待验收，请由验收人处理');
@@ -182,6 +187,7 @@ export function transact(state, action, payload = {}, actorId) {
     record(project.id, `更新任务“${task.title}”${task.status === 'blocked' ? `，阻塞原因：${task.blocker}` : ''}`);
   } else if (action === 'submitTask') {
     const task = find(next.tasks, payload.id, '任务');
+    requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
     check(actor.id === task.ownerId || actor.role === 'admin', '仅任务负责人或管理员可以提交成果');
     check(['todo', 'doing', 'blocked'].includes(task.status), '该任务已提交或已完成');
     task.deliverable = text(payload.deliverable, '成果说明或链接', 4000);
@@ -191,6 +197,7 @@ export function transact(state, action, payload = {}, actorId) {
     record(task.projectId, `提交任务“${task.title}”的成果，等待验收`);
   } else if (action === 'reviewTask') {
     const task = find(next.tasks, payload.id, '任务');
+    requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
     check(actor.role === 'admin' || actor.id === task.reviewerId, '仅指定验收人或管理员可以验收任务');
     check(actor.id !== task.ownerId, '不能验收自己负责的任务');
     check(task.status === 'review', '仅待验收任务可以进行验收');

@@ -36,8 +36,8 @@ test('project owner is first and membership is deduplicated', () => {
 test('only current-project responsibilities are shown with accurate task counts', () => {
   const { state, project } = fixture();
   const html = renderProjectTeam(state, project);
-  assert.match(html, /未完成 <strong>2<\/strong>.*已完成 <strong>1<\/strong>/);
-  assert.match(html, /当前待验收 <strong>1<\/strong> 项/);
+  assert.match(html, /已完成 <strong>1 \/ 3<\/strong>/);
+  assert.match(html, /待验收 <strong>1<\/strong> 项/);
   assert.match(html, /data-action="task-detail" data-id="t-a"/);
   assert.match(html, /data-action="task-detail" data-id="t-b"/);
   assert.doesNotMatch(html, /t-out|其他项目秘密任务/);
@@ -47,9 +47,9 @@ test('reviewer-only people appear separately and do not inflate membership summa
   const { state, project } = fixture();
   const html = renderProjectTeam(state, project);
   assert.match(html, /验收协作/);
-  assert.match(html, /负责成果验收，不计入项目成员人数/);
+  assert.match(html, /不计入项目成员人数/);
   const reviewerRow = html.slice(html.indexOf('data-team-person="reviewer"'));
-  assert.match(reviewerRow, /验收职责/);
+  assert.match(reviewerRow, /验收任务/);
   assert.doesNotMatch(reviewerRow, /负责的任务/);
   const summary = renderProjectPeopleSummary(state, project);
   assert.match(summary, /负责人甲/);
@@ -57,6 +57,18 @@ test('reviewer-only people appear separately and do not inflate membership summa
   assert.match(summary, /另有 1 名验收协作/);
   assert.doesNotMatch(summary, /验收丁/);
   assert.match(summary, /data-action="project-view" data-id="people"/);
+});
+
+test('legacy blocked tasks render as in progress without losing ownership or actions', () => {
+  const { state, project } = fixture();
+  state.tasks[0].status = 'blocked';
+  const before = structuredClone({ state, project });
+  const html = renderProjectTeam(state, project);
+  assert.match(html, /data-action="task-detail" data-id="t-a"[^>]*完成样机，进行中/);
+  assert.match(html, /project-team-task-status is-doing/);
+  assert.match(html, /已完成 <strong>1 \/ 3<\/strong>/);
+  assert.doesNotMatch(html, /受阻|is-blocked/);
+  assert.deepEqual({ state, project }, before);
 });
 
 test('missing profiles and empty projects are safely explained', () => {

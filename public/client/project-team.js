@@ -4,7 +4,7 @@ const textOr = (value, fallback) => typeof value === 'string' && value.trim() ? 
 const svg = path => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 const peopleIcon = svg('<circle cx="9" cy="8" r="3"/><path d="M3 21v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M21 21v-2a6 6 0 0 0-4-5.65"/>');
 const arrowIcon = svg('<path d="M4 12h16m-5-5 5 5-5 5"/>');
-const taskStates = { todo: ['未开始', 'todo'], doing: ['进行中', 'doing'], review: ['待验收', 'review'], done: ['已完成', 'done'], blocked: ['受阻', 'blocked'] };
+const taskStates = { todo: ['未开始', 'todo'], doing: ['进行中', 'doing'], review: ['待验收', 'review'], done: ['已完成', 'done'] };
 
 function collect(state = {}, project = {}) {
   const users = new Map((Array.isArray(state.users) ? state.users : []).filter(Boolean).map(user => [user.id, user]));
@@ -23,7 +23,8 @@ function collect(state = {}, project = {}) {
 
 function taskList(tasks, responsibility) {
   return `<ul class="project-team-task-list">${tasks.map(task => {
-    const [label, tone] = Object.hasOwn(taskStates, task.status) ? taskStates[task.status] : ['状态待确认', 'todo'];
+    const status = task.status === 'blocked' ? 'doing' : task.status;
+    const [label, tone] = Object.hasOwn(taskStates, status) ? taskStates[status] : ['状态待确认', 'todo'];
     const title = textOr(task.title, '未命名任务');
     const contents = `<span class="project-team-task-title">${escape(title)}</span><span class="project-team-task-status is-${tone}"><i aria-hidden="true"></i>${label}</span>${arrowIcon}`;
     return `<li>${validId(task.id) ? `<button type="button" class="project-team-task" data-action="task-detail" data-id="${escape(task.id)}" aria-label="查看${responsibility}：${escape(title)}，${label}">${contents}</button>` : `<div class="project-team-task">${contents}</div>`}</li>`;
@@ -39,8 +40,8 @@ function personRow(context, project, id, kind = 'member') {
   const owner = id === project.ownerId;
   const role = owner ? '项目负责人' : kind === 'reviewer' ? '验收协作' : kind === 'collaborator' ? '任务协作' : '项目成员';
   const initial = person.missing ? '?' : Array.from(person.name).slice(-1).join('');
-  const execution = kind !== 'reviewer' ? `<div class="project-team-duty"><div class="project-team-duty-heading"><h3>负责的任务 <span>${owned.length}</span></h3><p>未完成 <strong>${owned.length - completed}</strong><span aria-hidden="true"> · </span>已完成 <strong>${completed}</strong></p></div>${owned.length ? taskList(owned, '负责的任务') : '<p class="project-team-empty-duty">尚未分配执行任务</p>'}</div>` : '';
-  const review = reviewing.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>验收职责 <span>${reviewing.length}</span></h3><p>当前待验收 <strong>${awaitingReview}</strong> 项</p></div>${taskList(reviewing, '负责验收的任务')}</div>` : '';
+  const execution = kind !== 'reviewer' ? `<div class="project-team-duty"><div class="project-team-duty-heading"><h3>执行任务 <span>${owned.length}</span></h3>${owned.length ? `<p>已完成 <strong>${completed} / ${owned.length}</strong></p>` : ''}</div>${owned.length ? taskList(owned, '负责的任务') : '<p class="project-team-empty-duty">尚未分配执行任务</p>'}</div>` : '';
+  const review = reviewing.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>验收任务 <span>${reviewing.length}</span></h3>${awaitingReview ? `<p>待验收 <strong>${awaitingReview}</strong> 项</p>` : ''}</div>${taskList(reviewing, '负责验收的任务')}</div>` : '';
   return `<li class="project-team-row${owner ? ' is-owner' : ''}" data-team-person="${escape(id)}"><div class="project-team-person"><span class="project-team-avatar${kind === 'reviewer' ? ' is-reviewer' : ''}" aria-hidden="true">${escape(initial)}</span><div><div class="project-team-person-name"><h3>${escape(person.name)}</h3><span class="project-team-role${owner ? ' is-owner' : ''}">${role}</span></div><p>${escape(person.department)}<span aria-hidden="true"> · </span>${escape(person.title)}</p>${person.missing ? '<small>当前没有此成员的资料</small>' : ''}</div></div><div class="project-team-duties">${execution}${review}</div></li>`;
 }
 
@@ -57,7 +58,7 @@ export function renderProjectPeopleSummary(state = {}, project = {}) {
 export function renderProjectTeam(state = {}, project = {}) {
   const context = collect(state, project);
   const members = context.memberIds.length ? `<ul class="project-team-list">${context.memberIds.map(id => personRow(context, project, id)).join('')}</ul>` : '<div class="project-team-empty"><h3>尚未设置项目成员</h3><p>成员加入项目后，这里会显示每个人的具体分工。</p></div>';
-  const collaborators = context.collaboratorIds.length ? `<section class="project-team-support"><header><h3>任务协作人员 <span>${context.collaboratorIds.length}</span></h3><p>以下人员承担本项目任务，但未列入项目成员名单。</p></header><ul class="project-team-list">${context.collaboratorIds.map(id => personRow(context, project, id, 'collaborator')).join('')}</ul></section>` : '';
-  const reviewers = context.reviewerIds.length ? `<section class="project-team-support is-review"><header><h3>验收协作 <span>${context.reviewerIds.length}</span></h3><p>以下人员负责成果验收，不计入项目成员人数。</p></header><ul class="project-team-list">${context.reviewerIds.map(id => personRow(context, project, id, 'reviewer')).join('')}</ul></section>` : '';
-  return `<section class="panel project-team"><header class="panel-header project-team-header"><div><h2>项目人员与分工</h2><p class="panel-subtitle">查看谁负责执行、谁负责验收，点击任务查看具体工作。</p></div><span class="project-team-total">${context.memberIds.length} 名项目成员</span></header>${members}${collaborators}${reviewers}</section>`;
+  const collaborators = context.collaboratorIds.length ? `<section class="project-team-support"><header><h3>任务协作人员 <span>${context.collaboratorIds.length}</span></h3><p>项目组外的执行人员</p></header><ul class="project-team-list">${context.collaboratorIds.map(id => personRow(context, project, id, 'collaborator')).join('')}</ul></section>` : '';
+  const reviewers = context.reviewerIds.length ? `<section class="project-team-support is-review"><header><h3>验收协作 <span>${context.reviewerIds.length}</span></h3><p>不计入项目成员人数</p></header><ul class="project-team-list">${context.reviewerIds.map(id => personRow(context, project, id, 'reviewer')).join('')}</ul></section>` : '';
+  return `<section class="panel project-team"><header class="panel-header project-team-header"><h2>项目人员与分工</h2><span class="project-team-total">${context.memberIds.length} 名项目成员</span></header>${members}${collaborators}${reviewers}</section>`;
 }

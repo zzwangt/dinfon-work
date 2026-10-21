@@ -1,4 +1,4 @@
-import { createSeedState, transact } from '../public/client/domain.js';
+import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
 
 const WORKSPACE_ID = 'main';
@@ -63,10 +63,9 @@ async function readWorkspace(db) {
   if (!row) return null;
   const value = JSON.parse(row.payload);
   if (!value || !Array.isArray(value.accounts) || !value.state || !Number.isSafeInteger(row.revision)) throw new Error('Invalid workspace');
-  // Existing v1 workspaces predate node applications. Add an empty collection in
-  // the loaded copy, preserving every stored business record and revision.
-  if (value.state.milestoneRequests === undefined) value.state.milestoneRequests = [];
-  if (!Array.isArray(value.state.milestoneRequests)) throw new Error('Invalid milestone requests');
+  // Normalize retired statuses only in the loaded copy. Reading does not reset
+  // business history, change deadlines or advance the stored revision.
+  value.state = normalizeState(value.state);
   return { ...value, revision: row.revision };
 }
 

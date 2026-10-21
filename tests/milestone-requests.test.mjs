@@ -5,13 +5,13 @@ import { addDays, createSeedState, projectProgress, today, transact } from '../p
 const byId = (list, id) => list.find((item) => item.id === id);
 const createInput = (overrides = {}) => ({
   projectId: 'p-mower', kind: 'create', title: '追加可靠性检查',
-  dueDate: addDays(today(), 11), weight: 10, reason: '覆盖补充的场景和交付要求', ...overrides,
+  dueDate: addDays(today(), 11), reason: '覆盖补充的场景和交付要求', ...overrides,
 });
 const updateInput = (state, overrides = {}) => {
   const milestone = byId(state.milestones, 'm-mower-2');
   return {
     projectId: milestone.projectId, kind: 'update', milestoneId: milestone.id,
-    title: `${milestone.title}与复核`, dueDate: milestone.dueDate, weight: milestone.weight,
+    title: `${milestone.title}与复核`, dueDate: milestone.dueDate,
     reason: '完善验收内容与节点安排', ...overrides,
   };
 };
@@ -23,7 +23,7 @@ const livePlan = (state) => ({ projects: state.projects, milestones: state.miles
 test('new requests retain an exact audit record while every live plan and progress remains unchanged', () => {
   const state = createSeedState();
   const before = structuredClone(state);
-  const input = createInput({ title: '  追加可靠性检查  ', weight: '10' });
+  const input = createInput({ title: '  追加可靠性检查  ' });
   const next = transact(state, 'requestMilestone', input, 'u-engineer');
   assert.deepEqual(state, before);
   assert.deepEqual(livePlan(next), livePlan(state));
@@ -37,7 +37,7 @@ test('new requests retain an exact audit record while every live plan and progre
   assert.equal(request.applicantId, 'u-engineer');
   assert.equal(request.milestoneId, null);
   assert.equal(request.before, null);
-  assert.deepEqual(request.proposed, { title: '追加可靠性检查', dueDate: input.dueDate, weight: 10 });
+  assert.deepEqual(request.proposed, { title: '追加可靠性检查', dueDate: input.dueDate });
   assert.equal(request.status, 'pending');
   assert.equal(request.reviewedAt, null);
   assert.equal(request.reviewerId, null);
@@ -71,7 +71,7 @@ test('create approval adds the proposed milestone with a preserved initial date 
   assert.equal(added.title, createInput().title);
   assert.equal(added.dueDate, createInput().dueDate);
   assert.equal(added.originalDueDate, added.dueDate);
-  assert.equal(added.weight, 10);
+  assert.equal(Object.hasOwn(added, 'weight'), false);
   assert.equal(added.status, 'pending');
   assert.equal(added.acceptedAt, null);
   assert.deepEqual(approved.tasks, state.tasks);
@@ -80,7 +80,7 @@ test('create approval adds the proposed milestone with a preserved initial date 
   assert.equal(approved.milestoneRequests[0].milestoneId, null);
   assert.equal(approved.milestoneRequests[0].reviewerId, 'u-admin');
   assert.ok(approved.milestoneRequests[0].reviewedAt);
-  assert.equal(projectProgress(approved, 'p-mower'), 23);
+  assert.equal(projectProgress(approved, 'p-mower'), 25);
 });
 
 test('one administrator can submit then approve their own request in separate transactions', () => {
@@ -94,13 +94,13 @@ test('one administrator can submit then approve their own request in separate tr
 test('update requests capture the node snapshot and only approval changes editable fields', () => {
   const state = createSeedState();
   const old = byId(state.milestones, 'm-mower-2');
-  const input = updateInput(state, { dueDate: addDays(old.dueDate, 2), weight: 55 });
+  const input = updateInput(state, { dueDate: addDays(old.dueDate, 2) });
   const pending = transact(state, 'requestMilestone', input, 'u-qa');
   assert.deepEqual(livePlan(pending), livePlan(state));
-  assert.deepEqual(pending.milestoneRequests[0].before, { title: old.title, dueDate: old.dueDate, weight: old.weight, status: old.status });
+  assert.deepEqual(pending.milestoneRequests[0].before, { title: old.title, dueDate: old.dueDate, status: old.status });
   const approved = review(pending);
   const updated = byId(approved.milestones, old.id);
-  assert.deepEqual(updated, { ...old, title: input.title, dueDate: input.dueDate, weight: input.weight });
+  assert.deepEqual(updated, { ...old, title: input.title, dueDate: input.dueDate });
   assert.equal(updated.originalDueDate, old.originalDueDate);
   assert.deepEqual(approved.tasks, state.tasks);
   assert.deepEqual(approved.projects, state.projects);
@@ -141,9 +141,6 @@ test('request validation rejects bad fields, nonexistent dates and out-of-projec
   for (const kind of [undefined, 'delete', 'createMilestone']) assert.throws(() => attempt({ kind }), /类型无效/);
   assert.throws(() => attempt({ title: ' ' }), /节点名称/);
   assert.throws(() => attempt({ title: '名'.repeat(101) }), /不能超过 100/);
-  for (const weight of [undefined, null, '', ' ', 0, -1, 101, NaN, Infinity, true, {}, 'bad']) {
-    assert.throws(() => attempt({ weight }), /节点权重/);
-  }
   assert.throws(() => attempt({ reason: '' }), /申请原因/);
   assert.throws(() => attempt({ reason: '因'.repeat(2001) }), /不能超过 2000/);
   assert.throws(() => attempt({ dueDate: '2026-02-30' }), /节点截止日期无效/);
@@ -155,14 +152,14 @@ test('request validation rejects bad fields, nonexistent dates and out-of-projec
 test('completed nodes and updates with no actual change cannot enter approval', () => {
   const state = createSeedState();
   const milestone = byId(state.milestones, 'm-mower-2');
-  assert.throws(() => transact(state, 'requestMilestone', updateInput(state, { title: milestone.title, weight: String(milestone.weight) }), 'u-engineer'), /没有实际变化/);
+  assert.throws(() => transact(state, 'requestMilestone', updateInput(state, { title: milestone.title }), 'u-engineer'), /没有实际变化/);
   assert.throws(() => transact(state, 'requestMilestone', updateInput(state, { milestoneId: 'm-mower-1' }), 'u-admin'), /已完成节点/);
 });
 
 test('a node has one pending update and a project has one pending new request for the same name', () => {
   const state = createSeedState();
   let pending = transact(state, 'requestMilestone', updateInput(state), 'u-engineer');
-  assert.throws(() => transact(pending, 'requestMilestone', updateInput(state, { weight: 50 }), 'u-qa'), /已有待审批的修改申请/);
+  assert.throws(() => transact(pending, 'requestMilestone', updateInput(state, { title: '另一项修改' }), 'u-qa'), /已有待审批的修改申请/);
   pending = transact(state, 'requestMilestone', createInput(), 'u-engineer');
   assert.throws(() => transact(pending, 'requestMilestone', createInput({ title: '  追加可靠性检查  ' }), 'u-qa'), /同名节点的待审批新增申请/);
   assert.equal(transact(pending, 'requestMilestone', createInput({ projectId: 'p-pcb', dueDate: addDays(today(), 6) }), 'u-engineer').milestoneRequests.length, 2);
@@ -177,13 +174,12 @@ test('a proposed earlier milestone cannot overtake any linked task and no task d
 });
 
 test('approval rejects any changed target snapshot and retains pending status atomically', () => {
-  for (const field of ['title', 'dueDate', 'weight', 'status']) {
+  for (const field of ['title', 'dueDate', 'status']) {
     const initial = createSeedState();
     const state = transact(initial, 'requestMilestone', updateInput(initial), 'u-engineer');
     const target = byId(state.milestones, 'm-mower-2');
     if (field === 'title') target.title += '另一个版本';
     if (field === 'dueDate') target.dueDate = addDays(target.dueDate, 1);
-    if (field === 'weight') target.weight += 1;
     if (field === 'status') target.status = 'done';
     const before = structuredClone(state);
     assert.throws(() => review(state), /节点计划已变化|已完成节点/);
@@ -198,7 +194,7 @@ test('a competing approved project extension makes an earlier node-update snapsh
   const target = byId(state.milestones, 'm-pcb-2');
   const pending = transact(state, 'requestMilestone', {
     projectId: target.projectId, kind: 'update', milestoneId: target.id,
-    title: `${target.title}与复核`, dueDate: target.dueDate, weight: target.weight, reason: '补充复核',
+    title: `${target.title}与复核`, dueDate: target.dueDate, reason: '补充复核',
   }, 'u-engineer');
   const extended = transact(pending, 'reviewExtension', { id: 'e-pending', approve: true, comment: '同意延期' }, 'u-admin');
   const before = structuredClone(extended);
@@ -254,14 +250,14 @@ test('approval rechecks current project dates and saved proposal validation', ()
   const pending = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
   for (const change of [
     (state) => { byId(state.projects, 'p-mower').dueDate = today(); },
-    (state) => { state.milestoneRequests[0].proposed.weight = 0; },
+    (state) => { state.milestoneRequests[0].proposed.dueDate = 'invalid'; },
     (state) => { state.milestoneRequests[0].proposed.title = ''; },
     (state) => { state.milestoneRequests[0].reason = ''; },
   ]) {
     const state = structuredClone(pending);
     change(state);
     const before = structuredClone(state);
-    assert.throws(() => review(state), /项目延期|节点权重|节点名称|申请原因/);
+    assert.throws(() => review(state), /项目延期|节点截止日期|节点名称|申请原因/);
     assert.deepEqual(state, before);
   }
 });
@@ -306,4 +302,68 @@ test('legacy v1 states acquire an empty request collection without being mutated
   assert.equal(transact(state, 'requestMilestone', createInput(), 'u-engineer').milestoneRequests.length, 1);
   assert.deepEqual(state, before);
   assert.throws(() => transact({ ...state, milestoneRequests: {} }, 'requestMilestone', createInput(), 'u-engineer'), /节点申请数据无效/);
+});
+
+test('retired weight input is ignored and cannot create a new weight-only change request', () => {
+  const state = createSeedState();
+  for (const weight of [0, -1, 200, 'invalid', null]) {
+    const pending = transact(state, 'requestMilestone', createInput({ weight }), 'u-engineer');
+    assert.deepEqual(pending.milestoneRequests[0].proposed, { title: createInput().title, dueDate: createInput().dueDate });
+    assert.equal(Object.hasOwn(review(pending).milestones.at(-1), 'weight'), false);
+  }
+  const existing = byId(state.milestones, 'm-mower-2');
+  existing.weight = 40;
+  assert.throws(() => transact(state, 'requestMilestone', updateInput(state, { title: existing.title, weight: 80 }), 'u-engineer'), /没有实际变化/);
+  const pending = transact(state, 'requestMilestone', updateInput(state, { weight: 80 }), 'u-engineer');
+  assert.equal(Object.hasOwn(pending.milestoneRequests[0].before, 'weight'), false);
+  assert.equal(Object.hasOwn(pending.milestoneRequests[0].proposed, 'weight'), false);
+  assert.equal(byId(review(pending).milestones, existing.id).weight, 40);
+});
+
+test('legacy create requests retain their audit weights but create an unweighted live milestone', () => {
+  const state = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
+  state.milestoneRequests[0].proposed.weight = 15;
+  const before = structuredClone(state);
+  const approved = review(state);
+  assert.deepEqual(state, before);
+  assert.equal(approved.milestoneRequests[0].proposed.weight, 15);
+  assert.equal(Object.hasOwn(approved.milestones.at(-1), 'weight'), false);
+  assert.deepEqual(approved.projects, state.projects);
+  assert.deepEqual(approved.tasks, state.tasks);
+});
+
+test('legacy update requests compare active fields and do not apply or overwrite historic weights', () => {
+  const initial = createSeedState();
+  const state = transact(initial, 'requestMilestone', updateInput(initial), 'u-engineer');
+  const request = state.milestoneRequests[0];
+  request.before.weight = 40;
+  request.proposed.weight = 55;
+  byId(state.milestones, request.milestoneId).weight = 90;
+  const before = structuredClone(state);
+  const approved = review(state);
+  const target = byId(approved.milestones, request.milestoneId);
+  assert.deepEqual(state, before);
+  assert.equal(target.title, request.proposed.title);
+  assert.equal(target.weight, 90);
+  assert.equal(target.originalDueDate, byId(state.milestones, target.id).originalDueDate);
+  assert.deepEqual(approved.milestoneRequests[0].before, request.before);
+  assert.deepEqual(approved.milestoneRequests[0].proposed, request.proposed);
+  assert.deepEqual(approved.tasks, state.tasks);
+});
+
+test('a historic weight-only request can be closed without changing dates, progress or live nodes', () => {
+  const initial = createSeedState();
+  const state = transact(initial, 'requestMilestone', updateInput(initial), 'u-engineer');
+  const request = state.milestoneRequests[0];
+  request.before.weight = 40;
+  request.proposed = { title: request.before.title, dueDate: request.before.dueDate, weight: 55 };
+  byId(state.milestones, request.milestoneId).weight = 40;
+  const approved = review(state);
+  assert.equal(approved.milestoneRequests[0].status, 'approved');
+  assert.deepEqual(livePlan(approved), livePlan(state));
+  assert.equal(projectProgress(approved, 'p-mower'), projectProgress(state, 'p-mower'));
+  assert.match(approved.logs[0].message, /记录已结案，当前计划保持不变/);
+  const stale = structuredClone(state);
+  byId(stale.milestones, request.milestoneId).dueDate = addDays(request.before.dueDate, 1);
+  assert.throws(() => review(stale), /节点计划已变化/);
 });

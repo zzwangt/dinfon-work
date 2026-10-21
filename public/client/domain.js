@@ -101,18 +101,16 @@ function validateSchedule(state, project) {
 }
 
 function milestoneSnapshot(milestone) {
-  const { title, dueDate, weight, status } = milestone;
-  return { title, dueDate, weight, status };
+  const { title, dueDate, status } = milestone;
+  return { title, dueDate, status };
 }
 
 function milestoneProposal(payload, project) {
   const title = text(payload?.title, '节点名称', 100);
   const dueDate = validDate(payload?.dueDate, '节点截止日期');
-  const weight = Number(payload?.weight);
-  check(['number', 'string'].includes(typeof payload?.weight) && Number.isFinite(weight) && weight > 0 && weight <= 100, '节点权重必须大于 0 且不超过 100');
   check(dueDate >= project.startDate, '节点截止日期不能早于项目开始日期');
   check(dueDate <= project.dueDate, '节点截止日期超出项目周期，请先申请项目延期并获批');
-  return { title, dueDate, weight };
+  return { title, dueDate };
 }
 
 function validateMilestoneProposal(state, project, proposed, milestoneId) {
@@ -125,11 +123,23 @@ function validateMilestoneProposal(state, project, proposed, milestoneId) {
 
 export function projectProgress(state, projectId) {
   const milestones = state.milestones.filter((m) => m.projectId === projectId);
-  const total = milestones.reduce((sum, item) => sum + Number(item.weight || 0), 0);
+  const total = milestones.length;
   if (!total) return 0;
   if (milestones.every((item) => item.status === 'done')) return 100;
-  const done = milestones.filter((m) => m.status === 'done').reduce((sum, item) => sum + Number(item.weight || 0), 0);
+  const done = milestones.filter((m) => m.status === 'done').length;
   return Math.max(0, Math.min(99, Math.round(done / total * 100)));
+}
+
+/** Read compatibility only: retain historical fields and never mutate the input. */
+export function normalizeState(state) {
+  check(state?.version === 1, '数据版本不兼容，请重新载入演示数据');
+  const next = structuredClone(state);
+  next.milestoneRequests ??= [];
+  check(Array.isArray(next.milestoneRequests), '节点申请数据无效');
+  for (const task of next.tasks) {
+    if (task.status === 'blocked') task.status = 'doing';
+  }
+  return next;
 }
 
 /** All ratios use tasks due within this date window, preserving a comparable cohort. */
@@ -148,10 +158,7 @@ export function memberStats(state, userId, start, end) {
 }
 
 export function transact(state, action, payload = {}, actorId) {
-  check(state?.version === 1, '数据版本不兼容，请重新载入演示数据');
-  const next = structuredClone(state);
-  next.milestoneRequests ??= [];
-  check(Array.isArray(next.milestoneRequests), '节点申请数据无效');
+  const next = normalizeState(state);
   const actor = find(next.users, actorId, '操作人员');
   const at = new Date().toISOString();
   const record = (projectId, message) => next.logs.unshift({ id: uid('log'), at, actorId, projectId: projectId || null, message });
@@ -192,7 +199,7 @@ export function transact(state, action, payload = {}, actorId) {
       originalDueDate: validDate(payload.dueDate, '截止日期'), dueDate: payload.dueDate,
       status: 'todo', priority: payload.priority || 'normal', description: optionalText(payload.description),
       acceptance: text(payload.acceptance, '验收标准'), deliverable: '', submittedAt: null,
-      reviewedAt: null, reviewCount: 0, firstReviewPassed: null, reviewComment: '', blocker: '',
+      reviewedAt: null, reviewCount: 0, firstReviewPassed: null, reviewComment: '',
     };
     next.tasks.push(task);
     validateSchedule(next, project);
@@ -201,24 +208,21 @@ export function transact(state, action, payload = {}, actorId) {
     const task = find(next.tasks, payload.id, '任务');
     const project = find(next.projects, task.projectId, '项目');
     canChangeTask(actor, task, project);
+    check(payload.status !== 'blocked' && payload.blocker == null, '受阻功能已移除，请更新任务状态或说明');
     if (payload.status != null) {
-      check(['todo', 'doing', 'blocked'].includes(payload.status), '任务必须提交成果并通过验收后才能完成');
+      check(['todo', 'doing'].includes(payload.status), '任务必须提交成果并通过验收后才能完成');
       task.status = payload.status;
     }
     if (payload.description != null) task.description = optionalText(payload.description);
-    if (payload.blocker != null) task.blocker = optionalText(payload.blocker);
-    if (task.status === 'blocked') task.blocker = text(task.blocker, '阻塞原因');
-    else task.blocker = '';
-    record(project.id, `更新任务“${task.title}”${task.status === 'blocked' ? `，阻塞原因：${task.blocker}` : ''}`);
+    record(project.id, `更新任务“${task.title}”`);
   } else if (action === 'submitTask') {
     const task = find(next.tasks, payload.id, '任务');
     requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
     check(actor.id === task.ownerId || actor.role === 'admin', '仅任务负责人或管理员可以提交成果');
-    check(['todo', 'doing', 'blocked'].includes(task.status), '该任务已提交或已完成');
+    check(['todo', 'doing'].includes(task.status), '该任务已提交或已完成');
     task.deliverable = text(payload.deliverable, '成果说明或链接', 4000);
     task.submittedAt = at;
     task.status = 'review';
-    task.blocker = '';
     record(task.projectId, `提交任务“${task.title}”的成果，等待验收`);
   } else if (action === 'reviewTask') {
     const task = find(next.tasks, payload.id, '任务');
@@ -249,7 +253,7 @@ export function transact(state, action, payload = {}, actorId) {
       check(milestone.projectId === project.id, '节点不属于该项目');
       check(milestone.status !== 'done', '已完成节点不能修改');
       check(!next.milestoneRequests.some((item) => item.milestoneId === milestone.id && item.status === 'pending'), '该节点已有待审批的修改申请');
-      check(['title', 'dueDate', 'weight'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需提交申请');
+      check(['title', 'dueDate'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需提交申请');
       milestoneId = milestone.id;
       before = milestoneSnapshot(milestone);
     } else {
@@ -269,6 +273,7 @@ export function transact(state, action, payload = {}, actorId) {
     check(request.status === 'pending', '该节点申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
     const comment = text(payload.comment, payload.approve ? '审批意见' : '驳回原因');
+    let planChanged = false;
     if (payload.approve) {
       const project = find(next.projects, request.projectId, '项目');
       const applicant = find(next.users, request.applicantId, '申请人');
@@ -280,8 +285,12 @@ export function transact(state, action, payload = {}, actorId) {
         const milestone = find(next.milestones, request.milestoneId, '节点');
         check(milestone.projectId === project.id, '节点不属于该项目');
         check(milestone.status !== 'done', '已完成节点不能修改');
-        check(request.before && ['title', 'dueDate', 'weight', 'status'].every((key) => milestone[key] === request.before[key]), '节点计划已变化，请驳回后重新提交申请');
-        check(['title', 'dueDate', 'weight'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需批准');
+        check(request.before && ['title', 'dueDate', 'status'].every((key) => milestone[key] === request.before[key]), '节点计划已变化，请驳回后重新提交申请');
+        planChanged = ['title', 'dueDate'].some((key) => milestone[key] !== proposed[key]);
+        // Previously valid weight-only requests may still be closed; the retired
+        // field remains in their audit record but never changes the live plan.
+        const historicalWeightChange = Object.hasOwn(request.before, 'weight') && Object.hasOwn(request.proposed, 'weight') && request.before.weight !== request.proposed.weight;
+        check(planChanged || historicalWeightChange, '节点计划没有实际变化，无需批准');
         validateMilestoneProposal(next, project, proposed, milestone.id);
         // Keep the first agreed deadline and all task dates intact.
         Object.assign(milestone, proposed);
@@ -292,13 +301,14 @@ export function transact(state, action, payload = {}, actorId) {
           id: uid('m'), projectId: project.id, ...proposed,
           originalDueDate: proposed.dueDate, status: 'pending', acceptedAt: null,
         });
+        planChanged = true;
       }
     }
     request.status = payload.approve ? 'approved' : 'rejected';
     request.reviewedAt = at;
     request.reviewerId = actor.id;
     request.comment = comment;
-    record(request.projectId, `${payload.approve ? '批准' : '驳回'}${request.kind === 'create' ? '新增' : '修改'}节点申请“${request.proposed.title}”${payload.approve ? '，节点计划已生效，任务日期保持不变' : '，原计划继续生效'}；${comment}`);
+    record(request.projectId, `${payload.approve ? '批准' : '驳回'}${request.kind === 'create' ? '新增' : '修改'}节点申请“${request.proposed.title}”${payload.approve ? (planChanged ? '，节点计划已生效，任务日期保持不变' : '，记录已结案，当前计划保持不变') : '，原计划继续生效'}；${comment}`);
   } else if (action === 'completeMilestone') {
     const milestone = find(next.milestones, payload.id, '节点');
     const project = find(next.projects, milestone.projectId, '项目');
@@ -414,23 +424,23 @@ export function createSeedState() {
     { id: 'p-delivery', code: 'DF-004', name: '交付流程 · 标准化试运行', description: '明确项目交接标准、责任人与异常处理流程，完成一轮试运行。演示项目。', category: '运营管理', ownerId: 'u-ops', memberIds: ['u-ops', 'u-manager', 'u-qa'], startDate: d(-30), originalDueDate: d(-2), dueDate: d(6), color: '#8a749b' },
   ];
   const milestones = [
-    { id: 'm-mower-1', projectId: 'p-mower', title: '测试方案与准备', weight: 25, due: -10, done: true },
-    { id: 'm-mower-2', projectId: 'p-mower', title: '核心场景测试', weight: 40, due: 3 },
-    { id: 'm-mower-3', projectId: 'p-mower', title: '问题闭环与报告验收', weight: 35, due: 12 },
-    { id: 'm-pcb-1', projectId: 'p-pcb', title: '设计评审通过', weight: 35, due: -7, done: true },
-    { id: 'm-pcb-2', projectId: 'p-pcb', title: '样板联调完成', weight: 40, due: 2 },
-    { id: 'm-pcb-3', projectId: 'p-pcb', title: '交付资料验收', weight: 25, due: 7 },
-    { id: 'm-site-1', projectId: 'p-site', title: '内容结构确认', weight: 25, due: -8, done: true },
-    { id: 'm-site-2', projectId: 'p-site', title: '视觉方案通过', weight: 35, due: -2, done: true },
-    { id: 'm-site-3', projectId: 'p-site', title: '页面体验验收', weight: 40, due: 5 },
-    { id: 'm-delivery-1', projectId: 'p-delivery', title: '交接标准确认', weight: 30, due: -15, done: true },
-    { id: 'm-delivery-2', projectId: 'p-delivery', title: '流程模板验收', weight: 35, due: -8, done: true },
-    { id: 'm-delivery-3', projectId: 'p-delivery', title: '试运行复盘完成', weight: 35, due: 6, original: -2 },
+    { id: 'm-mower-1', projectId: 'p-mower', title: '测试方案与准备', due: -10, done: true },
+    { id: 'm-mower-2', projectId: 'p-mower', title: '核心场景测试', due: 3 },
+    { id: 'm-mower-3', projectId: 'p-mower', title: '问题闭环与报告验收', due: 12 },
+    { id: 'm-pcb-1', projectId: 'p-pcb', title: '设计评审通过', due: -7, done: true },
+    { id: 'm-pcb-2', projectId: 'p-pcb', title: '样板联调完成', due: 2 },
+    { id: 'm-pcb-3', projectId: 'p-pcb', title: '交付资料验收', due: 7 },
+    { id: 'm-site-1', projectId: 'p-site', title: '内容结构确认', due: -8, done: true },
+    { id: 'm-site-2', projectId: 'p-site', title: '视觉方案通过', due: -2, done: true },
+    { id: 'm-site-3', projectId: 'p-site', title: '页面体验验收', due: 5 },
+    { id: 'm-delivery-1', projectId: 'p-delivery', title: '交接标准确认', due: -15, done: true },
+    { id: 'm-delivery-2', projectId: 'p-delivery', title: '流程模板验收', due: -8, done: true },
+    { id: 'm-delivery-3', projectId: 'p-delivery', title: '试运行复盘完成', due: 6, original: -2 },
   ].map(({ due, original, done, ...m }) => ({ ...m, originalDueDate: d(original ?? due), dueDate: d(due), status: done ? 'done' : 'pending', acceptedAt: done ? at(due) : null }));
   const seeds = [
     ['t-01', 'p-mower', 'm-mower-1', '整理样机场景测试清单', 'u-qa', -11, 'done', 'normal'],
     ['t-02', 'p-mower', 'm-mower-2', '完成坡地行走连续测试', 'u-qa', 0, 'doing', 'high'],
-    ['t-03', 'p-mower', 'm-mower-2', '排查避障传感器误触发', 'u-engineer', -1, 'blocked', 'high'],
+    ['t-03', 'p-mower', 'm-mower-2', '排查避障传感器误触发', 'u-engineer', -1, 'doing', 'high'],
     ['t-04', 'p-mower', 'm-mower-2', '提交样机外观细节检查', 'u-design', 1, 'review', 'normal'],
     ['t-05', 'p-mower', 'm-mower-3', '汇总样机问题闭环报告', 'u-qa', 10, 'todo', 'normal'],
     ['t-06', 'p-pcb', 'm-pcb-1', '完成控制板原理图评审', 'u-engineer', -8, 'done', 'high'],
@@ -460,7 +470,6 @@ export function createSeedState() {
       submittedAt: submitted ? at(Math.min(due, -1)) : null,
       reviewedAt: reviewed ? at(due, '15') : null, reviewCount: reviewed ? (id === 't-11' ? 2 : 1) : 0,
       firstReviewPassed: reviewed ? id !== 't-11' : null, reviewComment: reviewed ? '演示成果已达到当前验收标准。' : '',
-      blocker: status === 'blocked' ? '等待替换传感器到货，已联系供应商确认时间。' : '',
     };
   });
   const extensions = [

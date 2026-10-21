@@ -278,7 +278,7 @@ test('stale account changes and identity reassignment fail without partial updat
 
 function nodeProposal(session, extra = {}) {
   const project = session.state.projects.find((entry) => entry.id === 'p-pcb');
-  return { projectId: project.id, kind: 'create', title: '补充接口验证', dueDate: project.dueDate, weight: 15, reason: '增加接口可靠性验证，保证交付前完成', ...extra };
+  return { projectId: project.id, kind: 'create', title: '补充接口验证', dueDate: project.dueDate, reason: '增加接口可靠性验证，保证交付前完成', ...extra };
 }
 
 test('staff node applications stay pending without changing live nodes until an admin approves', async (t) => {
@@ -307,6 +307,8 @@ test('staff node applications stay pending without changing live nodes until an 
   const newNode = saved.state.milestones.find((node) => !beforeNodes.some((old) => old.id === node.id));
   assert.equal(newNode.title, application.proposed.title);
   assert.equal(newNode.projectId, 'p-pcb');
+  assert.equal(Object.hasOwn(newNode, 'weight'), false);
+  assert.equal(Object.hasOwn(application.proposed, 'weight'), false);
   const refreshedStaff = await f.call('/api/session', ENGINEER);
   assert.ok(refreshedStaff.data.state.milestones.some((node) => node.id === newNode.id));
   assert.equal(refreshedStaff.data.state.milestoneRequests[0].status, 'approved');
@@ -318,11 +320,11 @@ test('node update requests preserve the original plan while pending or rejected'
   const existing = staff.data.state.milestones.find((node) => node.id === 'm-pcb-2');
   const response = await f.call('/api/command', ENGINEER, {
     revision: staff.data.revision, action: 'requestMilestone',
-    payload: nodeProposal(staff.data, { kind: 'update', milestoneId: existing.id, title: '样板联调与接口验证完成', dueDate: existing.dueDate, weight: existing.weight }),
+    payload: nodeProposal(staff.data, { kind: 'update', milestoneId: existing.id, title: '样板联调与接口验证完成', dueDate: existing.dueDate }),
   });
   assert.equal(response.status, 200, JSON.stringify(response.data));
   const application = response.data.state.milestoneRequests[0];
-  assert.deepEqual(application.before, { title: existing.title, dueDate: existing.dueDate, weight: existing.weight, status: existing.status });
+  assert.deepEqual(application.before, { title: existing.title, dueDate: existing.dueDate, status: existing.status });
   assert.deepEqual(f.stored().state.milestones.find((node) => node.id === existing.id), existing);
   const rejected = await f.call('/api/command', ADMIN, { revision: response.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: false, comment: '先完成原有联调范围，本次调整退回' } });
   assert.equal(rejected.status, 200, JSON.stringify(rejected.data));
@@ -428,4 +430,85 @@ test('existing v1 workspaces receive an empty request list without reset or read
   assert.deepEqual(saved.state.milestones, legacy.state.milestones);
   assert.deepEqual(saved.state.tasks, legacy.state.tasks);
   assert.deepEqual(saved.accounts, legacy.accounts);
+});
+
+test('legacy blocked tasks normalize on API reads without rewriting storage or exposing other projects', async (t) => {
+  const f = fixture(t);
+  await provision(f, ENGINEER, 'u-engineer');
+  const legacy = f.stored();
+  const own = legacy.state.tasks.find((task) => task.id === 't-03');
+  own.status = 'blocked';
+  own.blocker = '历史原因：等待物料';
+  legacy.state.tasks.find((task) => task.id === 't-13').status = 'blocked';
+  legacy.state.milestones[0].weight = 999;
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  const before = f.stored();
+  const staff = await f.call('/api/session', ENGINEER);
+  const admin = await f.call('/api/session');
+  assert.equal(staff.status, 200);
+  assert.equal(admin.status, 200);
+  assert.equal(staff.data.state.tasks.find((task) => task.id === own.id).status, 'doing');
+  assert.equal(staff.data.state.tasks.find((task) => task.id === own.id).blocker, own.blocker);
+  assert.ok(!staff.data.state.tasks.some((task) => task.id === 't-13'));
+  assert.ok(admin.data.state.tasks.every((task) => task.status !== 'blocked'));
+  assert.deepEqual(admin.data.state.milestones, legacy.state.milestones);
+  assert.deepEqual(admin.data.state.extensions, legacy.state.extensions);
+  assert.deepEqual(f.stored(), before);
+});
+
+test('legacy blocked tasks submit normally and new blocked writes fail without persisting migration', async (t) => {
+  const f = fixture(t);
+  await provision(f, ENGINEER, 'u-engineer');
+  const legacy = f.stored();
+  const task = legacy.state.tasks.find((entry) => entry.id === 't-03');
+  task.status = 'blocked';
+  task.blocker = '历史原因：等待物料';
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  const before = f.stored();
+  for (const payload of [{ status: 'blocked' }, { blocker: '新原因' }]) {
+    const rejected = await f.call('/api/command', ENGINEER, { revision: before.revision, action: 'updateTask', payload: { id: task.id, ...payload } });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.data.code, 'COMMAND_REJECTED');
+    assert.match(rejected.data.error, /受阻功能已移除/);
+    assert.deepEqual(f.stored(), before);
+  }
+  const submitted = await f.call('/api/command', ENGINEER, { revision: before.revision, action: 'submitTask', payload: { id: task.id, deliverable: '物料已到，完成测试' } });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.data));
+  const saved = f.stored();
+  assert.equal(saved.state.tasks.find((entry) => entry.id === task.id).status, 'review');
+  assert.equal(saved.state.tasks.find((entry) => entry.id === task.id).blocker, task.blocker);
+  assert.deepEqual(saved.state.projects, legacy.state.projects);
+  assert.deepEqual(saved.state.milestones, legacy.state.milestones);
+  assert.deepEqual(saved.state.extensions, legacy.state.extensions);
+  assert.equal(saved.revision, before.revision + 1);
+});
+
+test('legacy weighted node approval keeps audit fields without reactivating weights or overwriting data', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const target = staff.data.state.milestones.find((node) => node.id === 'm-pcb-2');
+  const requested = await f.call('/api/command', ENGINEER, {
+    revision: staff.data.revision, action: 'requestMilestone',
+    payload: nodeProposal(staff.data, { kind: 'update', milestoneId: target.id, title: `${target.title}与复核`, dueDate: target.dueDate }),
+  });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const legacy = f.stored();
+  const application = legacy.state.milestoneRequests[0];
+  application.before.weight = 40;
+  application.proposed.weight = 60;
+  legacy.state.milestones.find((node) => node.id === target.id).weight = 90;
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  const approved = await f.call('/api/command', ADMIN, {
+    revision: legacy.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: true, comment: '按调整后的验收范围执行' },
+  });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  const saved = f.stored();
+  const actual = saved.state.milestones.find((node) => node.id === target.id);
+  assert.equal(actual.title, application.proposed.title);
+  assert.equal(actual.weight, 90);
+  assert.equal(actual.originalDueDate, target.originalDueDate);
+  assert.deepEqual(saved.state.milestoneRequests[0].before, application.before);
+  assert.deepEqual(saved.state.milestoneRequests[0].proposed, application.proposed);
+  assert.deepEqual(saved.state.tasks, legacy.state.tasks);
+  assert.deepEqual(saved.state.extensions, legacy.state.extensions);
 });

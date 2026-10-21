@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addDays, createSeedState, memberStats, projectProgress, today, transact, weekRange,
+  addDays, createSeedState, memberStats, normalizeState, projectProgress, today, transact, weekRange,
 } from '../public/client/domain.js';
 
 const byId = (list, id) => list.find((item) => item.id === id);
@@ -36,6 +36,8 @@ test('seed has consistent assignments and schedules, one pending and one histori
   const state = seed();
   assert.equal(state.projects.length, 4);
   assert.equal(state.users.length, 6);
+  assert.ok(state.milestones.every((milestone) => !Object.hasOwn(milestone, 'weight')));
+  assert.ok(state.tasks.every((task) => task.status !== 'blocked' && !Object.hasOwn(task, 'blocker')));
   assert.equal(state.extensions.filter((e) => e.status === 'pending').length, 1);
   assert.equal(state.extensions.filter((e) => e.status === 'approved').length, 1);
   for (const task of state.tasks) {
@@ -140,7 +142,53 @@ test('task cannot be marked done directly and only permitted assignees can submi
   assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-design'), /无权访问该项目/);
   assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '成果' }, 'u-design'), /无权访问该项目/);
   assert.throws(() => transact(state, 'submitTask', { id: 't-07', deliverable: '' }, 'u-engineer'), /成果说明/);
-  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'blocked' }, 'u-engineer'), /阻塞原因/);
+  assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'blocked' }, 'u-engineer'), /受阻功能已移除/);
+});
+
+test('legacy blocked tasks read as doing while historical details and the source state remain intact', () => {
+  const state = seed();
+  byId(state.tasks, 't-03').status = 'blocked';
+  byId(state.tasks, 't-03').blocker = '历史记录：等待替换传感器';
+  byId(state.milestones, 'm-mower-2').weight = 40;
+  delete state.milestoneRequests;
+  const before = structuredClone(state);
+  const normalized = normalizeState(state);
+  assert.deepEqual(state, before);
+  assert.equal(byId(normalized.tasks, 't-03').status, 'doing');
+  assert.equal(byId(normalized.tasks, 't-03').blocker, byId(state.tasks, 't-03').blocker);
+  assert.deepEqual(normalized.milestones, state.milestones);
+  assert.deepEqual(normalized.projects, state.projects);
+  assert.deepEqual(normalized.extensions, state.extensions);
+  assert.deepEqual(normalized.logs, state.logs);
+  assert.deepEqual(normalized.milestoneRequests, []);
+});
+
+test('legacy blocked tasks can be updated and submitted without erasing their history or granting new access', () => {
+  const state = seed();
+  const task = byId(state.tasks, 't-03');
+  task.status = 'blocked';
+  task.blocker = '历史记录：等待替换传感器';
+  const before = structuredClone(state);
+  const updated = transact(state, 'updateTask', { id: task.id, description: '传感器已到，继续测试' }, 'u-engineer');
+  assert.equal(byId(updated.tasks, task.id).status, 'doing');
+  assert.equal(byId(updated.tasks, task.id).blocker, task.blocker);
+  const submitted = transact(state, 'submitTask', { id: task.id, deliverable: '已完成测试并提交报告' }, 'u-engineer');
+  assert.equal(byId(submitted.tasks, task.id).status, 'review');
+  assert.equal(byId(submitted.tasks, task.id).blocker, task.blocker);
+  assert.throws(() => transact(state, 'submitTask', { id: task.id, deliverable: '他人提交' }, 'u-design'), /任务负责人/);
+  byId(state.projects, task.projectId).memberIds = byId(state.projects, task.projectId).memberIds.filter((id) => id !== 'u-engineer');
+  assert.throws(() => transact(state, 'updateTask', { id: task.id, status: 'doing' }, 'u-engineer'), /无权访问/);
+  assert.throws(() => transact(state, 'submitTask', { id: task.id, deliverable: '撤权后提交' }, 'u-engineer'), /无权访问/);
+  assert.deepEqual(before.tasks, state.tasks);
+});
+
+test('new blocked statuses and blocker edits are rejected without changing the task', () => {
+  const state = seed();
+  const before = structuredClone(state);
+  for (const payload of [{ status: 'blocked' }, { status: 'blocked', blocker: '等待物料' }, { blocker: '等待物料' }, { blocker: '' }]) {
+    assert.throws(() => transact(state, 'updateTask', { id: 't-07', ...payload }, 'u-engineer'), /受阻功能已移除/);
+  }
+  assert.deepEqual(state, before);
 });
 
 test('revoked project members cannot update or submit tasks still assigned to them', () => {
@@ -198,36 +246,36 @@ test('even an administrator cannot review their own task', () => {
   assert.throws(() => transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-admin'), /不能验收自己/);
 });
 
-test('project progress is accepted milestone weight, not task count', () => {
+test('project progress counts completed live milestones and ignores task count or historical weights', () => {
   const state = seed();
-  assert.equal(projectProgress(state, 'p-mower'), 25);
-  assert.equal(projectProgress(state, 'p-site'), 60);
-  assert.equal(projectProgress(state, 'p-delivery'), 65);
+  assert.equal(projectProgress(state, 'p-mower'), 33);
+  assert.equal(projectProgress(state, 'p-site'), 67);
+  assert.equal(projectProgress(state, 'p-delivery'), 67);
   assert.equal(projectProgress(state, 'not-present'), 0);
   byId(state.tasks, 't-02').status = 'done';
-  assert.equal(projectProgress(state, 'p-mower'), 25);
+  assert.equal(projectProgress(state, 'p-mower'), 33);
+  byId(state.milestones, 'm-mower-1').weight = 100000;
+  byId(state.milestones, 'm-mower-2').weight = 0;
+  byId(state.milestones, 'm-mower-3').weight = 'invalid historical value';
+  assert.equal(projectProgress(state, 'p-mower'), 33);
 });
 
-test('rounding cannot mark a project complete while a small-weight milestone remains unfinished', () => {
+test('rounding cannot mark a project complete while any milestone remains unfinished', () => {
   const state = seed();
-  state.milestones = [
-    { id: 'a', projectId: 'p-test', weight: 100, status: 'done' },
-    { id: 'b', projectId: 'p-test', weight: 100, status: 'done' },
-    { id: 'c', projectId: 'p-test', weight: 1, status: 'pending' },
-  ];
+  state.milestones = Array.from({ length: 201 }, (_, i) => ({ id: `m-${i}`, projectId: 'p-test', status: i < 200 ? 'done' : 'pending' }));
   assert.equal(projectProgress(state, 'p-test'), 99);
-  state.milestones[2].status = 'done';
+  state.milestones.at(-1).status = 'done';
   assert.equal(projectProgress(state, 'p-test'), 100);
 });
 
-test('milestone requires linked accepted tasks, then updates weighted progress', () => {
+test('milestone requires linked accepted tasks before increasing completion progress', () => {
   let state = seed();
   assert.throws(() => transact(state, 'completeMilestone', { id: 'm-mower-2' }, 'u-manager'), /所有任务通过验收/);
   for (const task of state.tasks.filter((item) => item.milestoneId === 'm-mower-2')) task.status = 'done';
   assert.throws(() => transact(state, 'completeMilestone', { id: 'm-mower-2' }, 'u-engineer'), /项目负责人/);
   state = transact(state, 'completeMilestone', { id: 'm-mower-2' }, 'u-manager');
-  assert.equal(projectProgress(state, 'p-mower'), 65);
-  state = transact(state, 'requestMilestone', { projectId: 'p-mower', kind: 'create', title: '空节点', dueDate: addDays(today(), 11), weight: 5, reason: '补充最终检查节点' }, 'u-manager');
+  assert.equal(projectProgress(state, 'p-mower'), 67);
+  state = transact(state, 'requestMilestone', { projectId: 'p-mower', kind: 'create', title: '空节点', dueDate: addDays(today(), 11), reason: '补充最终检查节点' }, 'u-manager');
   state = transact(state, 'reviewMilestoneRequest', { id: state.milestoneRequests[0].id, approve: true, comment: '同意补充检查' }, 'u-admin');
   assert.throws(() => transact(state, 'completeMilestone', { id: state.milestones.at(-1).id }, 'u-manager'), /先为节点添加任务/);
 });
@@ -267,6 +315,7 @@ test('create-task enforces membership, reviewer separation, acceptance and sched
   const input = { projectId: 'p-mower', milestoneId: 'm-mower-2', title: '新测试项', ownerId: 'u-qa', reviewerId: 'u-manager', dueDate: today(), acceptance: '提供完整测试记录' };
   const next = transact(state, 'createTask', input, 'u-manager');
   assert.equal(next.tasks.at(-1).status, 'todo');
+  assert.equal(Object.hasOwn(next.tasks.at(-1), 'blocker'), false);
   assert.throws(() => transact(state, 'createTask', { ...input, reviewerId: 'u-qa' }, 'u-manager'), /不能验收自己/);
   assert.throws(() => transact(state, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-manager'), /必须是项目组成员/);
   assert.throws(() => transact(state, 'createTask', { ...input, acceptance: '' }, 'u-manager'), /验收标准/);

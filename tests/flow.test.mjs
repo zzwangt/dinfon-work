@@ -129,3 +129,30 @@ test('unsupported scope falls back to all without interpolating supplied scope t
   assert.doesNotMatch(html, /<script>/);
   assert.equal(visibleTaskIds(html).length, 6);
 });
+
+test('simplified canvas omits weight and blocked labels without changing stored tasks', () => {
+  const { state, project } = filterFixture();
+  const legacy = state.tasks.find(task => task.id === 'future-mine');
+  legacy.status = 'blocked';
+  const html = renderProjectFlow(state, project, { actorId: 'me' });
+  assert.doesNotMatch(html, /权重|受阻|flow-tone-blocked|flow-color-legend/);
+  assert.match(html, /class="flow-task flow-tone-doing"[^>]+data-id="future-mine"/);
+  assert.match(html, /进行中/);
+  assert.equal(legacy.status, 'blocked');
+  assert.match(html, /data-flow-control="in"/);
+  assert.match(html, /data-flow-control="out"/);
+  assert.match(html, /data-flow-control="fit"/);
+  assert.match(html, /阶段顺序/);
+  assert.match(html, /所属任务/);
+});
+
+test('review and overdue remain explicit statuses after simplification', () => {
+  const { state, project } = filterFixture();
+  const html = renderProjectFlow(state, project, { actorId: 'me' });
+  assert.match(html, /class="flow-task flow-tone-review"[^>]+data-id="week-review"/);
+  assert.match(html, /待验收/);
+  assert.match(html, /class="flow-task flow-tone-overdue"[^>]+data-id="old-open"/);
+  assert.match(html, /已逾期/);
+  assert.match(html, /本周必须完成/);
+  assert.doesNotMatch(html, /待审核/);
+});

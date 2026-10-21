@@ -3,7 +3,7 @@ import { sanitizeStateForActor } from '../public/client/access.js';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['admin', 'manager', 'member']);
-const COMMANDS = new Set(['createProject', 'createTask', 'updateTask', 'submitTask', 'reviewTask', 'createMilestone', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const COMMANDS = new Set(['createProject', 'createTask', 'updateTask', 'submitTask', 'reviewTask', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
 
 class ApiError extends Error {
@@ -63,6 +63,10 @@ async function readWorkspace(db) {
   if (!row) return null;
   const value = JSON.parse(row.payload);
   if (!value || !Array.isArray(value.accounts) || !value.state || !Number.isSafeInteger(row.revision)) throw new Error('Invalid workspace');
+  // Existing v1 workspaces predate node applications. Add an empty collection in
+  // the loaded copy, preserving every stored business record and revision.
+  if (value.state.milestoneRequests === undefined) value.state.milestoneRequests = [];
+  if (!Array.isArray(value.state.milestoneRequests)) throw new Error('Invalid milestone requests');
   return { ...value, revision: row.revision };
 }
 
@@ -168,7 +172,7 @@ function accessibleCommand(workspace, actor, action, payload) {
   let projectId = payload.projectId;
   if (['updateTask', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
   if (action === 'completeMilestone') projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
-  if (action === 'reviewExtension') { adminOnly(actor); return; }
+  if (action === 'reviewExtension' || action === 'reviewMilestoneRequest') { adminOnly(actor); return; }
   if (!scope.projects.some((project) => project.id === projectId)) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
 }
 
@@ -248,6 +252,12 @@ export async function handleApi(request, env, authenticatedIdentity) {
       requireValue(data.payload == null || (typeof data.payload === 'object' && !Array.isArray(data.payload)), '操作内容格式不正确');
       const payload = data.payload || {};
       accessibleCommand(workspace, actor, data.action, payload);
+      if (data.action === 'reviewMilestoneRequest' && payload.approve === true) {
+        const application = workspace.state.milestoneRequests.find((entry) => entry.id === payload.id);
+        if (application && !workspace.accounts.some((entry) => entry.userId === application.applicantId && entry.status === 'active')) {
+          fail(400, 'APPLICANT_DISABLED', '申请人账号已停用或不存在，请驳回此申请后由有效成员重新提交');
+        }
+      }
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }

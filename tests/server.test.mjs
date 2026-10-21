@@ -275,3 +275,157 @@ test('stale account changes and identity reassignment fail without partial updat
   assert.equal(rebind.data.code, 'IMMUTABLE_IDENTITY');
   assert.deepEqual(f.stored(), before);
 });
+
+function nodeProposal(session, extra = {}) {
+  const project = session.state.projects.find((entry) => entry.id === 'p-pcb');
+  return { projectId: project.id, kind: 'create', title: '补充接口验证', dueDate: project.dueDate, weight: 15, reason: '增加接口可靠性验证，保证交付前完成', ...extra };
+}
+
+test('staff node applications stay pending without changing live nodes until an admin approves', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const beforeNodes = structuredClone(f.stored().state.milestones);
+  const response = await f.call('/api/command', ENGINEER, {
+    revision: staff.data.revision, action: 'requestMilestone', actorId: 'u-admin',
+    payload: { ...nodeProposal(staff.data), status: 'approved', applicantId: 'u-admin', reviewerId: 'u-admin' },
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const application = response.data.state.milestoneRequests[0];
+  assert.equal(application.status, 'pending');
+  assert.equal(application.applicantId, 'u-engineer');
+  assert.equal(application.reviewerId, null);
+  assert.equal(application.before, null);
+  assert.deepEqual(f.stored().state.milestones, beforeNodes);
+  const admin = await f.call('/api/session');
+  assert.equal(admin.data.state.milestoneRequests.find((entry) => entry.id === application.id).status, 'pending');
+  const approved = await f.call('/api/command', ADMIN, { revision: admin.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: true, comment: '验证范围明确，同意加入项目计划' } });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  const saved = f.stored();
+  assert.equal(saved.state.milestones.length, beforeNodes.length + 1);
+  assert.equal(saved.state.milestoneRequests.find((entry) => entry.id === application.id).status, 'approved');
+  assert.equal(saved.state.milestoneRequests.find((entry) => entry.id === application.id).reviewerId, 'u-admin');
+  const newNode = saved.state.milestones.find((node) => !beforeNodes.some((old) => old.id === node.id));
+  assert.equal(newNode.title, application.proposed.title);
+  assert.equal(newNode.projectId, 'p-pcb');
+  const refreshedStaff = await f.call('/api/session', ENGINEER);
+  assert.ok(refreshedStaff.data.state.milestones.some((node) => node.id === newNode.id));
+  assert.equal(refreshedStaff.data.state.milestoneRequests[0].status, 'approved');
+});
+
+test('node update requests preserve the original plan while pending or rejected', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const existing = staff.data.state.milestones.find((node) => node.id === 'm-pcb-2');
+  const response = await f.call('/api/command', ENGINEER, {
+    revision: staff.data.revision, action: 'requestMilestone',
+    payload: nodeProposal(staff.data, { kind: 'update', milestoneId: existing.id, title: '样板联调与接口验证完成', dueDate: existing.dueDate, weight: existing.weight }),
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  const application = response.data.state.milestoneRequests[0];
+  assert.deepEqual(application.before, { title: existing.title, dueDate: existing.dueDate, weight: existing.weight, status: existing.status });
+  assert.deepEqual(f.stored().state.milestones.find((node) => node.id === existing.id), existing);
+  const rejected = await f.call('/api/command', ADMIN, { revision: response.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: false, comment: '先完成原有联调范围，本次调整退回' } });
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.data));
+  assert.equal(rejected.data.state.milestoneRequests.find((entry) => entry.id === application.id).status, 'rejected');
+  assert.deepEqual(f.stored().state.milestones.find((node) => node.id === existing.id), existing);
+});
+
+test('nonmembers cannot request nodes and forged admin identity cannot approve a request', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const before = f.stored();
+  const nonmember = await f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', actorId: 'u-admin', payload: nodeProposal(staff.data, { projectId: 'p-site' }) });
+  assert.equal(nonmember.status, 404);
+  assert.deepEqual(f.stored(), before);
+  const requested = await f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data) });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const pending = f.stored();
+  const forged = await f.call('/api/command', ENGINEER, { revision: requested.data.revision, action: 'reviewMilestoneRequest', actorId: 'u-admin', payload: { id: requested.data.state.milestoneRequests[0].id, approve: true, comment: '伪造管理账号', actorId: 'u-admin', role: 'admin' } });
+  assert.equal(forged.status, 403);
+  assert.equal(forged.data.code, 'ADMIN_REQUIRED');
+  assert.deepEqual(f.stored(), pending);
+});
+
+test('no role can bypass node approval through the former direct-create command', async (t) => {
+  const f = fixture(t);
+  await provision(f, ENGINEER, 'u-engineer');
+  await provision(f, MANAGER, 'u-manager', 'manager');
+  const before = f.stored();
+  for (const identity of [ADMIN, ENGINEER, MANAGER]) {
+    const session = await f.call('/api/session', identity);
+    const denied = await f.call('/api/command', identity, { revision: session.data.revision, action: 'createMilestone', payload: nodeProposal(session.data) });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.data.code, 'INVALID_INPUT');
+  }
+  assert.deepEqual(f.stored(), before);
+});
+
+test('disabled employees cannot submit nodes and their pending requests cannot be approved', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const requested = await f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data) });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const application = requested.data.state.milestoneRequests[0];
+  const account = f.stored().accounts.find((entry) => entry.userId === 'u-engineer');
+  const disabled = await f.call(`/api/accounts/${account.id}`, ADMIN, { revision: requested.data.revision, status: 'disabled' }, 'PATCH');
+  assert.equal(disabled.status, 200);
+  const before = f.stored();
+  const deniedRequest = await f.call('/api/command', ENGINEER, { revision: disabled.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data) });
+  assert.equal(deniedRequest.status, 403);
+  assert.equal(deniedRequest.data.code, 'ACCOUNT_DISABLED');
+  const deniedApproval = await f.call('/api/command', ADMIN, { revision: disabled.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: true, comment: '批准' } });
+  assert.equal(deniedApproval.status, 400);
+  assert.equal(deniedApproval.data.code, 'APPLICANT_DISABLED');
+  assert.deepEqual(f.stored(), before);
+  const rejected = await f.call('/api/command', ADMIN, { revision: disabled.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: false, comment: '申请人账号已停用，请由有效成员重新提交' } });
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.data));
+  assert.equal(rejected.data.state.milestoneRequests.find((entry) => entry.id === application.id).status, 'rejected');
+});
+
+test('concurrent node applications never silently overwrite each other', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const beforeNodes = structuredClone(f.stored().state.milestones);
+  const results = await Promise.all(['接口验证甲', '接口验证乙'].map((title) => f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data, { title }) })));
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 409]);
+  assert.equal(f.stored().state.milestoneRequests.length, 1);
+  assert.equal(f.stored().revision, staff.data.revision + 1);
+  assert.deepEqual(f.stored().state.milestones, beforeNodes);
+});
+
+test('concurrent approvals create exactly one live node and one approved record', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const requested = await f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data) });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const beforeNodes = f.stored().state.milestones.length;
+  const data = { revision: requested.data.revision, action: 'reviewMilestoneRequest', payload: { id: requested.data.state.milestoneRequests[0].id, approve: true, comment: '加入正式计划' } };
+  const results = await Promise.all([f.call('/api/command', ADMIN, data), f.call('/api/command', ADMIN, data)]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 409]);
+  assert.equal(f.stored().state.milestones.length, beforeNodes + 1);
+  assert.equal(f.stored().state.milestoneRequests.filter((entry) => entry.status === 'approved').length, 1);
+});
+
+test('existing v1 workspaces receive an empty request list without reset or read-time persistence', async (t) => {
+  const f = fixture(t);
+  await provision(f, ENGINEER, 'u-engineer');
+  const legacy = f.stored();
+  delete legacy.state.milestoneRequests;
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  const oldSnapshot = f.stored();
+  const staff = await f.call('/api/session', ENGINEER);
+  const owner = await f.call('/api/session');
+  assert.equal(staff.status, 200);
+  assert.equal(owner.status, 200);
+  assert.deepEqual(staff.data.state.milestoneRequests, []);
+  assert.deepEqual(owner.data.state.milestoneRequests, []);
+  assert.deepEqual(f.stored(), oldSnapshot);
+  const requested = await f.call('/api/command', ENGINEER, { revision: staff.data.revision, action: 'requestMilestone', payload: nodeProposal(staff.data) });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  const saved = f.stored();
+  assert.equal(saved.state.milestoneRequests.length, 1);
+  assert.deepEqual(saved.state.projects, legacy.state.projects);
+  assert.deepEqual(saved.state.milestones, legacy.state.milestones);
+  assert.deepEqual(saved.state.tasks, legacy.state.tasks);
+  assert.deepEqual(saved.accounts, legacy.accounts);
+});

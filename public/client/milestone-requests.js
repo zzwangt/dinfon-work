@@ -1,0 +1,12 @@
+const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const date = value => value ? value.slice(0,10).replaceAll('-','.') : '—';
+export function requestComparison(request) {
+  const rows = [['节点名称','title'],['截止日期','dueDate'],['相对权重','weight']];
+  return `<div class="node-change-table"><table><caption class="sr-only">大节点申请变更对照</caption><thead><tr><th scope="col">调整内容</th><th scope="col">${request.kind==='create'?'当前计划':'变更前'}</th><th scope="col">申请方案</th></tr></thead><tbody>${rows.map(([label,key])=>{const value=v=>key==='dueDate'?date(v):v;const before=request.before?.[key],after=request.proposed?.[key];return `<tr><th scope="row">${label}</th><td>${request.before?escape(value(before)):'尚未创建'}</td><td class="${before!==after?'is-changed':''}">${escape(value(after))}</td></tr>`;}).join('')}</tbody></table></div>`;
+}
+export function renderMilestoneRequestCard(state, request, {admin=false}={}) {
+  const p=state.projects.find(p=>p.id===request.projectId),person=id=>state.users.find(u=>u.id===id)?.name||'未关联人员';
+  const pending=request.status==='pending';
+  const labels={pending:'待审批',approved:'已批准',rejected:'已驳回'},colors={pending:'amber',approved:'green',rejected:'gray'};
+  return `<article class="approval-card node-request-card"><div class="approval-head"><div><div><a class="approval-project" href="#projects/${escape(request.projectId)}">${escape(p?.name||'项目')}</a><p class="cell-subtext">${escape(person(request.applicantId))} · ${date(request.createdAt)} · ${request.kind==='create'?'新增大节点':'修改大节点'}</p></div></div><span class="status ${colors[request.status]||'gray'}">${labels[request.status]||'未知状态'}</span></div><div class="approval-body"><h2 class="node-request-title">${escape(request.proposed?.title)}</h2>${requestComparison(request)}<div class="approval-reason"><span>申请原因</span><p>${escape(request.reason)}</p></div>${request.comment?`<div class="approval-comment"><strong>${escape(person(request.reviewerId))} 的审批意见</strong><p>${escape(request.comment)}</p></div>`:''}</div><div class="approval-footer"><span class="muted">${pending?'批准前不改变当前计划':`${escape(person(request.reviewerId))} · ${date(request.reviewedAt)}`}</span>${pending&&admin?`<div class="approval-buttons"><button class="button secondary" data-action="reject-node-request" data-id="${escape(request.id)}">驳回申请</button><button class="button primary" data-action="approve-node-request" data-id="${escape(request.id)}">批准并生效</button></div>`:''}</div></article>`;
+}

@@ -227,7 +227,8 @@ test('milestone requires linked accepted tasks, then updates weighted progress',
   assert.throws(() => transact(state, 'completeMilestone', { id: 'm-mower-2' }, 'u-engineer'), /项目负责人/);
   state = transact(state, 'completeMilestone', { id: 'm-mower-2' }, 'u-manager');
   assert.equal(projectProgress(state, 'p-mower'), 65);
-  state = transact(state, 'createMilestone', { projectId: 'p-mower', title: '空节点', dueDate: addDays(today(), 11), weight: 5 }, 'u-manager');
+  state = transact(state, 'requestMilestone', { projectId: 'p-mower', kind: 'create', title: '空节点', dueDate: addDays(today(), 11), weight: 5, reason: '补充最终检查节点' }, 'u-manager');
+  state = transact(state, 'reviewMilestoneRequest', { id: state.milestoneRequests[0].id, approve: true, comment: '同意补充检查' }, 'u-admin');
   assert.throws(() => transact(state, 'completeMilestone', { id: state.milestones.at(-1).id }, 'u-manager'), /先为节点添加任务/);
 });
 

@@ -26,6 +26,8 @@ export function sanitizeStateForActor(state, actorId) {
   if (!state || state.version !== 1 || !COLLECTIONS.every((key) => Array.isArray(state[key]))) {
     throw new Error('业务数据结构不兼容，无法确定访问权限');
   }
+  const allMilestoneRequests = state.milestoneRequests === undefined ? [] : state.milestoneRequests;
+  if (!Array.isArray(allMilestoneRequests)) throw new Error('节点申请数据结构不兼容，无法确定访问权限');
   if (typeof actorId !== 'string' || !actorId) throw new Error('请先登录有效账号');
   const actor = state.users.find((user) => user.id === actorId);
   if (!actor || !ROLES.has(actor.role)) throw new Error('账号不存在或没有有效访问角色');
@@ -38,6 +40,7 @@ export function sanitizeStateForActor(state, actorId) {
       milestones: state.milestones,
       tasks: state.tasks,
       extensions: state.extensions,
+      milestoneRequests: allMilestoneRequests,
       logs: state.logs,
     });
   }
@@ -48,6 +51,7 @@ export function sanitizeStateForActor(state, actorId) {
   const tasks = state.tasks.filter((task) => projectIds.has(task.projectId));
   const milestones = state.milestones.filter((milestone) => projectIds.has(milestone.projectId));
   const extensions = state.extensions.filter((extension) => projectIds.has(extension.projectId));
+  const milestoneRequests = allMilestoneRequests.filter((request) => projectIds.has(request.projectId));
   const logs = state.logs.filter((log) => projectIds.has(log.projectId));
 
   // Keep the actor even when they have no projects so their account page and
@@ -65,12 +69,16 @@ export function sanitizeStateForActor(state, actorId) {
     userIds.add(extension.applicantId);
     userIds.add(extension.reviewerId);
   }
+  for (const request of milestoneRequests) {
+    userIds.add(request.applicantId);
+    userIds.add(request.reviewerId);
+  }
   for (const log of logs) userIds.add(log.actorId);
 
   return structuredClone({
     version: state.version,
     users: state.users.filter((user) => userIds.has(user.id)).map(profile),
-    projects, milestones, tasks, extensions, logs,
+    projects, milestones, tasks, extensions, milestoneRequests, logs,
   });
 }
 

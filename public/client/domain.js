@@ -100,6 +100,29 @@ function validateSchedule(state, project) {
   }
 }
 
+function milestoneSnapshot(milestone) {
+  const { title, dueDate, weight, status } = milestone;
+  return { title, dueDate, weight, status };
+}
+
+function milestoneProposal(payload, project) {
+  const title = text(payload?.title, '节点名称', 100);
+  const dueDate = validDate(payload?.dueDate, '节点截止日期');
+  const weight = Number(payload?.weight);
+  check(['number', 'string'].includes(typeof payload?.weight) && Number.isFinite(weight) && weight > 0 && weight <= 100, '节点权重必须大于 0 且不超过 100');
+  check(dueDate >= project.startDate, '节点截止日期不能早于项目开始日期');
+  check(dueDate <= project.dueDate, '节点截止日期超出项目周期，请先申请项目延期并获批');
+  return { title, dueDate, weight };
+}
+
+function validateMilestoneProposal(state, project, proposed, milestoneId) {
+  // Pending proposals are checked against the live schedule without changing it.
+  const milestones = milestoneId
+    ? state.milestones.map((item) => item.id === milestoneId ? { ...item, ...proposed } : item)
+    : [...state.milestones, { projectId: project.id, ...proposed }];
+  validateSchedule({ ...state, milestones }, project);
+}
+
 export function projectProgress(state, projectId) {
   const milestones = state.milestones.filter((m) => m.projectId === projectId);
   const total = milestones.reduce((sum, item) => sum + Number(item.weight || 0), 0);
@@ -127,6 +150,8 @@ export function memberStats(state, userId, start, end) {
 export function transact(state, action, payload = {}, actorId) {
   check(state?.version === 1, '数据版本不兼容，请重新载入演示数据');
   const next = structuredClone(state);
+  next.milestoneRequests ??= [];
+  check(Array.isArray(next.milestoneRequests), '节点申请数据无效');
   const actor = find(next.users, actorId, '操作人员');
   const at = new Date().toISOString();
   const record = (projectId, message) => next.logs.unshift({ id: uid('log'), at, actorId, projectId: projectId || null, message });
@@ -156,7 +181,7 @@ export function transact(state, action, payload = {}, actorId) {
     check(project.memberIds.includes(owner.id), '任务负责人必须是项目组成员');
     check(project.memberIds.includes(reviewer.id) || reviewer.role === 'admin', '验收人必须是项目成员或管理员');
     check(owner.id !== reviewer.id, '任务负责人不能验收自己的任务');
-    check(typeof payload.milestoneId === 'string' && payload.milestoneId.length > 0, '请先创建并选择任务所属的里程碑');
+    check(typeof payload.milestoneId === 'string' && payload.milestoneId.length > 0, '请先申请并获批，再选择任务所属的里程碑');
     const milestone = find(next.milestones, payload.milestoneId, '节点');
     check(milestone.projectId === project.id, '节点不属于该项目');
     check(milestone.status !== 'done', '已验收节点不能添加任务');
@@ -210,18 +235,70 @@ export function transact(state, action, payload = {}, actorId) {
     task.status = payload.approve ? 'done' : 'doing';
     record(task.projectId, `${payload.approve ? '验收通过' : '退回修改'}：“${task.title}”${comment ? `；${comment}` : ''}`);
   } else if (action === 'createMilestone') {
+    throw new Error('节点新增或修改需要先提交申请并由管理员审批');
+  } else if (action === 'requestMilestone') {
     const project = find(next.projects, payload.projectId, '项目');
-    manageProject(actor, project);
-    const weight = Number(payload.weight);
-    check(Number.isFinite(weight) && weight > 0 && weight <= 100, '节点权重必须大于 0 且不超过 100');
-    const milestone = {
-      id: uid('m'), projectId: project.id, title: text(payload.title, '节点名称', 100),
-      originalDueDate: validDate(payload.dueDate, '节点截止日期'), dueDate: payload.dueDate,
-      weight, status: 'pending', acceptedAt: null,
-    };
-    next.milestones.push(milestone);
-    validateSchedule(next, project);
-    record(project.id, `创建节点“${milestone.title}”，权重 ${weight}`);
+    requireProjectAccess(actor, project);
+    check(['create', 'update'].includes(payload.kind), '节点申请类型无效');
+    const proposed = milestoneProposal(payload, project);
+    const reason = text(payload.reason, '申请原因');
+    let milestoneId = null;
+    let before = null;
+    if (payload.kind === 'update') {
+      const milestone = find(next.milestones, payload.milestoneId, '节点');
+      check(milestone.projectId === project.id, '节点不属于该项目');
+      check(milestone.status !== 'done', '已完成节点不能修改');
+      check(!next.milestoneRequests.some((item) => item.milestoneId === milestone.id && item.status === 'pending'), '该节点已有待审批的修改申请');
+      check(['title', 'dueDate', 'weight'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需提交申请');
+      milestoneId = milestone.id;
+      before = milestoneSnapshot(milestone);
+    } else {
+      check(payload.milestoneId == null || payload.milestoneId === '', '新增节点申请不能指定现有节点');
+      check(!next.milestoneRequests.some((item) => item.projectId === project.id && item.kind === 'create' && item.status === 'pending' && item.proposed.title === proposed.title), '该项目已有同名节点的待审批新增申请');
+    }
+    validateMilestoneProposal(next, project, proposed, milestoneId);
+    next.milestoneRequests.unshift({
+      id: uid('mr'), projectId: project.id, kind: payload.kind, milestoneId, applicantId: actor.id,
+      before, proposed, reason, status: 'pending', createdAt: at,
+      reviewedAt: null, reviewerId: null, comment: '',
+    });
+    record(project.id, `申请${payload.kind === 'create' ? '新增' : '修改'}节点“${proposed.title}”；待后台审批，当前计划保持生效`);
+  } else if (action === 'reviewMilestoneRequest') {
+    check(actor.role === 'admin', '仅后台管理员可以审批节点申请');
+    const request = find(next.milestoneRequests, payload.id, '节点申请');
+    check(request.status === 'pending', '该节点申请已处理');
+    check(typeof payload.approve === 'boolean', '请选择批准或驳回');
+    const comment = text(payload.comment, payload.approve ? '审批意见' : '驳回原因');
+    if (payload.approve) {
+      const project = find(next.projects, request.projectId, '项目');
+      const applicant = find(next.users, request.applicantId, '申请人');
+      check(applicant.role === 'admin' || applicant.id === project.ownerId || project.memberIds.includes(applicant.id), '申请人已无项目访问权限，请驳回后由现有项目成员重新申请');
+      check(['create', 'update'].includes(request.kind), '节点申请类型无效');
+      const proposed = milestoneProposal(request.proposed, project);
+      text(request.reason, '申请原因');
+      if (request.kind === 'update') {
+        const milestone = find(next.milestones, request.milestoneId, '节点');
+        check(milestone.projectId === project.id, '节点不属于该项目');
+        check(milestone.status !== 'done', '已完成节点不能修改');
+        check(request.before && ['title', 'dueDate', 'weight', 'status'].every((key) => milestone[key] === request.before[key]), '节点计划已变化，请驳回后重新提交申请');
+        check(['title', 'dueDate', 'weight'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需批准');
+        validateMilestoneProposal(next, project, proposed, milestone.id);
+        // Keep the first agreed deadline and all task dates intact.
+        Object.assign(milestone, proposed);
+      } else {
+        check(request.milestoneId == null && request.before == null, '新增节点申请数据无效');
+        validateMilestoneProposal(next, project, proposed, null);
+        next.milestones.push({
+          id: uid('m'), projectId: project.id, ...proposed,
+          originalDueDate: proposed.dueDate, status: 'pending', acceptedAt: null,
+        });
+      }
+    }
+    request.status = payload.approve ? 'approved' : 'rejected';
+    request.reviewedAt = at;
+    request.reviewerId = actor.id;
+    request.comment = comment;
+    record(request.projectId, `${payload.approve ? '批准' : '驳回'}${request.kind === 'create' ? '新增' : '修改'}节点申请“${request.proposed.title}”${payload.approve ? '，节点计划已生效，任务日期保持不变' : '，原计划继续生效'}；${comment}`);
   } else if (action === 'completeMilestone') {
     const milestone = find(next.milestones, payload.id, '节点');
     const project = find(next.projects, milestone.projectId, '项目');
@@ -286,11 +363,13 @@ export function transact(state, action, payload = {}, actorId) {
       for (const item of extension.affectedMilestones) {
         const target = find(next.milestones, item.id, '节点');
         check(target.projectId === project.id && target.status !== 'done', '相关节点已完成或变更，请重新申请');
+        check(item.newDueDate > target.dueDate, '节点计划已变化，请驳回后重新提交延期申请');
         target.dueDate = item.newDueDate;
       }
       for (const item of extension.affectedTasks) {
         const target = find(next.tasks, item.id, '任务');
         check(target.projectId === project.id && target.status !== 'done', '相关任务已完成或变更，请重新申请');
+        check(item.newDueDate > target.dueDate, '任务计划已变化，请驳回后重新提交延期申请');
         target.dueDate = item.newDueDate;
       }
       validateSchedule(next, project);
@@ -394,5 +473,5 @@ export function createSeedState() {
     { id: 'l-3', at: at(-2, '15'), actorId: 'u-manager', projectId: 'p-site', message: '验收通过“首页视觉方案”，视觉方案节点完成' },
     { id: 'l-4', at: at(-5, '14'), actorId: 'u-admin', projectId: 'p-delivery', message: '批准试运行延期 8 天，同步调整关联任务；原计划保留' },
   ];
-  return { version: 1, users, projects, milestones, tasks, extensions, logs };
+  return { version: 1, users, projects, milestones, tasks, extensions, milestoneRequests: [], logs };
 }

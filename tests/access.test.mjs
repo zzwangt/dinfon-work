@@ -13,11 +13,11 @@ test('administrator receives all business records but never login/account metada
   state.users[0].passwordHash = 'not-a-real-hash';
   state.users[0].login = { lastIp: '192.0.2.1' };
   const result = sanitizeStateForActor(state, 'u-admin');
-  for (const collection of ['projects', 'milestones', 'tasks', 'extensions', 'logs']) {
-    assert.deepEqual(result[collection], state[collection]);
+  for (const collection of ['projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'logs']) {
+    assert.deepEqual(result[collection], state[collection] ?? []);
   }
   assert.deepEqual(ids(result.users), ids(state.users));
-  assert.deepEqual(Object.keys(result).sort(), ['version', 'users', 'projects', 'milestones', 'tasks', 'extensions', 'logs'].sort());
+  assert.deepEqual(Object.keys(result).sort(), ['version', 'users', 'projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'logs'].sort());
   assert.equal(result.users[0].email, undefined);
   assert.equal(result.users[0].passwordHash, undefined);
   assert.equal(result.users[0].login, undefined);
@@ -79,7 +79,43 @@ test('employee without assigned projects receives empty business collections and
   state.users.push({ id: 'u-new', name: '新员工', role: 'member', title: '岗位', department: '部门', color: '#123456' });
   const result = sanitizeStateForActor(state, 'u-new');
   assert.deepEqual(ids(result.users), ['u-new']);
-  for (const collection of ['projects', 'milestones', 'tasks', 'extensions', 'logs']) assert.deepEqual(result[collection], []);
+  for (const collection of ['projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'logs']) assert.deepEqual(result[collection], []);
+});
+
+test('node applications are project scoped and include only safe applicant and reviewer profiles', () => {
+  const state = createSeedState();
+  state.users.push(
+    { id: 'historic-applicant', name: '原申请人', role: 'member', title: '研发', department: '产品', email: 'hidden-applicant@example.test', authId: 'secret-subject' },
+    { id: 'node-reviewer', name: '节点审批员', role: 'admin', title: '管理', department: '运营', email: 'hidden-reviewer@example.test' },
+    { id: 'unrelated-applicant', name: '无关申请人', role: 'member', email: 'hidden-unrelated@example.test' },
+  );
+  state.milestoneRequests = [
+    { id: 'mr-visible', projectId: 'p-pcb', kind: 'create', applicantId: 'historic-applicant', reviewerId: 'node-reviewer', status: 'approved', proposed: { title: '新增验证', dueDate: '2026-10-25', weight: 15 } },
+    { id: 'mr-hidden', projectId: 'p-delivery', kind: 'update', applicantId: 'unrelated-applicant', reviewerId: 'node-reviewer', status: 'pending' },
+  ];
+  const result = sanitizeStateForActor(state, 'u-engineer');
+  assert.deepEqual(ids(result.milestoneRequests), ['mr-visible']);
+  assert.ok(result.users.some((user) => user.id === 'historic-applicant'));
+  assert.ok(result.users.some((user) => user.id === 'node-reviewer'));
+  assert.ok(!result.users.some((user) => user.id === 'unrelated-applicant'));
+  for (const user of result.users) { assert.equal(user.email, undefined); assert.equal(user.authId, undefined); }
+  assert.deepEqual(ids(sanitizeStateForActor(state, 'u-admin').milestoneRequests), ['mr-hidden', 'mr-visible']);
+  result.milestoneRequests[0].proposed.title = 'changed locally';
+  assert.equal(state.milestoneRequests[0].proposed.title, '新增验证');
+});
+
+test('legacy v1 data returns an empty node application collection without changing records', () => {
+  const state = createSeedState();
+  delete state.milestoneRequests;
+  const before = structuredClone(state);
+  for (const actorId of ['u-admin', 'u-engineer']) {
+    const result = sanitizeStateForActor(state, actorId);
+    assert.deepEqual(result.milestoneRequests, []);
+    assert.ok(result.projects.length > 0);
+  }
+  assert.deepEqual(state, before);
+  state.milestoneRequests = { unexpected: true };
+  assert.throws(() => sanitizeStateForActor(state, 'u-admin'), /节点申请数据结构/);
 });
 
 test('invalid identities and unrecognized roles fail closed', () => {

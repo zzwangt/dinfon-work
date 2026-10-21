@@ -1,0 +1,55 @@
+.project-people-summary { display:flex; align-items:center; gap:12px; min-width:0; padding:13px 0 17px; color:#50655a; font-size:13px; }
+.project-people-summary > svg { width:19px; height:19px; color:#2e7351; flex:0 0 auto; }
+.project-people-names { display:flex; flex-wrap:wrap; align-items:center; gap:4px 20px; min-width:0; line-height:1.8; }
+.project-people-names strong { margin-left:3px; color:#233d2f; font-weight:600; }
+.project-people-names > span { overflow-wrap:anywhere; }
+.project-people-support { color:#606a75; font-size:12px; }
+.project-people-open { display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; gap:5px; min-height:36px; margin-left:auto; padding:6px 8px; border:0; color:var(--accent,#167a65); background:transparent; font-size:13px; white-space:nowrap; }
+.project-people-open:hover { color:var(--accent-dark,#106551); background:#edf5f0; }
+.project-people-open svg { width:15px; height:15px; }
+.project-team { overflow:hidden; }
+.project-team-header { flex-wrap:wrap; }
+.project-team-total { flex:0 0 auto; padding:4px 9px; border:1px solid #d3e3d9; border-radius:5px; background:#f0f7f2; color:#2e6547; font-size:12px; white-space:nowrap; }
+.project-team-list { margin:0; padding:0 22px; list-style:none; }
+.project-team-row { display:grid; grid-template-columns:minmax(200px,250px) minmax(0,1fr); gap:22px; padding:23px 0; border-bottom:1px solid var(--line,#e6e9ed); }
+.project-team-row:last-child { border-bottom:0; }
+.project-team-person { display:flex; align-items:flex-start; gap:11px; min-width:0; }
+.project-team-avatar { display:grid; place-items:center; flex:0 0 auto; width:36px; height:36px; border:1px solid #d2e1d6; border-radius:50%; background:#edf5ee; color:#356649; font-size:14px; font-weight:600; }
+.project-team-avatar.is-reviewer { border-color:#ddd1eb; background:#f4eefb; color:#694895; }
+.project-team-person > div { min-width:0; }
+.project-team-person-name { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; }
+.project-team-person-name h3 { color:var(--ink,#20252c); font-size:14px; line-height:1.7; font-weight:600; overflow-wrap:anywhere; }
+.project-team-role { display:inline-flex; padding:1px 5px; border:1px solid #e0e5e2; border-radius:4px; color:#5d6d64; background:#f8faf8; font-size:12px; white-space:nowrap; }
+.project-team-role.is-owner { border-color:#bdd7c8; background:#eaf5ed; color:#246440; }
+.project-team-person p { margin-top:6px; color:#5b6c61; font-size:12px; line-height:1.8; overflow-wrap:anywhere; }
+.project-team-person small { display:block; margin-top:5px; color:#7d5631; font-size:12px; }
+.project-team-duties { display:grid; gap:18px; min-width:0; }
+.project-team-duty-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:5px 14px; margin-bottom:5px; }
+.project-team-duty-heading h3 { color:#3f5b49; font-size:12px; font-weight:600; }
+.project-team-duty-heading h3 > span { margin-left:4px; color:#596c60; font-variant-numeric:tabular-nums; font-weight:400; }
+.project-team-duty-heading p { color:#5b6c61; font-size:12px; }
+.project-team-duty-heading p strong { color:#364e3f; font-weight:600; font-variant-numeric:tabular-nums; }
+.project-team-task-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:22px; margin:0; padding:0; list-style:none; }
+.project-team-task-list > li { min-width:0; }
+.project-team-task { display:flex; align-items:center; gap:9px; width:100%; min-height:42px; padding:9px 0; border:0; border-bottom:1px solid #edf1ee; border-radius:0; background:transparent; color:#2b3b31; text-align:left; }
+button.project-team-task:hover { color:#176443; background:#f3f8f4; }
+.project-team-task-title { flex:1 1 auto; min-width:0; font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
+.project-team-task-status { display:inline-flex; align-items:center; flex:0 0 auto; gap:4px; color:#5f6872; font-size:12px; white-space:nowrap; }
+.project-team-task-status i { width:5px; height:5px; border-radius:50%; background:currentColor; }
+.project-team-task-status.is-doing { color:#1c4cb0; }
+.project-team-task-status.is-review { color:#6531a3; }
+.project-team-task-status.is-done { color:#17643f; }
+.project-team-task-status.is-blocked { color:#aa2e25; }
+.project-team-task > svg { width:13px; height:13px; color:#657a6d; flex:0 0 auto; }
+.project-team-empty-duty { padding:10px 0 3px; color:#66746b; font-size:13px; }
+.project-team-support { border-top:1px solid var(--line,#e6e9ed); }
+.project-team-support > header { padding:17px 22px 0; }
+.project-team-support > header h3 { color:#334f3e; font-size:14px; }
+.project-team-support > header h3 span { margin-left:5px; color:#5e7164; font-size:12px; font-weight:400; }
+.project-team-support > header p { margin-top:5px; color:#5c6c63; font-size:12px; line-height:1.7; }
+.project-team-support.is-review > header h3 { color:#5e3b87; }
+.project-team-empty { padding:30px 22px; color:#5d7063; }
+.project-team-empty h3 { color:#35523f; font-size:15px; }
+.project-team-empty p { margin-top:8px; font-size:13px; }
+@media (max-width:1100px) { .project-team-row { grid-template-columns:minmax(185px,220px) minmax(0,1fr); gap:18px; } .project-team-task-list { grid-template-columns:1fr; } }
+@media (max-width:700px) { .project-people-summary { align-items:flex-start; flex-wrap:wrap; gap:8px; padding:11px 0 15px; } .project-people-summary > svg { margin-top:4px; } .project-people-names { flex:1; gap:3px 12px; } .project-people-open { margin-left:27px; min-height:40px; padding-left:0; } .project-team-list { padding:0 15px; } .project-team-row { grid-template-columns:1fr; gap:16px; padding:20px 0; } .project-team-person-name h3 { font-size:15px; } .project-team-duty-heading { gap:5px 10px; } .project-team-task { min-height:44px; } .project-team-support > header { padding:17px 15px 0; } .project-team-empty { padding:25px 15px; } }

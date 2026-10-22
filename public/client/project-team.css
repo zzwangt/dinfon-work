@@ -59,3 +59,10 @@ button.project-team-task:hover { color:#176443; background:#f3f8f4; }
 .project-people-open:focus-visible,.project-team-task:focus-visible{outline:2px solid var(--accent,#167a65);outline-offset:3px;border-radius:4px}
 .project-people-open:active,.project-team-task:active{background:#eaf4ed}
 .project-team-task-status{font-variant-numeric:tabular-nums}
+.project-team-task-copy{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:5px}
+.project-team-task-times{display:flex;flex-wrap:wrap;gap:3px 12px;color:var(--secondary,#5b6c61);font-size:12px;line-height:1.6}
+.project-team-task-times>span{display:inline-block;max-width:100%;overflow-wrap:anywhere}
+.project-team-time-value{font-variant-numeric:tabular-nums}
+.project-team-task-copy+.project-team-task-status{align-self:flex-start;margin-top:2px}
+.project-team-task-copy~svg{align-self:flex-start;margin-top:6px}
+@media(max-width:700px){.project-team-task-times{gap:3px 10px}.project-team-task-times>span{flex-basis:100%}.project-team-task{gap:8px}}

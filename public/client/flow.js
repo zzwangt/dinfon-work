@@ -1,7 +1,9 @@
-import { today, weekRange } from './domain.js';
+import { today, weekRange, progressAgainstPlan } from './domain.js';
+import { datePart, deadlineMs, formatDateTime, isOverdue } from './time.js';
+import { renderProgressTrack, renderProgressNote } from './progress.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
-const date = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') ? `${Number(value.slice(5, 7))}/${Number(value.slice(8, 10))}` : '未设置';
+const date = value => escape(formatDateTime(value, { compact: true }));
 const svg = path => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
 const icons = {
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
@@ -14,19 +16,29 @@ const icons = {
   branch: svg('<rect x="8" y="2" width="8" height="6" rx="1"/><rect x="2" y="16" width="7" height="6" rx="1"/><rect x="15" y="16" width="7" height="6" rx="1"/><path d="M12 8v4M5.5 16v-4h13v4"/>'),
 };
 
-function taskTone(task, day) {
+function taskTone(task, now) {
   if (task.status === 'done') return { tone: 'done', label: '已完成' };
-  if (task.dueDate < day) return { tone: 'overdue', label: task.status === 'review' ? '待验收 · 已逾期' : '已逾期' };
+  if (isOverdue(task.dueDate, now)) return { tone: 'overdue', label: task.status === 'review' ? '待验收 · 已逾期' : '已逾期' };
   const status = task.status === 'blocked' ? 'doing' : task.status;
   return { tone: ['doing', 'review'].includes(status) ? status : 'todo', label: ({ doing: '进行中', review: '待验收' })[status] || '未开始' };
 }
 
-function phaseTone(milestone, tasks, day) {
+function phaseTone(milestone, tasks, now) {
   if (milestone.status === 'done') return { tone: 'done', label: '已完成' };
-  if (milestone.dueDate < day) return { tone: 'overdue', label: '已逾期' };
+  if (isOverdue(milestone.dueDate, now)) return { tone: 'overdue', label: '已逾期' };
   if (tasks.length && tasks.every(task => task.status === 'done')) return { tone: 'review', label: '待确认完成' };
   if (tasks.some(task => task.status !== 'todo')) return { tone: 'doing', label: '进行中' };
   return { tone: 'todo', label: '未开始' };
+}
+
+function deadlineHint(value, now, week) {
+  const deadline = deadlineMs(value), delta = deadline - now;
+  if (!Number.isFinite(deadline)) return '';
+  if (delta < 0 && datePart(value) < week.start) return '此前逾期';
+  const hours = Math.abs(delta) / 3600000;
+  if (hours < 1) return delta < 0 ? '逾期不足1小时' : '不足1小时';
+  if (hours < 24) return delta < 0 ? `逾期 ${Math.floor(hours)} 小时` : `剩 ${Math.ceil(hours)} 小时`;
+  return delta < 0 ? `逾期 ${Math.floor(hours / 24)} 天` : `剩 ${Math.ceil(hours / 24)} 天`;
 }
 
 /** Large nodes are milestones; branch lines express membership, not dependency.
@@ -36,41 +48,41 @@ export function renderProjectFlow(state, project, options = {}) {
   const canManage = options.canManage === true;
   const scope = ['all', 'week', 'mine'].includes(options.scope) ? options.scope : 'all';
   const expandedIds = new Set(Array.isArray(options.expandedIds) ? options.expandedIds : []);
-  const day = today(), week = weekRange(day);
-  const milestones = state.milestones.filter(item => item.projectId === project.id).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const now = Date.now(), day = datePart(new Date(now).toISOString()) || today(), week = weekRange(day);
+  const milestones = state.milestones.filter(item => item.projectId === project.id).sort((a, b) => deadlineMs(a.dueDate) - deadlineMs(b.dueDate));
   const tasks = state.tasks.filter(item => item.projectId === project.id);
   if (!milestones.length) return `<section class="flow-empty"><span class="flow-empty-icon">${icons.branch}</span><h2>从第一个大节点开始</h2><p>把项目拆成每周的交付节点，再在节点下分配每日任务。</p>${canManage ? `<button class="button primary" data-action="new-milestone" data-id="${escape(project.id)}">${icons.plus}添加大节点</button>` : '<p>项目负责人创建节点后，团队就可以在这里查看整个流程。</p>'}</section>`;
 
-  const matches = task => scope === 'mine' ? Boolean(options.actorId) && task.ownerId === options.actorId : scope === 'week' ? task.dueDate <= week.end && (task.dueDate >= week.start || task.status !== 'done') : true;
+  const matches = task => scope === 'mine' ? Boolean(options.actorId) && task.ownerId === options.actorId : scope === 'week' ? datePart(task.dueDate) <= week.end && (datePart(task.dueDate) >= week.start || task.status !== 'done') : true;
   const columns = milestones.map(milestone => {
-    const children = tasks.filter(task => task.milestoneId === milestone.id).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    const children = tasks.filter(task => task.milestoneId === milestone.id).sort((a, b) => deadlineMs(a.dueDate) - deadlineMs(b.dueDate));
     const expanded = milestone.status !== 'done' || expandedIds.has(milestone.id);
     return { milestone, children, matches: children.filter(matches), expanded };
   });
   const milestoneIds = new Set(milestones.map(item => item.id));
   const unassigned = tasks.filter(task => !milestoneIds.has(task.milestoneId));
   const visibleUnassigned = unassigned.filter(matches);
-  const weeklyRequired = milestones.filter(item => item.status !== 'done' && item.dueDate <= week.end).length;
+  const weeklyRequired = milestones.filter(item => item.status !== 'done' && datePart(item.dueDate) && datePart(item.dueDate) <= week.end).length;
   const collapsedCount = columns.reduce((sum, column) => sum + (column.expanded ? 0 : column.matches.length), 0);
   const visibleCount = columns.reduce((sum, column) => sum + (column.expanded ? column.matches.length : 0), visibleUnassigned.length);
-  const layout = { x: 32, pitch: 320, phaseWidth: 264, phaseTop: 16, phaseBottom: 204, branchTop: 216, labelTop: 208, taskTop: 244, taskPitch: 110, taskCenter: 50 };
+  const layout = { x: 32, pitch: 320, phaseWidth: 264, phaseTop: 16, phaseBottom: 232, branchTop: 244, labelTop: 236, taskTop: 272, taskPitch: 110, taskCenter: 50 };
   const width = columns.length * layout.pitch + 8;
   const height = Math.max(380, ...columns.map(column => layout.taskTop + (column.expanded ? Math.max(column.matches.length, 1) * layout.taskPitch : 76) + (canManage && column.milestone.status !== 'done' ? 54 : 24)));
   let paths = '';
 
   const content = columns.map(({ milestone, children, matches: filtered, expanded }, index) => {
     const x = layout.x + index * layout.pitch;
-    const phase = phaseTone(milestone, children, day);
+    const phase = phaseTone(milestone, children, now);
     const done = children.filter(task => task.status === 'done').length;
-    const required = milestone.status !== 'done' && milestone.dueDate <= week.end;
-    const late = required && milestone.dueDate < day;
-    const daysLeft = Math.round((Date.parse(`${milestone.dueDate}T00:00:00Z`) - Date.parse(`${day}T00:00:00Z`)) / 86400000);
-    const requirement = required ? `<span class="flow-duty ${late ? 'is-late' : ''}">${icons.warning}<strong>${late ? '已逾期 · 本周补齐' : '本周必须完成'}</strong><span>${late ? (milestone.dueDate < week.start ? '此前逾期' : `逾期 ${-daysLeft} 天`) : daysLeft === 0 ? '今天截止' : `剩 ${daysLeft} 天`}</span></span>` : '';
+    const progress = progressAgainstPlan(children, now);
+    const required = milestone.status !== 'done' && datePart(milestone.dueDate) && datePart(milestone.dueDate) <= week.end;
+    const late = required && isOverdue(milestone.dueDate, now);
+    const requirement = required ? `<span class="flow-duty ${late ? 'is-late' : ''}">${icons.warning}<strong>${late ? '已逾期 · 本周补齐' : '本周必须完成'}</strong><span>${deadlineHint(milestone.dueDate, now, week)}</span></span>` : '';
     const ready = milestone.status !== 'done' && children.length > 0 && done === children.length;
     const groupId = `flow-tasks-${encodeURIComponent(project.id)}-${encodeURIComponent(milestone.id)}`;
     if (index < columns.length - 1) {
       const nextX = x + layout.pitch;
-      paths += `<path class="flow-sequence ${milestone.status === 'done' ? 'is-done' : ''}" d="M${x + layout.phaseWidth} 110 H${nextX - 7}"/><path class="flow-arrowhead ${milestone.status === 'done' ? 'is-done' : ''}" d="m${nextX - 13} 105 6 5-6 5"/>`;
+      paths += `<path class="flow-sequence ${milestone.status === 'done' ? 'is-done' : ''}" d="M${x + layout.phaseWidth} 124 H${nextX - 7}"/><path class="flow-arrowhead ${milestone.status === 'done' ? 'is-done' : ''}" d="m${nextX - 13} 119 6 5-6 5"/>`;
     }
     const branchEnd = expanded && filtered.length ? layout.taskTop + (filtered.length - 1) * layout.taskPitch + layout.taskCenter : layout.taskTop + 35;
     paths += `<path class="flow-branch" d="M${x + 132} ${layout.phaseBottom} V${layout.branchTop} H${x + 3} V${branchEnd}"/>`;
@@ -82,15 +94,15 @@ export function renderProjectFlow(state, project, options = {}) {
 
     const taskNodes = expanded ? filtered.map((task, taskIndex) => {
       const person = state.users.find(item => item.id === task.ownerId);
-      const tone = taskTone(task, day);
-      const isLate = task.status !== 'done' && task.dueDate < day;
-      return `<button type="button" class="flow-task flow-tone-${tone.tone}" data-action="task-detail" data-id="${escape(task.id)}" style="top:${layout.taskTop + taskIndex * layout.taskPitch}px;left:${x + 20}px" aria-label="任务：${escape(task.title)}，${escape(tone.label)}，${escape(person?.name || '未分配')}负责"><span class="flow-task-top"><span class="flow-node-status"><i></i>${escape(tone.label)}</span><span class="flow-task-date ${isLate ? 'is-late' : ''}">${date(task.dueDate)} 截止</span></span><strong class="flow-task-title">${escape(task.title)}</strong><span class="flow-task-bottom"><span class="flow-person"><span class="flow-avatar">${escape(person?.name?.slice(-1) || '?')}</span>${escape(person?.name || '未分配')}</span><span class="flow-task-open" aria-hidden="true">${icons.arrow}</span></span></button>`;
+      const tone = taskTone(task, now);
+      const isLate = task.status !== 'done' && isOverdue(task.dueDate, now);
+      return `<button type="button" class="flow-task flow-tone-${tone.tone}" data-action="task-detail" data-id="${escape(task.id)}" style="top:${layout.taskTop + taskIndex * layout.taskPitch}px;left:${x + 20}px" aria-label="任务：${escape(task.title)}，${escape(tone.label)}，${escape(person?.name || '未分配')}负责，截止 ${escape(formatDateTime(task.dueDate))}"><span class="flow-task-top"><span class="flow-node-status"><i></i>${escape(tone.label)}</span><span class="flow-task-date ${isLate ? 'is-late' : ''}" title="截止 ${escape(formatDateTime(task.dueDate))}">${date(task.dueDate)}</span></span><strong class="flow-task-title">${escape(task.title)}</strong><span class="flow-task-bottom"><span class="flow-person"><span class="flow-avatar">${escape(person?.name?.slice(-1) || '?')}</span>${escape(person?.name || '未分配')}</span><span class="flow-task-open" aria-hidden="true">${icons.arrow}</span></span></button>`;
     }).join('') : '';
     const emptyCopy = !expanded ? ['已完成任务已收起', `${filtered.length} 项任务可展开查看`] : !children.length ? ['还没有任务', '添加任务，安排具体工作'] : [scope === 'mine' ? '没有分配给我的任务' : '没有本周重点任务', '切换筛选可查看其他任务'];
     const emptyState = !expanded || !filtered.length ? `<div class="flow-no-tasks${!expanded ? ' is-collapsed' : ''}" style="left:${x + 20}px;top:${layout.taskTop}px"><span>${emptyCopy[0]}</span><small>${emptyCopy[1]}</small></div>` : '';
     const toggle = milestone.status === 'done' ? `<button type="button" class="flow-toggle" data-action="flow-toggle" data-id="${escape(milestone.id)}" aria-expanded="${expanded}" aria-controls="${escape(groupId)}" aria-label="${expanded ? '收起' : '展开'}${escape(milestone.title)}的任务">${expanded ? '收起' : '展开'}${icons.chevron}</button>` : '';
 
-    return `<article class="flow-phase flow-tone-${phase.tone}${required ? ` flow-required${late ? ' is-overdue' : ''}` : ''}" style="left:${x}px;top:${layout.phaseTop}px" aria-label="大节点 ${index + 1}：${escape(milestone.title)}"><button type="button" class="flow-phase-main" data-action="milestone-detail" data-id="${escape(milestone.id)}"><span class="flow-phase-top"><span class="flow-step">${milestone.status === 'done' ? icons.check : String(index + 1).padStart(2, '0')}</span><span class="flow-node-status flow-tone-${phase.tone}"><i></i>${escape(phase.label)}</span><span class="flow-phase-open">${icons.arrow}</span></span><h3>${escape(milestone.title)}</h3>${requirement}<span class="flow-phase-meta"><span>${date(milestone.dueDate)} 交付</span></span></button><div class="flow-phase-bottom"><span><strong>${done}</strong> / ${children.length} 项已完成</span>${ready && canManage ? `<button type="button" data-action="complete-milestone" data-id="${escape(milestone.id)}" class="flow-confirm">确认达成${icons.check}</button>` : `<span class="flow-phase-progress"><i style="width:${children.length ? Math.round(done / children.length * 100) : 0}%"></i></span>`}</div></article><div class="flow-children-heading" style="left:${x + 20}px;top:${layout.labelTop}px"><span>显示 <strong>${expanded ? filtered.length : 0}</strong> / 共 ${children.length} 项</span>${toggle}</div><div id="${escape(groupId)}" class="flow-children-group"${expanded ? '' : ' hidden'}>${taskNodes}</div>${emptyState}${canManage && milestone.status !== 'done' ? `<button type="button" class="flow-add-task" data-action="new-task" data-id="${escape(project.id)}" data-milestone-id="${escape(milestone.id)}" style="left:${x + 20}px;top:${layout.taskTop + Math.max(filtered.length, 1) * layout.taskPitch}px">${icons.plus}添加小节点</button>` : ''}`;
+    return `<article class="flow-phase flow-tone-${phase.tone}${required ? ` flow-required${late ? ' is-overdue' : ''}` : ''}" style="left:${x}px;top:${layout.phaseTop}px" aria-label="大节点 ${index + 1}：${escape(milestone.title)}"><button type="button" class="flow-phase-main" data-action="milestone-detail" data-id="${escape(milestone.id)}"><span class="flow-phase-top"><span class="flow-step">${milestone.status === 'done' ? icons.check : String(index + 1).padStart(2, '0')}</span><span class="flow-node-status flow-tone-${phase.tone}"><i></i>${escape(phase.label)}</span><span class="flow-phase-open">${icons.arrow}</span></span><h3>${escape(milestone.title)}</h3>${requirement}<span class="flow-phase-meta"><span>${date(milestone.dueDate)} 交付</span></span></button><div class="flow-phase-bottom"><div class="flow-phase-completion"><span><strong>${done}</strong> / ${children.length} 项已完成</span>${ready && canManage ? `<button type="button" data-action="complete-milestone" data-id="${escape(milestone.id)}" class="flow-confirm">确认达成${icons.check}</button>` : `<strong>${progress.actual}%</strong>`}</div>${renderProgressTrack(progress, `${milestone.title}任务完成进度`)}${renderProgressNote(progress)}</div></article><div class="flow-children-heading" style="left:${x + 20}px;top:${layout.labelTop}px"><span>显示 <strong>${expanded ? filtered.length : 0}</strong> / 共 ${children.length} 项</span>${toggle}</div><div id="${escape(groupId)}" class="flow-children-group"${expanded ? '' : ' hidden'}>${taskNodes}</div>${emptyState}${canManage && milestone.status !== 'done' ? `<button type="button" class="flow-add-task" data-action="new-task" data-id="${escape(project.id)}" data-milestone-id="${escape(milestone.id)}" style="left:${x + 20}px;top:${layout.taskTop + Math.max(filtered.length, 1) * layout.taskPitch}px">${icons.plus}添加小节点</button>` : ''}`;
   }).join('');
 
   const filters = [['all', '全部任务'], ['week', '本周重点'], ['mine', '我的任务']].map(([value, label]) => `<button type="button" class="flow-filter${scope === value ? ' is-active' : ''}" data-action="flow-filter" data-id="${value}" aria-pressed="${scope === value}"${value === 'mine' && !options.actorId ? ' disabled title="登录后查看分配给自己的任务"' : ''}>${label}</button>`).join('');

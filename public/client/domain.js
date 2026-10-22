@@ -3,6 +3,8 @@
  * 正式环境由 server/service.mjs 在受信任的登录身份和云端数据上执行这些规则。
  */
 
+import { datePart, deadlineMs, startMs, validSchedule } from './time.js';
+
 const ROLES = ['admin', 'manager', 'member'];
 
 export function today() {
@@ -29,15 +31,10 @@ export function addDays(date, n) {
 }
 
 export function weekRange(date = today()) {
-  validDate(date);
-  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
-  const start = addDays(date, -((day + 6) % 7));
+  const calendarDate = datePart(validSchedule(date));
+  const day = new Date(`${calendarDate}T00:00:00Z`).getUTCDay();
+  const start = addDays(calendarDate, -((day + 6) % 7));
   return { start, end: addDays(start, 6) };
-}
-
-function shanghaiDate(iso) {
-  if (!iso || Number.isNaN(Date.parse(iso))) return null;
-  return new Date(Date.parse(iso) + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 function text(value, label, max = 2000) {
@@ -82,20 +79,22 @@ function canChangeTask(actor, task, project) {
 }
 
 function validateSchedule(state, project) {
-  validDate(project.startDate, '项目开始日期');
-  validDate(project.dueDate, '项目截止日期');
-  check(project.startDate <= project.dueDate, '项目截止日期不能早于开始日期');
+  validSchedule(project.startDate, '项目开始日期');
+  validSchedule(project.dueDate, '项目截止日期');
+  const start = startMs(project.startDate);
+  const end = deadlineMs(project.dueDate);
+  check(start <= end, '项目截止日期不能早于开始日期');
   const milestones = state.milestones.filter((m) => m.projectId === project.id);
   for (const milestone of milestones) {
-    validDate(milestone.dueDate, '节点截止日期');
-    check(milestone.dueDate >= project.startDate && milestone.dueDate <= project.dueDate, '节点日期必须位于项目周期内');
+    validSchedule(milestone.dueDate, '节点截止日期');
+    check(deadlineMs(milestone.dueDate) >= start && deadlineMs(milestone.dueDate) <= end, '节点日期必须位于项目周期内');
   }
   for (const task of state.tasks.filter((t) => t.projectId === project.id)) {
-    validDate(task.dueDate, '任务截止日期');
-    check(task.dueDate >= project.startDate && task.dueDate <= project.dueDate, '任务截止日期必须位于项目周期内');
+    validSchedule(task.dueDate, '任务截止日期');
+    check(deadlineMs(task.dueDate) >= start && deadlineMs(task.dueDate) <= end, '任务截止日期必须位于项目周期内');
     if (task.milestoneId) {
       const milestone = find(milestones, task.milestoneId, '项目节点');
-      check(task.dueDate <= milestone.dueDate, `任务“${task.title}”的截止日期不能晚于所属节点`);
+      check(deadlineMs(task.dueDate) <= deadlineMs(milestone.dueDate), `任务“${task.title}”的截止日期不能晚于所属节点`);
     }
   }
 }
@@ -107,9 +106,9 @@ function milestoneSnapshot(milestone) {
 
 function milestoneProposal(payload, project) {
   const title = text(payload?.title, '节点名称', 100);
-  const dueDate = validDate(payload?.dueDate, '节点截止日期');
-  check(dueDate >= project.startDate, '节点截止日期不能早于项目开始日期');
-  check(dueDate <= project.dueDate, '节点截止日期超出项目周期，请先申请项目延期并获批');
+  const dueDate = validSchedule(payload?.dueDate, '节点截止日期');
+  check(deadlineMs(dueDate) >= startMs(project.startDate), '节点截止日期不能早于项目开始日期');
+  check(deadlineMs(dueDate) <= deadlineMs(project.dueDate), '节点截止日期超出项目周期，请先申请项目延期并获批');
   return { title, dueDate };
 }
 
@@ -121,13 +120,23 @@ function validateMilestoneProposal(state, project, proposed, milestoneId) {
   validateSchedule({ ...state, milestones }, project);
 }
 
+export function progressAgainstPlan(items, now = Date.now()) {
+  const total = items.length;
+  const completed = items.filter((item) => item.status === 'done').length;
+  const dueItems = items.filter((item) => deadlineMs(item.dueDate) <= now);
+  const due = dueItems.length;
+  const overdueCount = dueItems.filter((item) => item.status !== 'done').length;
+  const actual = total ? (completed === total ? 100 : Math.min(99, Math.round(completed / total * 100))) : 0;
+  const planned = total ? Math.round(due / total * 100) : 0;
+  return { actual, planned, lag: Math.max(planned - actual, 0), total, completed, due, overdueCount };
+}
+
+export function projectScheduleProgress(state, projectId, now = Date.now()) {
+  return progressAgainstPlan(state.milestones.filter((item) => item.projectId === projectId), now);
+}
+
 export function projectProgress(state, projectId) {
-  const milestones = state.milestones.filter((m) => m.projectId === projectId);
-  const total = milestones.length;
-  if (!total) return 0;
-  if (milestones.every((item) => item.status === 'done')) return 100;
-  const done = milestones.filter((m) => m.status === 'done').length;
-  return Math.max(0, Math.min(99, Math.round(done / total * 100)));
+  return projectScheduleProgress(state, projectId).actual;
 }
 
 /** Read compatibility only: retain historical fields and never mutate the input. */
@@ -144,13 +153,15 @@ export function normalizeState(state) {
 
 /** All ratios use tasks due within this date window, preserving a comparable cohort. */
 export function memberStats(state, userId, start, end) {
-  validDate(start, '统计开始日期');
-  validDate(end, '统计结束日期');
-  check(start <= end, '统计结束日期不能早于开始日期');
-  const tasks = state.tasks.filter((task) => task.ownerId === userId && task.dueDate >= start && task.dueDate <= end);
+  validSchedule(start, '统计开始日期');
+  validSchedule(end, '统计结束日期');
+  const windowStart = startMs(start);
+  const windowEnd = deadlineMs(end);
+  check(windowStart <= windowEnd, '统计结束日期不能早于开始日期');
+  const tasks = state.tasks.filter((task) => task.ownerId === userId && deadlineMs(task.dueDate) >= windowStart && deadlineMs(task.dueDate) <= windowEnd);
   const due = tasks.length;
   const completed = tasks.filter((task) => task.status === 'done').length;
-  const onTime = tasks.filter((task) => task.submittedAt && shanghaiDate(task.submittedAt) <= task.dueDate).length;
+  const onTime = tasks.filter((task) => task.submittedAt && deadlineMs(task.submittedAt) <= deadlineMs(task.dueDate)).length;
   const firstReviewed = tasks.filter((task) => task.reviewCount > 0).length;
   const firstPassed = tasks.filter((task) => task.reviewCount > 0 && task.firstReviewPassed === true).length;
   const rate = (a, b) => b ? Math.round(a / b * 100) : null;
@@ -174,7 +185,7 @@ export function transact(state, action, payload = {}, actorId) {
       id: uid('p'), code: `DF-${String(next.projects.length + 1).padStart(3, '0')}`,
       name: text(payload.name, '项目名称', 80), description: optionalText(payload.description),
       category: optionalText(payload.category, 40) || '综合项目', ownerId: owner.id, memberIds,
-      startDate: validDate(payload.startDate, '开始日期'), originalDueDate: validDate(payload.dueDate, '截止日期'),
+      startDate: validSchedule(payload.startDate, '开始日期'), originalDueDate: validSchedule(payload.dueDate, '截止日期'),
       dueDate: payload.dueDate, color: ['#375fbb', '#9b704a', '#66845b', '#8266a8'][next.projects.length % 4],
     };
     validateSchedule(next, project);
@@ -196,7 +207,7 @@ export function transact(state, action, payload = {}, actorId) {
     const task = {
       id: uid('t'), projectId: project.id, milestoneId: milestone.id,
       title: text(payload.title, '任务名称', 100), ownerId: owner.id, reviewerId: reviewer.id,
-      originalDueDate: validDate(payload.dueDate, '截止日期'), dueDate: payload.dueDate,
+      originalDueDate: validSchedule(payload.dueDate, '截止日期'), dueDate: payload.dueDate,
       status: 'todo', priority: payload.priority || 'normal', description: optionalText(payload.description),
       acceptance: text(payload.acceptance, '验收标准'), deliverable: '', submittedAt: null,
       reviewedAt: null, reviewCount: 0, firstReviewPassed: null, reviewComment: '',
@@ -253,7 +264,7 @@ export function transact(state, action, payload = {}, actorId) {
       check(milestone.projectId === project.id, '节点不属于该项目');
       check(milestone.status !== 'done', '已完成节点不能修改');
       check(!next.milestoneRequests.some((item) => item.milestoneId === milestone.id && item.status === 'pending'), '该节点已有待审批的修改申请');
-      check(['title', 'dueDate'].some((key) => milestone[key] !== proposed[key]), '节点计划没有实际变化，无需提交申请');
+      check(milestone.title !== proposed.title || deadlineMs(milestone.dueDate) !== deadlineMs(proposed.dueDate), '节点计划没有实际变化，无需提交申请');
       milestoneId = milestone.id;
       before = milestoneSnapshot(milestone);
     } else {
@@ -285,8 +296,8 @@ export function transact(state, action, payload = {}, actorId) {
         const milestone = find(next.milestones, request.milestoneId, '节点');
         check(milestone.projectId === project.id, '节点不属于该项目');
         check(milestone.status !== 'done', '已完成节点不能修改');
-        check(request.before && ['title', 'dueDate', 'status'].every((key) => milestone[key] === request.before[key]), '节点计划已变化，请驳回后重新提交申请');
-        planChanged = ['title', 'dueDate'].some((key) => milestone[key] !== proposed[key]);
+        check(request.before && ['title', 'status'].every((key) => milestone[key] === request.before[key]) && deadlineMs(milestone.dueDate) === deadlineMs(request.before.dueDate), '节点计划已变化，请驳回后重新提交申请');
+        planChanged = milestone.title !== proposed.title || deadlineMs(milestone.dueDate) !== deadlineMs(proposed.dueDate);
         // Previously valid weight-only requests may still be closed; the retired
         // field remains in their audit record but never changes the live plan.
         const historicalWeightChange = Object.hasOwn(request.before, 'weight') && Object.hasOwn(request.proposed, 'weight') && request.before.weight !== request.proposed.weight;
@@ -324,9 +335,9 @@ export function transact(state, action, payload = {}, actorId) {
     const project = find(next.projects, payload.projectId, '项目');
     manageProject(actor, project);
     check(!next.extensions.some((item) => item.projectId === project.id && item.status === 'pending'), '该项目已有待审批的延期申请');
-    const newDueDate = validDate(payload.newDueDate, '申请截止日期');
-    check(newDueDate > project.dueDate, '申请日期必须晚于当前截止日期');
-    check(newDueDate >= today(), '申请截止日期不能早于今天');
+    const newDueDate = validSchedule(payload.newDueDate, '申请截止日期');
+    check(deadlineMs(newDueDate) > deadlineMs(project.dueDate), '申请日期必须晚于当前截止日期');
+    check(deadlineMs(newDueDate) >= Date.now(), '申请截止时间不能早于当前时间');
     const prepareAdjustments = (value, collection, label) => {
       check(value == null || Array.isArray(value), `${label}调整列表无效`);
       const adjustments = value || [];
@@ -335,9 +346,9 @@ export function transact(state, action, payload = {}, actorId) {
         const target = find(collection, item.id, label);
         check(target.projectId === project.id, `${label}不属于该项目`);
         check(target.status !== 'done', `已完成的${label}不能延期`);
-        const dueDate = validDate(item.newDueDate, `${label}调整日期`);
-        check(dueDate > target.dueDate, `${label}调整日期必须晚于当前日期`);
-        check(dueDate <= newDueDate, `${label}调整日期不能晚于项目新截止日期`);
+        const dueDate = validSchedule(item.newDueDate, `${label}调整日期`);
+        check(deadlineMs(dueDate) > deadlineMs(target.dueDate), `${label}调整日期必须晚于当前日期`);
+        check(deadlineMs(dueDate) <= deadlineMs(newDueDate), `${label}调整日期不能晚于项目新截止日期`);
         return { id: target.id, newDueDate: dueDate };
       });
     };
@@ -367,19 +378,21 @@ export function transact(state, action, payload = {}, actorId) {
     const comment = text(payload.comment, payload.approve ? '审批意见' : '驳回原因');
     const project = find(next.projects, extension.projectId, '项目');
     if (payload.approve) {
-      check(project.dueDate === extension.originalDueDate, '项目计划已变化，请重新提交延期申请');
-      check(extension.newDueDate >= today(), '申请的新截止日期已经过去，请驳回后重新申请');
+      check(deadlineMs(project.dueDate) === deadlineMs(extension.originalDueDate), '项目计划已变化，请重新提交延期申请');
+      validSchedule(extension.newDueDate, '申请截止日期');
+      check(deadlineMs(extension.newDueDate) > deadlineMs(project.dueDate), '申请日期必须晚于当前截止日期');
+      check(deadlineMs(extension.newDueDate) >= Date.now(), '申请的新截止日期已经过去，请驳回后重新申请');
       project.dueDate = extension.newDueDate;
       for (const item of extension.affectedMilestones) {
         const target = find(next.milestones, item.id, '节点');
         check(target.projectId === project.id && target.status !== 'done', '相关节点已完成或变更，请重新申请');
-        check(item.newDueDate > target.dueDate, '节点计划已变化，请驳回后重新提交延期申请');
+        check(deadlineMs(item.newDueDate) > deadlineMs(target.dueDate), '节点计划已变化，请驳回后重新提交延期申请');
         target.dueDate = item.newDueDate;
       }
       for (const item of extension.affectedTasks) {
         const target = find(next.tasks, item.id, '任务');
         check(target.projectId === project.id && target.status !== 'done', '相关任务已完成或变更，请重新申请');
-        check(item.newDueDate > target.dueDate, '任务计划已变化，请驳回后重新提交延期申请');
+        check(deadlineMs(item.newDueDate) > deadlineMs(target.dueDate), '任务计划已变化，请驳回后重新提交延期申请');
         target.dueDate = item.newDueDate;
       }
       validateSchedule(next, project);

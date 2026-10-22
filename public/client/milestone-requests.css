@@ -13,3 +13,8 @@
 .node-request-card .approval-footer{gap:12px}
 .node-request-card .approval-buttons .button{min-height:44px}
 @media(max-width:600px){.node-request-card .approval-body{padding-top:0}.node-proposed-details>div{grid-template-columns:68px minmax(0,1fr);gap:8px}.node-change-table th:first-child{width:24%}.node-request-card .approval-footer{align-items:center}.node-request-card .approval-buttons{width:auto;margin-left:auto}}
+.node-request-meta{display:flex;flex-wrap:wrap;gap:4px 14px;line-height:1.7;font-variant-numeric:tabular-nums}
+.node-request-meta>span{overflow-wrap:anywhere}
+.node-change-table td,.node-request-card .approval-footer>.muted{font-variant-numeric:tabular-nums}
+.node-request-card .approval-footer>.muted{overflow-wrap:anywhere;min-width:0}
+@media(max-width:600px){.node-request-meta{flex-direction:column;gap:2px}.node-request-card .approval-head>div{min-width:0}.node-request-card .approval-footer{flex-wrap:wrap}.node-request-card .approval-footer>.muted{flex-basis:100%}.node-change-table th,.node-change-table td{overflow-wrap:normal;word-break:normal}.node-change-table td{overflow-wrap:anywhere}}

@@ -512,3 +512,76 @@ test('legacy weighted node approval keeps audit fields without reactivating weig
   assert.deepEqual(saved.state.tasks, legacy.state.tasks);
   assert.deepEqual(saved.state.extensions, legacy.state.extensions);
 });
+
+test('hour-level plans pass through server approval with exact times, scoped permissions and original dates', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const created = await f.call('/api/command', ADMIN, {
+    revision: staff.data.revision, action: 'createProject',
+    payload: { name: '小时排期项目', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  const project = created.data.state.projects.at(-1);
+  const requested = await f.call('/api/command', ENGINEER, {
+    revision: created.data.revision, action: 'requestMilestone',
+    payload: { projectId: project.id, kind: 'create', title: '下午交付', dueDate: '2099-10-25T17:00', reason: '明确交付时间' },
+  });
+  assert.equal(requested.status, 200, JSON.stringify(requested.data));
+  assert.equal(requested.data.state.milestones.some((node) => node.projectId === project.id), false);
+  const approved = await f.call('/api/command', ADMIN, {
+    revision: requested.data.revision, action: 'reviewMilestoneRequest', payload: { id: requested.data.state.milestoneRequests[0].id, approve: true, comment: '按小时交付' },
+  });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  const node = approved.data.state.milestones.find((item) => item.projectId === project.id);
+  assert.equal(node.dueDate, '2099-10-25T17:00');
+  assert.equal(node.originalDueDate, node.dueDate);
+  const taskInput = { projectId: project.id, milestoneId: node.id, ownerId: 'u-engineer', reviewerId: 'u-manager', title: '小时任务', dueDate: '2099-10-25T16:00', acceptance: '提交完整成果' };
+  const before = f.stored();
+  const denied = await f.call('/api/command', ENGINEER, { revision: approved.data.revision, action: 'createTask', payload: taskInput });
+  assert.equal(denied.status, 400);
+  assert.deepEqual(f.stored(), before);
+  const taskCreated = await f.call('/api/command', ADMIN, { revision: approved.data.revision, action: 'createTask', payload: taskInput });
+  assert.equal(taskCreated.status, 200, JSON.stringify(taskCreated.data));
+  const task = taskCreated.data.state.tasks.at(-1);
+  assert.equal(task.dueDate, taskInput.dueDate);
+  assert.equal(task.originalDueDate, taskInput.dueDate);
+  const refreshed = await f.call('/api/session', ENGINEER);
+  assert.ok(refreshed.data.state.projects.some((entry) => entry.id === project.id));
+  assert.ok(!refreshed.data.state.projects.some((entry) => entry.id === 'p-site'));
+  assert.equal(refreshed.data.state.tasks.find((entry) => entry.id === task.id).dueDate, taskInput.dueDate);
+});
+
+test('concurrent hourly applications still use CAS instead of losing a submitted time', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const project = staff.data.state.projects.find((entry) => entry.id === 'p-pcb');
+  const before = f.stored();
+  const results = await Promise.all(['17:00', '18:00'].map((hour) => f.call('/api/command', ENGINEER, {
+    revision: staff.data.revision, action: 'requestMilestone',
+    payload: nodeProposal(staff.data, { title: `交付时间${hour}`, dueDate: `${project.dueDate}T${hour}` }),
+  })));
+  assert.deepEqual(results.map((result) => result.status).sort(), [200, 409]);
+  const saved = f.stored();
+  assert.equal(saved.state.milestoneRequests.length, 1);
+  assert.match(saved.state.milestoneRequests[0].proposed.dueDate, /T(17|18):00$/);
+  assert.equal(saved.revision, staff.data.revision + 1);
+  assert.deepEqual(saved.state.projects, before.state.projects);
+  assert.deepEqual(saved.state.milestones, before.state.milestones);
+  assert.deepEqual(saved.state.tasks, before.state.tasks);
+});
+
+test('submission timestamps always come from the server clock despite client-provided backdating', async (t) => {
+  const f = fixture(t);
+  const staff = await provision(f, ENGINEER, 'u-engineer');
+  const earliest = Date.now();
+  const submitted = await f.call('/api/command', ENGINEER, {
+    revision: staff.data.revision, action: 'submitTask',
+    payload: { id: 't-07', deliverable: '交付成果', submittedAt: '1990-01-01T00:00:00Z', reviewedAt: '1990-01-01T00:00:00Z', status: 'done' },
+  });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.data));
+  const task = f.stored().state.tasks.find((entry) => entry.id === 't-07');
+  assert.equal(task.status, 'review');
+  assert.equal(task.reviewedAt, null);
+  assert.ok(Date.parse(task.submittedAt) >= earliest);
+  assert.ok(Date.parse(task.submittedAt) <= Date.now());
+});

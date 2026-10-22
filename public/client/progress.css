@@ -1,0 +1,10 @@
+.schedule-progress-track { --schedule-green:#25875a; --schedule-red:#b53930; position:relative; display:block; width:100%; height:8px; border-radius:999px; background:#e8eee9; isolation:isolate; }
+.schedule-progress-track > .schedule-progress-actual { position:absolute; z-index:2; inset:0 auto 0 0; display:block; height:100%; max-width:100%; border-radius:999px; background:var(--schedule-green); }
+.schedule-progress-track.is-late > .schedule-progress-actual { border-radius:999px 0 0 999px; }
+.schedule-progress-track > .schedule-progress-lag { position:absolute; z-index:1; top:0; bottom:0; display:block; height:100%; border-top:1px solid #c7595070; border-bottom:1px solid #c7595070; border-radius:0 999px 999px 0; background:repeating-linear-gradient(135deg,#d652493f 0,#d652493f 3px,#d6524917 3px,#d6524917 6px); box-shadow:0 2px 5px #b5393017; }
+.schedule-progress-track > .schedule-progress-marker { position:absolute; z-index:3; top:-3px; bottom:-3px; display:block; width:2px; height:auto; border-radius:1px; background:#66786c; transform:translateX(-1px); }
+.schedule-progress-track.is-late > .schedule-progress-marker { background:var(--schedule-red); }
+.schedule-progress-note { display:inline-flex; flex-wrap:wrap; align-items:baseline; column-gap:2px; color:#56685c; font-size:12px; font-weight:400; line-height:1.5; font-variant-numeric:tabular-nums; }
+.schedule-progress-note strong { color:#a02d25; font-size:inherit; font-weight:600; }
+.schedule-progress-separator { margin-inline:3px; color:#77857b; }
+.schedule-progress-note.is-empty { color:#647369; }

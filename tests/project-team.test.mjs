@@ -71,6 +71,35 @@ test('legacy blocked tasks render as in progress without losing ownership or act
   assert.deepEqual({ state, project }, before);
 });
 
+test('task rows show hourly deadlines and recorded handoff times in Shanghai time', () => {
+  const { state, project } = fixture();
+  Object.assign(state.tasks[1], {
+    dueDate: '2026-10-22T18:00',
+    submittedAt: '2026-10-22T09:35:00.000Z',
+    reviewedAt: '2026-10-22T16:10:00.000Z',
+  });
+  const html = renderProjectTeam(state, project);
+  assert.match(html, /截止时间 2026\.10\.22 18:00/);
+  assert.match(html, /提交时间 2026\.10\.22 17:35/);
+  assert.match(html, /验收时间 2026\.10\.23 00:10/);
+  assert.match(html, /project-team-time-value">10\/22 18:00/);
+  assert.match(html, /project-team-time-value">10\/22 17:35/);
+  assert.match(html, /project-team-time-value">10\/23 00:10/);
+});
+
+test('old all-day deadlines remain explicit and rejected reviews are not called completed acceptance', () => {
+  const { state, project } = fixture();
+  Object.assign(state.tasks[0], {
+    dueDate: '2026-10-22',
+    reviewedAt: '2026-10-22T03:15:00.000Z',
+  });
+  const html = renderProjectTeam(state, project);
+  assert.match(html, /截止时间 2026\.10\.22 全天/);
+  assert.match(html, /project-team-time-value">10\/22 全天/);
+  assert.match(html, /最近审核时间 2026\.10\.22 11:15/);
+  assert.doesNotMatch(html, /验收时间 2026\.10\.22 11:15|提交时间/);
+});
+
 test('missing profiles and empty projects are safely explained', () => {
   const html = renderProjectTeam({ users: [], tasks: [] }, { id: 'empty', ownerId: 'missing', memberIds: ['missing'] });
   assert.match(html, /成员资料待补充/);

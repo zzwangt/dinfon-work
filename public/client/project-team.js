@@ -1,3 +1,5 @@
+import { formatDateTime } from './time.js';
+
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 const validId = value => typeof value === 'string' && value.length > 0;
 const textOr = (value, fallback) => typeof value === 'string' && value.trim() ? value.trim() : fallback;
@@ -21,13 +23,26 @@ function collect(state = {}, project = {}) {
   return { tasks, memberIds, collaboratorIds, reviewerIds, profile };
 }
 
+function taskTimes(task) {
+  const entries = [['截止', task.dueDate]];
+  if (task.submittedAt) entries.push(['提交', task.submittedAt]);
+  if (task.reviewedAt) entries.push([task.status === 'done' ? '验收' : '最近审核', task.reviewedAt]);
+  return entries;
+}
+
+function taskTiming(entries) {
+  return `<span class="project-team-task-times">${entries.map(([label,value])=>`<span title="${escape(label)}时间 ${escape(formatDateTime(value))}">${label} <span class="project-team-time-value">${escape(formatDateTime(value,{compact:true}))}</span></span>`).join('')}</span>`;
+}
+
 function taskList(tasks, responsibility) {
   return `<ul class="project-team-task-list">${tasks.map(task => {
     const status = task.status === 'blocked' ? 'doing' : task.status;
     const [label, tone] = Object.hasOwn(taskStates, status) ? taskStates[status] : ['状态待确认', 'todo'];
     const title = textOr(task.title, '未命名任务');
-    const contents = `<span class="project-team-task-title">${escape(title)}</span><span class="project-team-task-status is-${tone}"><i aria-hidden="true"></i>${label}</span>${arrowIcon}`;
-    return `<li>${validId(task.id) ? `<button type="button" class="project-team-task" data-action="task-detail" data-id="${escape(task.id)}" aria-label="查看${responsibility}：${escape(title)}，${label}">${contents}</button>` : `<div class="project-team-task">${contents}</div>`}</li>`;
+    const times = taskTimes(task);
+    const timingLabel = times.map(([name,value])=>`${name}时间 ${formatDateTime(value)}`).join('，');
+    const contents = `<span class="project-team-task-copy"><span class="project-team-task-title">${escape(title)}</span>${taskTiming(times)}</span><span class="project-team-task-status is-${tone}"><i aria-hidden="true"></i>${label}</span>${arrowIcon}`;
+    return `<li>${validId(task.id) ? `<button type="button" class="project-team-task" data-action="task-detail" data-id="${escape(task.id)}" aria-label="查看${responsibility}：${escape(title)}，${label}，${escape(timingLabel)}">${contents}</button>` : `<div class="project-team-task">${contents}</div>`}</li>`;
   }).join('')}</ul>`;
 }
 

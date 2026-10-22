@@ -156,3 +156,76 @@ test('review and overdue remain explicit statuses after simplification', () => {
   assert.match(html, /本周必须完成/);
   assert.doesNotMatch(html, /待审核/);
 });
+
+function timedFixture() {
+  const project = { id: 'p-time', name: '小时交付项目' };
+  return {
+    project,
+    state: {
+      users: [{ id: 'me', name: '本人' }, { id: 'other', name: '同事' }],
+      milestones: [{ id: 'm-time', title: '阶段交付', projectId: project.id, dueDate: '2026-10-22T17:00', status: 'pending' }],
+      tasks: [
+        { id: 't-accepted', title: '已验收', projectId: project.id, milestoneId: 'm-time', ownerId: 'other', dueDate: '2026-10-22T15:00', status: 'done' },
+        { id: 't-late', title: '待验收工作', projectId: project.id, milestoneId: 'm-time', ownerId: 'other', dueDate: '2026-10-22T16:00', status: 'review' },
+        { id: 't-later', title: '稍后交付', projectId: project.id, milestoneId: 'm-time', ownerId: 'me', dueDate: '2026-10-22T17:00', status: 'doing' },
+      ],
+    },
+  };
+}
+
+test('same-day deadlines distinguish passed hours from future hours and expose exact times', t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-22T16:30:00+08:00'));
+  const { state, project } = timedFixture();
+  const html = renderProjectFlow(state, project);
+  assert.match(html, /class="flow-task flow-tone-overdue"[^>]+data-id="t-late"/);
+  assert.match(html, /class="flow-task flow-tone-doing"[^>]+data-id="t-later"/);
+  assert.match(html, /待验收 · 已逾期/);
+  assert.match(html, /10\/22 16:00/);
+  assert.match(html, /10\/22 17:00 交付/);
+  assert.match(html, /本周必须完成/);
+  assert.doesNotMatch(html, /flow-required is-overdue/);
+  assert.match(html, /不足1小时/);
+  state.milestones[0].dueDate = '2026-10-22T16:00';
+  const past = renderProjectFlow(state, project);
+  assert.match(past, /flow-required is-overdue/);
+  assert.match(past, /已逾期 · 本周补齐/);
+});
+
+test('task filters do not change a stage actual/plan gap based on all its tasks', t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-22T16:30:00+08:00'));
+  const { state, project } = timedFixture();
+  const html = renderProjectFlow(state, project, { actorId: 'me', scope: 'mine' });
+  assert.deepEqual(visibleTaskIds(html), ['t-later']);
+  assert.match(html, /schedule-progress-actual" style="width:33%"/);
+  assert.match(html, /schedule-progress-lag" style="left:33%;width:34%"/);
+  assert.match(html, /schedule-progress-marker" style="left:67%"/);
+  assert.match(html, /计划 67%/);
+  assert.match(html, /落后 34 个百分点/);
+  assert.match(html, /<strong>1<\/strong> \/ 3 项已完成/);
+});
+
+test('the final day of a week keeps timed tasks and big nodes in weekly focus', t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-22T16:30:00+08:00'));
+  const { state, project } = timedFixture();
+  state.milestones[0].dueDate = '2026-10-25T23:00';
+  state.tasks = [
+    { ...state.tasks[2], id: 'sunday', dueDate: '2026-10-25T23:00' },
+    { ...state.tasks[2], id: 'next-monday', dueDate: '2026-10-26T00:00' },
+  ];
+  const html = renderProjectFlow(state, project, { scope: 'week' });
+  assert.deepEqual(visibleTaskIds(html), ['sunday']);
+  assert.match(html, /本周必须完成/);
+  assert.match(html, /本周待完成 <strong>1<\/strong> 个大节点/);
+});
+
+test('legacy date-only deadlines remain all-day and do not become overdue in the afternoon', t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-22T16:30:00+08:00'));
+  const { state, project } = timedFixture();
+  state.milestones[0].dueDate = '2026-10-22';
+  state.tasks = [{ ...state.tasks[2], dueDate: '2026-10-22' }];
+  const html = renderProjectFlow(state, project);
+  assert.match(html, /10\/22 全天 交付/);
+  assert.match(html, /10\/22 全天<\/span>/);
+  assert.doesNotMatch(html, /flow-tone-overdue|schedule-progress-lag/);
+  assert.match(html, /计划 0%/);
+});

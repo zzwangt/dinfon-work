@@ -10,10 +10,10 @@ test('late progress places the red gap exactly after actual and before the plann
   assert.match(html, /schedule-progress-marker" style="left:75%"/);
   assert.match(html, /role="progressbar"/);
   assert.match(html, /aria-valuenow="25"/);
-  assert.match(html, /aria-valuetext="实际 25%，计划 75%，落后 50 个百分点"/);
+  assert.match(html, /aria-valuetext="实际 25%，计划 75%，落后 50%"/);
   const note = renderProgressNote(metrics);
   assert.match(note, /计划 75%/);
-  assert.match(note, /落后 50 个百分点/);
+  assert.match(note, /落后 50%/);
 });
 
 test('ahead or on-time work has no red gap and still gives the plan in words', () => {
@@ -37,7 +37,7 @@ test('an empty plan is not presented as behind schedule or as complete', () => {
 test('zero actual progress can show the whole overdue plan without inventing completed work', () => {
   const metrics = { actual: 0, planned: 100, lag: 100, total: 2 };
   assert.match(renderProgressTrack(metrics), /schedule-progress-lag" style="left:0%;width:100%"/);
-  assert.match(renderProgressNote(metrics), /落后 100 个百分点/);
+  assert.match(renderProgressNote(metrics), /落后 100%/);
 });
 
 test('labels are escaped and nonfinite or out-of-range values cannot break track geometry', () => {

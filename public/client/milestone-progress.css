@@ -1,15 +1,15 @@
 .milestone-progress-scroll { width:100%; min-width:0; overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; scrollbar-color:#acbab0 transparent; }
-.milestone-progress-canvas { --node-green:#216d48; --node-red:#a52d27; --node-amber:#87520b; --node-blue:#245d9a; --node-neutral:#606b63; position:relative; min-width:calc(var(--milestone-count) * 144px); padding:4px 4px 0; }
-.milestone-progress-bar { position:absolute; top:22px; left:4px; right:4px; }
-.milestone-progress-steps { position:relative; display:grid; grid-template-columns:repeat(var(--milestone-count), minmax(0, 1fr)); align-items:start; gap:0; list-style:none; margin:0; padding:0; }
+.milestone-progress-canvas { --node-green:#216d48; --node-red:#a52d27; --node-amber:#87520b; --node-blue:#245d9a; --node-neutral:#606b63; position:relative; min-width:calc(var(--milestone-count) * 144px + 72px); padding:4px 0 0; }
+.milestone-progress-bar { position:absolute; top:22px; left:4px; right:calc(4px + (100% - 8px) / (var(--milestone-count) * 2 + 1)); }
+.milestone-progress-steps { position:relative; display:grid; grid-template-columns:repeat(var(--milestone-count), minmax(0, 1fr)); align-items:start; gap:0; list-style:none; width:calc(100% - 8px - (100% - 8px) / (var(--milestone-count) * 2 + 1)); margin:0 0 0 4px; padding:0; }
 .milestone-progress-step { --node-color:var(--node-neutral); --node-surface:#f3f5f2; min-width:0; margin:0; padding:0; }
 .milestone-progress-step.is-done { --node-color:var(--node-green); --node-surface:#e6f4eb; }
 .milestone-progress-step.is-overdue { --node-color:var(--node-red); --node-surface:#fff1ef; }
 .milestone-progress-step.is-week { --node-color:var(--node-amber); --node-surface:#fff4dc; }
 .milestone-progress-step.is-doing { --node-color:var(--node-blue); --node-surface:#edf4ff; }
-.milestone-progress-node { appearance:none; display:flex; flex-direction:column; align-items:center; gap:4px; width:100%; min-width:44px; min-height:44px; margin:0; padding:0 8px 12px; border:0; border-radius:6px; background:transparent; color:#273a2d; font:inherit; text-align:center; cursor:pointer; touch-action:manipulation; }
+.milestone-progress-node { appearance:none; display:flex; flex-direction:column; align-items:center; gap:4px; width:100%; min-width:44px; min-height:44px; margin:0; padding:0 8px 12px; border:0; border-radius:6px; background:transparent; color:#273a2d; font:inherit; text-align:center; cursor:pointer; touch-action:manipulation; transform:translateX(50%); }
 .milestone-progress-node-slot { display:flex; align-items:center; justify-content:center; flex-shrink:0; width:44px; height:44px; margin-bottom:2px; }
-.milestone-progress-dot { display:flex; align-items:center; justify-content:center; width:28px; height:28px; box-sizing:border-box; border:2px solid var(--node-color); border-radius:50%; background:var(--node-surface); color:var(--node-color); box-shadow:0 0 0 3px #fff; font-size:12px; font-weight:700; font-variant-numeric:tabular-nums; transition:box-shadow 140ms ease, background-color 140ms ease; }
+.milestone-progress-dot { display:flex; align-items:center; justify-content:center; width:34px; height:34px; box-sizing:border-box; border:3px solid var(--node-color); border-radius:50%; background:#fff; color:var(--node-color); box-shadow:0 0 0 3px #fff; font-size:14px; font-weight:700; font-variant-numeric:tabular-nums; transition:box-shadow 140ms ease, background-color 140ms ease; }
 .milestone-progress-dot svg { width:16px; height:16px; }
 .milestone-progress-step.is-done .milestone-progress-dot { background:var(--node-green); color:#fff; }
 .milestone-progress-title { width:100%; font-size:13px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
@@ -23,3 +23,11 @@
 @media (max-width:800px) { .milestone-progress-scroll-hint { display:block; } }
 @media (hover:hover) { .milestone-progress-node:hover .milestone-progress-title { text-decoration:underline; text-underline-offset:3px; } .milestone-progress-node:hover .milestone-progress-dot { box-shadow:0 0 0 3px #fff, 0 0 0 4px var(--node-color); } }
 @media (prefers-reduced-motion:reduce) { .milestone-progress-dot { transition:none; } }
+
+/* Compact project-list bars use the same circles without controls inside links. */
+.milestone-progress-scroll.is-compact .milestone-progress-canvas { min-width:calc(var(--milestone-count) * 38px + 19px); }
+.milestone-progress-scroll.is-compact .milestone-progress-bar { top:16px; }
+.milestone-progress-scroll.is-compact .milestone-progress-node { min-width:0; min-height:32px; padding:0; gap:0; cursor:inherit; }
+.milestone-progress-scroll.is-compact .milestone-progress-node-slot { width:32px; height:32px; margin:0; }
+.milestone-progress-scroll.is-compact .milestone-progress-dot { width:24px; height:24px; border-width:2px; font-size:11px; }
+.milestone-progress-scroll.is-compact .milestone-progress-title,.milestone-progress-scroll.is-compact .milestone-progress-state,.milestone-progress-scroll.is-compact .milestone-progress-date { display:none; }

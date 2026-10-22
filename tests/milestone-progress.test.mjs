@@ -7,6 +7,14 @@ const state = (milestones = [], tasks = []) => ({ projects: [{ id: 'p', name: '�
 const node = (id, dueDate, other = {}) => ({ id, title: `节点${id}`, dueDate, ...other });
 const render = data => renderMilestoneProgress(data, 'p', { now });
 
+test('compact bars remain valid inside project links without nesting interactive buttons', () => {
+  const html = renderMilestoneProgress(state([node('one', '2026-10-20', {status:'done'}),node('two','2026-10-28')]),'p',{now,compact:true});
+  assert.doesNotMatch(html, /<button|data-action=|milestone-progress-scroll-hint/);
+  assert.equal([...html.matchAll(/class="milestone-progress-dot"/g)].length, 2);
+  assert.match(html, /title="大节点 2：节点two，未开始，截止 2026.10.28 全天，打开项目流程"/);
+  assert.match(html, /role="progressbar"/);
+});
+
 test('empty approved plan displays a concise empty state', () => {
   const html = render({ ...state(), milestoneRequests: [{ proposed: node('pending', '2026-10-22') }] });
   assert.match(html, /暂无大节点/);
@@ -27,7 +35,7 @@ test('aggregate progress retains the shared green completion and red schedule ga
   assert.match(html, /schedule-progress-actual" style="width:33%"/);
   assert.match(html, /schedule-progress-lag" style="left:33%;width:34%"/);
   assert.match(html, /schedule-progress-marker" style="left:67%"/);
-  assert.match(html, /aria-valuetext="实际 33%，计划 67%，落后 34 个百分点"/);
+  assert.match(html, /aria-valuetext="实际 33%，计划 67%，落后 34%"/);
 });
 
 test('out-of-order completion keeps each node state independent from the green bar', () => {

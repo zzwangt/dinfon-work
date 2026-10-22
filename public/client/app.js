@@ -94,7 +94,7 @@ const safeColor = value => /^#[0-9a-f]{3,8}$/i.test(value || '') ? value : '#347
 const person = id => `<span class="person-cell">${avatar(id)}<span><span class="person-name">${e(user(id)?.name || '未分配')}</span></span></span>`;
 const button = (label, action, id = '', className = 'secondary', iconName = '') => `<button type="button" class="button ${className}" data-action="${action}"${id ? ` data-id="${e(id)}"` : ''}>${iconName ? icon(iconName) : ''}${label}</button>`;
 const empty = (title, text, action = '') => `<div class="empty-state">${icon('check')}<h3>${title}</h3><p>${text}</p>${action}</div>`;
-const progress = p => { const metrics = projectScheduleProgress(state,p.id); return `<div class="project-progress"><div class="progress-label"><span>实际进度</span><strong>${metrics.actual}%</strong></div>${renderProgressTrack(metrics,`${p.name}完成进度`)}${renderProgressNote(metrics)}</div>`; };
+const progress = p => { const metrics = projectScheduleProgress(state,p.id); return `<div class="project-progress"><div class="progress-label"><span>实际进度</span><strong>${metrics.actual}%</strong></div>${renderMilestoneProgress(state,p.id,{compact:true})}${renderProgressNote(metrics)}</div>`; };
 function projectStatus(p) {
   if (projectProgress(state,p.id) >= 100) return statusPill('done');
   if (state.extensions.some(x => x.projectId === p.id && x.status === 'pending')) return statusPill('pending', '延期审批中');

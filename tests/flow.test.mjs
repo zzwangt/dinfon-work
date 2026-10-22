@@ -200,7 +200,7 @@ test('task filters do not change a stage actual/plan gap based on all its tasks'
   assert.match(html, /schedule-progress-lag" style="left:33%;width:34%"/);
   assert.match(html, /schedule-progress-marker" style="left:67%"/);
   assert.match(html, /计划 67%/);
-  assert.match(html, /落后 34 个百分点/);
+  assert.match(html, /落后 34%/);
   assert.match(html, /<strong>1<\/strong> \/ 3 项已完成/);
 });
 

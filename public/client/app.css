@@ -100,7 +100,9 @@
 .flow-summary-bar .flow-deadline{gap:5px 8px}
 .flow-deadline>small{padding-left:0;margin:0;width:auto}
 .flow-view-row{margin:2px 0 12px;border-bottom:1px solid var(--line)}
-.flow-view-row .filter-tabs{gap:19px;padding:0;flex-wrap:nowrap;overflow:auto;width:100%}
+.flow-view-row .filter-tabs{gap:19px;padding:0;flex-wrap:nowrap;overflow:auto;flex:1;min-width:0}
+.project-actions{display:flex;gap:8px;align-items:center;flex-shrink:0;padding-bottom:8px}
+.project-actions>.button,.project-actions .project-more summary{min-height:40px;padding:9px 12px;font-size:13px;white-space:nowrap}
 .flow-view-row .filter-tab{min-height:46px;border-radius:0;padding:9px 3px;color:#53635c;border-bottom:2px solid transparent}
 .flow-view-row .filter-tab.active{color:#145d46;background:transparent;box-shadow:none;border-bottom-color:#197557;font-weight:650}
 .project-more{position:relative}
@@ -119,6 +121,7 @@
 .breadcrumb strong{font-size:14px;font-weight:600}
 .signout-link{width:40px;height:40px}
 @media(max-width:1000px){.flow-project-heading{flex-wrap:wrap}.flow-summary-progress{min-width:280px}.project-workspace>.flow-summary-bar{gap:16px}.flow-inline-selector select{max-width:100%}}
+@media(min-width:801px) and (max-width:1100px){.flow-view-row{flex-wrap:wrap;gap:4px}.flow-view-row .filter-tabs{flex-basis:100%}}
 @media(max-width:800px){
  .project-workspace>.flow-project-heading{align-items:flex-start;gap:12px;margin-bottom:14px}
  .flow-project-heading .heading-actions{width:100%;flex-wrap:nowrap;gap:7px}
@@ -134,8 +137,11 @@
  .flow-summary-bar strong{font-size:14px}
  .flow-summary-progress strong{font-size:25px}
  .flow-view-row{margin-top:0}
- .flow-view-row .filter-tabs{justify-content:space-between;gap:8px}
+ .flow-view-row .filter-tabs{justify-content:space-between;gap:8px;width:100%}
  .flow-view-row .filter-tab{min-width:44px;padding-left:0;padding-right:0;min-height:44px}
+ .project-actions{width:100%;gap:7px;padding-bottom:12px}
+ .project-actions>.button{flex:1;justify-content:center}
+ .project-actions>.button,.project-actions .project-more summary{min-height:44px;padding:9px 10px}
  .task-detail-meta>div:last-child{grid-column:auto}
  .topbar-actions .searchbox input{font-size:16px!important}
  .topbar-actions>.button{min-height:44px}

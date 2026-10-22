@@ -3,17 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24"
   },
   "scripts": {
     "install:ci": "node scripts/install-ci.mjs",
-    "dev": "node scripts/run-framework.mjs dev",
+    "dev": "node --watch server/standalone.mjs",
     "build": "node scripts/run-framework.mjs build",
-    "start": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
+    "start": "node server/standalone.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check public/client/app.js && node --check public/client/domain.js && node --check public/client/flow.js && node --check server/service.mjs"
+    "check": "node --check public/client/app.js && node --check public/client/domain.js && node --check public/client/flow.js && node --check server/service.mjs && node --check server/standalone.mjs && node --check server/auth.mjs",
+    "start:sites": "node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
+    "dev:sites": "node scripts/run-framework.mjs dev",
+    "setup": "node scripts/setup-local.mjs",
+    "backup": "node scripts/backup.mjs",
+    "admin:recover": "node scripts/manage-admin.mjs recover",
+    "admin:migrate": "node scripts/manage-admin.mjs migrate",
+    "package:standalone": "node scripts/package-standalone.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

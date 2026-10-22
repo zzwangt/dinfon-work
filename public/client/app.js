@@ -8,6 +8,7 @@ import { renderTeamAnalytics } from './team-analytics.js';
 import { canAccessRoute } from './access.js';
 import { renderMilestoneRequestCard, requestComparison } from './milestone-requests.js';
 import { renderProjectTeam, renderProjectPeopleSummary } from './project-team.js';
+import { renderInstallCard, initPWA } from './pwa.js';
 
 const LEGACY_KEY = 'dinfon.management.v1';
 const app = document.querySelector('#app');
@@ -18,22 +19,71 @@ const e = escapeHTML;
 const currentDay = () => today();
 const shift = (date, days) => addDays(datePart(date), days);
 let state = null, actorId = '', revision = 0, accountInfo = null, accountsData = null, accountsLoading = false;
-let renderedTiming = '';
+let renderedTiming = '', sessionEpoch = 0, authBusy = false;
 let storageIssue = '', toastTimer, weekOffset = 0, taskFilter = 'mine', projectFilter = 'all', approvalFilter = 'pending', approvalKind = 'nodes', searchTerm = '', flowProjectId = '', projectView = 'flow', flowScope = 'all', expandedFlowIds = new Set(), saving = false;
 async function api(path, options = {}) {
   const response = await fetch(path, {credentials:'same-origin', cache:'no-store', ...options, headers:{'Content-Type':'application/json', ...(options.headers||{})}});
   const data = await response.json().catch(()=>({error:'服务器响应异常，请稍后重试。'}));
-  if(!response.ok){const error=new Error(data.error || data.message || '操作未成功，请重试。');error.status=response.status;throw error;}
+  if(!response.ok){const error=new Error(data.error || data.message || '操作未成功，请重试。');error.status=response.status;error.code=data.code;throw error;}
   return data;
 }
-function acceptSession(data) { state=data.state; state.milestoneRequests ||= []; actorId=data.actor.id; revision=data.revision; accountInfo=data.account; }
+function acceptSession(data) {
+  accountInfo=data.account; actorId=data.actor.id; revision=data.revision;
+  if(data.mustChangePassword||data.account?.mustChangePassword){state=null;accountsData=null;passwordChangeScreen();return false;}
+  state=data.state; state.milestoneRequests ||= []; return true;
+}
+function clearLocalSession() {
+  sessionEpoch++;state=null;actorId='';revision=0;accountInfo=null;accountsData=null;accountsLoading=false;
+  searchTerm='';flowProjectId='';projectView='flow';expandedFlowIds.clear();storageIssue='';
+  modal.close();modal.innerHTML='';clearTimeout(toastTimer);toastEl.hidden=true;
+}
+function authBrand() {return `<div class="auth-brand"><span class="auth-symbol">${icon('grid')}</span><div>鼎峰<small>协同管理平台</small></div></div>`;}
 function authScreen(message='', denied=false) {
-  state=null;actorId='';accountsData=null;modal.close();
-  app.innerHTML=`<main class="auth-page"><div class="auth-brand">鼎峰<span>协同管理平台</span></div><section class="auth-card"><span class="account-eyebrow">${denied?'访问权限':'团队工作空间'}</span><h1>${denied?'账号尚未获准访问':'使用你的账号进入工作空间'}</h1><p>${e(message||'管理员与员工使用各自的 ChatGPT 账号登录，平台会自动进入对应的工作台。')}</p><div class="auth-role-explainer"><div><strong>管理端</strong><span>项目安排 · 全局统计 · 延期审批 · 账号管理</span></div><div><strong>员工端</strong><span>我的任务 · 成果提交 · 项目中心 · 周计划</span></div></div><a class="button primary" href="${denied?'/signout-with-chatgpt?return_to=/':'/signin-with-chatgpt?return_to=/'}" target="_top">${denied?'退出并更换账号':'使用 ChatGPT 登录'}</a><button class="button ghost" data-action="reload-session">重新检查</button><small>账号权限由管理员分配。无法访问时，请将登录邮箱告知公司管理员。</small></section></main>`;
+  clearLocalSession();document.title='登录 · 鼎峰协同管理';
+  app.innerHTML=`<main class="auth-page" id="content" tabindex="-1">${authBrand()}<section class="auth-card"><span class="account-eyebrow">团队工作空间</span><h1>欢迎回来</h1><p>使用公司分配的账号，继续今天的工作。</p>${message?`<p class="auth-notice ${denied?'is-error':''}" role="${denied?'alert':'status'}">${e(message)}</p>`:''}<form data-form="login" class="auth-form"><div class="field"><label for="login-name">账号</label><input id="login-name" name="login" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required minlength="3" maxlength="64" placeholder="用户名、手机号或邮箱"></div><div class="field"><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128" placeholder="请输入密码"></div><p class="form-error" role="alert" hidden></p><button type="submit" class="button primary">登录工作空间</button></form><p class="auth-help">账号由管理员开通。忘记密码时，请联系公司管理员重置。</p><div class="auth-access-summary"><span>${icon('users')}各自账号，各自权限</span><span>${icon('grid')}员工仅查看参与项目</span></div></section><div class="auth-install">${renderInstallCard()}</div><p class="auth-footer">电脑与手机，共用一个工作空间。</p></main>`;
+}
+function passwordFields() {
+  return `${field('当前密码','currentPassword','','password','required maxlength="128" autocomplete="current-password"')}${field('新密码','newPassword','','password','required minlength="12" maxlength="128" autocomplete="new-password" aria-describedby="password-help"')}${field('再次输入新密码','confirmPassword','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}<p id="password-help" class="field-help">使用 12–128 个字符，可使用一句容易记住的短语。新密码应与当前密码不同。</p>`;
+}
+function passwordChangeScreen() {
+  modal.close();modal.innerHTML='';document.title='设置新密码 · 鼎峰协同管理';
+  app.innerHTML=`<main class="auth-page" id="content" tabindex="-1">${authBrand()}<section class="auth-card"><span class="account-eyebrow">保护你的账号</span><h1>先设置你的新密码</h1><p>你正在使用初始密码或重置密码。设置后即可进入工作空间。</p><div class="auth-account-label"><span>当前账号</span><strong>${e(accountInfo?.login||'')}</strong></div><form data-form="change-password" class="auth-form"><input type="hidden" name="username" autocomplete="username" value="${e(accountInfo?.login||'')}">${passwordFields()}<p class="form-error" role="alert" hidden></p><button type="submit" class="button primary">保存并进入工作空间</button></form><button type="button" class="button ghost auth-switch" data-action="logout">退出当前账号</button></section></main>`;
+}
+function enterWorkspace() {
+  if(!state)return;
+  if(!location.hash||!canAccessRoute(actor(),route()[0]))history.replaceState(null,'',isAdmin()?'#overview':'#tasks');
+  render();
+}
+async function submitAuth(form,payload,action) {
+  if(authBusy)return;
+  const changing=action==='change-password';
+  if(changing&&payload.newPassword!==payload.confirmPassword)throw new Error('两次输入的新密码不一致，请重新确认。');
+  if(changing&&payload.newPassword===payload.currentPassword)throw new Error('新密码不能与当前密码相同。');
+  authBusy=true;const submit=form.querySelector('[type="submit"]'),label=submit.textContent;submit.disabled=true;submit.textContent=changing?'正在保存…':'正在登录…';form.setAttribute('aria-busy','true');
+  try {
+    const data=await api(changing?'/api/auth/password':'/api/auth/login',{method:'POST',body:JSON.stringify(changing?{currentPassword:payload.currentPassword,newPassword:payload.newPassword}:{login:payload.login.trim(),password:payload.password})});
+    sessionEpoch++;accountsData=null;form.reset();
+    if(acceptSession(data)){modal.close();modal.innerHTML='';enterWorkspace();if(changing)toast('新密码已保存，其他设备需要重新登录。');}
+  } catch(error) {
+    if(!changing){form.elements.password.value='';form.elements.password.focus();}
+    else if(error.status===401){authScreen('登录已失效，请重新登录。');return;}
+    throw error;
+  } finally {authBusy=false;submit.disabled=false;submit.textContent=label;form.removeAttribute('aria-busy');}
+}
+async function logout() {
+  if(authBusy)return;authBusy=true;sessionEpoch++;
+  const buttons=document.querySelectorAll('[data-action="logout"]');buttons.forEach(el=>el.disabled=true);
+  try{await api('/api/auth/logout',{method:'POST',body:'{}'});history.replaceState(null,'',location.pathname+location.search);authScreen('你已退出当前账号。');}
+  catch{throw new Error('退出未完成，请检查网络后重试。');}
+  finally{authBusy=false;buttons.forEach(el=>el.disabled=false);}
+}
+function changePassword() {
+  showModal('修改密码',`<p class="form-intro">修改后，其他设备需要使用新密码重新登录。</p><input type="hidden" name="username" autocomplete="username" value="${e(accountInfo?.login||'')}">${passwordFields()}`,'保存新密码','change-password');
 }
 async function loadSession(silent=false) {
-  try{ const data=await api('/api/session'); const wasReady=!!state,changed=data.revision!==revision; acceptSession(data); storageIssue=''; if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks'); if(!silent||((changed||renderedTiming!==timingSignature())&&!modal.open))render(); }
-  catch(error){if(error.status===401)authScreen();else if(error.status===403)authScreen(error.message,true);else if(!state)authScreen(error.message);else if(!silent)toast(error.message,true);}
+  const epoch=sessionEpoch;
+  try{const data=await api('/api/session');if(epoch!==sessionEpoch)return;const wasReady=!!state,changed=data.revision!==revision;if(!acceptSession(data))return;storageIssue='';if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks');if(!silent||((changed||renderedTiming!==timingSignature())&&!modal.open))render();}
+  catch(error){if(epoch!==sessionEpoch)return;if(error.status===401)authScreen();else if(error.status===403)authScreen(error.message,true);else if(!state)authScreen(error.message);else if(!silent)toast(error.message,true);}
 }
 const user = id => state?.users.find(u => u.id === id);
 const actor = () => user(actorId);
@@ -110,9 +160,9 @@ function toast(message, error = false) {
 }
 async function commit(action, payload, message) {
   if(saving)return;
-  const previousProjectIds=action==='createProject'?new Set(state.projects.map(p=>p.id)):null;
+  const epoch=sessionEpoch,previousProjectIds=action==='createProject'?new Set(state.projects.map(p=>p.id)):null;
   saving=true; const submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
-  try {const data=await api('/api/command',{method:'POST',body:JSON.stringify({action,payload,revision})});acceptSession(data);storageIssue='';modal.close();if(previousProjectIds){const created=state.projects.find(p=>!previousProjectIds.has(p.id));if(created){flowProjectId=created.id;projectView='flow';location.hash=`projects/${created.id}`;}}render();toast(message);}
+  try {const data=await api('/api/command',{method:'POST',body:JSON.stringify({action,payload,revision})});if(epoch!==sessionEpoch)return;acceptSession(data);storageIssue='';modal.close();if(previousProjectIds){const created=state.projects.find(p=>!previousProjectIds.has(p.id));if(created){flowProjectId=created.id;projectView='flow';location.hash=`projects/${created.id}`;}}render();toast(message);}
   catch(error){if(error.status===409){await loadSession(true);error.message+=' 已刷新最新数据，请核对后重试。';}if(error.status===401||error.status===403)await loadSession(true);throw error;}
   finally{saving=false;if(submit)submit.disabled=false;}
 }
@@ -127,7 +177,7 @@ function render() {
   const pending = [...visibleExtensions(),...visibleNodeRequests()].filter(x => x.status === 'pending').length;
   const mobile=(isAdmin()?[routes.find(r=>r.id==='overview'),routes.find(r=>r.id==='dashboard'),routes.find(r=>r.id==='tasks'),routes.find(r=>r.id==='accounts'),routes.find(r=>r.id==='my-account')]:nav.filter(r=>r.id!=='approvals'));
   const navLink=r=>`<a href="#${r.id}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${r.name}</span>${r.id==='approvals'&&pending?`<span class="nav-count">${pending}</span>`:''}</a>`;
-  app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'}</div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>云端保存 · 独立账号</div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><strong>${pageTitle(page)}</strong></div><div class="topbar-actions"><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${roleLabel(a.role)}</small></span></a><a href="/signout-with-chatgpt?return_to=/" target="_top" class="signout-link" aria-label="退出登录">${icon('logout')}</a></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${({overview:'项目中心',dashboard:'管理后台',tasks:'任务',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span></a>`).join('')}</nav></div></div>`;
+  app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'}</div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>服务器保存 · 独立账号</div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><strong>${pageTitle(page)}</strong></div><div class="topbar-actions"><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${roleLabel(a.role)}</small></span></a><button type="button" data-action="logout" class="signout-link" aria-label="退出登录">${icon('logout')}</button></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${({overview:'项目中心',dashboard:'管理后台',tasks:'任务',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span></a>`).join('')}</nav></div></div>`;
   renderContent();
 }
 function renderContent() {
@@ -245,41 +295,62 @@ function teamPage() {
 const rate=(pct,n,d)=>`<span class="rate ${pct!==null&&pct>=80?'positive':''}">${pct===null || pct===undefined?'—':`${Math.round(pct)}%`}</span><span class="cell-subtext">${n ?? 0} / ${d ?? 0} 项</span>`;
 function settingsPage() {
   let hasLegacy=false;try{hasLegacy=!!localStorage.getItem(LEGACY_KEY);}catch{}
-  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>ChatGPT 独立账号</dd></div><div><dt>数据存储</dt><dd>云端数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>数据备份</h2><p>导出当前可见的项目、任务、成员和审批记录。备份不包含账号登录信息。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到云端。可先导出备份，避免覆盖云端记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部大节点验收通过，项目进度才达到 100%。</li><li>新增、修改大节点须提交申请，管理员批准后才生效。</li><li>延期申请与审批人分离，批准后才调整日期。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>先在账号管理中登记员工的 ChatGPT 登录邮箱，再在站点共享设置中允许同一邮箱访问本站。两处都开通后，员工才可登录。</p><p class="cell-subtext">当前站点仍保留私有访问范围；创建平台账号不会自动发送邀请或开放站点。</p></section></div>`;
+  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>独立账号与密码</dd></div><div><dt>数据存储</dt><dd>服务器数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>数据备份</h2><p>导出当前可见的项目、任务、成员和审批记录。备份不包含账号登录信息。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到服务器。可先导出备份，避免覆盖服务器记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部大节点验收通过，项目进度才达到 100%。</li><li>新增、修改大节点须提交申请，管理员批准后才生效。</li><li>延期申请与审批人分离，批准后才调整日期。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>在账号管理中设置员工账号、初始密码和参与项目。员工首次登录时设置自己的密码，之后即可使用电脑或手机处理工作。</p><p class="cell-subtext">账号、初始密码和平台网址需由管理员通过公司内部渠道告知员工。忘记密码时由管理员重置。</p></section></div>`;
 }
 function myAccountPage() {
   const a=actor(),w=weekRange(currentDay()),s=memberStats(state,a.id,w.start,w.end);
-  return heading('我的账号','当前身份由 ChatGPT 登录确认，权限由平台管理员分配。')+`<div class="account-profile-card"><div class="account-profile-head">${avatar(a.id)}<div><h2>${e(a.name)}</h2><span>${e(a.title||roleLabel(a.role))} · ${e(a.department||'工作空间')}</span></div><span class="status ${isAdmin()?'green':'blue'}">${isAdmin()?'管理端':'员工端'}</span></div><dl class="account-profile-details"><div><dt>登录邮箱</dt><dd>${e(accountInfo?.email||'—')}</dd></div><div><dt>平台角色</dt><dd>${roleLabel(a.role)}</dd></div><div><dt>可见项目</dt><dd>${visibleProjects().length} 个${isAdmin()?' · 全部项目':' · 仅参与的项目'}</dd></div><div><dt>数据存储</dt><dd>云端保存</dd></div></dl><p class="field-help">${isAdmin()?'你可以管理项目、审批延期、查看团队数据，并开通员工账号。':'你可以查看参与项目、处理自己的任务并提交成果。项目负责人可安排所负责项目的计划。'}</p><div class="my-account-links">${isAdmin()?'<a href="#settings" class="text-link">平台设置与数据备份</a><a href="#team" class="text-link">团队与效能</a>':'<a href="#approvals" class="text-link">查看申请记录</a>'}</div><a class="button secondary" href="/signout-with-chatgpt?return_to=/" target="_top">退出当前账号</a></div><section class="panel personal-stats"><div class="panel-header"><h2>我本周的执行情况</h2><span class="muted">${shortDate(w.start)} — ${shortDate(w.end)}</span></div><div class="personal-stats-grid"><div><span>计划完成率</span>${rate(s.completionRate,s.completed,s.due)}</div><div><span>按时提交率</span>${rate(s.onTimeRate,s.onTime,s.due)}</div><div><span>一次验收通过率</span>${rate(s.firstPassRate,s.firstPassed,s.firstReviewed)}</div></div></section>`;
+  return heading('我的账号','管理登录信息，查看自己的工作与权限。')+`<div class="account-profile-card"><div class="account-profile-head">${avatar(a.id)}<div><h2>${e(a.name)}</h2><span>${e(a.title||roleLabel(a.role))} · ${e(a.department||'工作空间')}</span></div><span class="status ${isAdmin()?'green':'blue'}">${isAdmin()?'管理端':'员工端'}</span></div><dl class="account-profile-details"><div><dt>登录账号</dt><dd>${e(accountInfo?.login||'—')}</dd></div><div><dt>平台角色</dt><dd>${roleLabel(a.role)}</dd></div><div><dt>可见项目</dt><dd>${visibleProjects().length} 个${isAdmin()?' · 全部项目':' · 仅参与的项目'}</dd></div><div><dt>数据存储</dt><dd>服务器保存</dd></div></dl><p class="field-help">${isAdmin()?'你可以管理项目、审批延期、查看团队数据，并开通员工账号。':'你可以查看参与项目、处理自己的任务并提交成果。项目负责人可安排所负责项目的计划。'}</p><div class="my-account-links">${isAdmin()?'<a href="#settings" class="text-link">平台设置与数据备份</a><a href="#team" class="text-link">团队与效能</a>':'<a href="#approvals" class="text-link">查看申请记录</a>'}</div><div class="account-security-actions">${button('修改密码','change-password','','secondary')}${button('退出当前账号','logout','','ghost')}</div></div>${renderInstallCard()}<section class="panel personal-stats"><div class="panel-header"><h2>我本周的执行情况</h2><span class="muted">${shortDate(w.start)} — ${shortDate(w.end)}</span></div><div class="personal-stats-grid"><div><span>计划完成率</span>${rate(s.completionRate,s.completed,s.due)}</div><div><span>按时提交率</span>${rate(s.onTimeRate,s.onTime,s.due)}</div><div><span>一次验收通过率</span>${rate(s.firstPassRate,s.firstPassed,s.firstReviewed)}</div></div></section>`;
 }
 async function loadAccounts() {
   if(!isAdmin()||accountsLoading)return;
-  accountsLoading=true;
-  try{accountsData=await api('/api/accounts');if(route()[0]==='accounts'&&!modal.open)renderContent();}
+  accountsLoading=true;const epoch=sessionEpoch;
+  try{const data=await api('/api/accounts');if(epoch!==sessionEpoch||!isAdmin())return;accountsData=data;if(route()[0]==='accounts'&&!modal.open)renderContent();}
   catch(error){toast(error.message,true);if(error.status===401||error.status===403)await loadSession(true);}
   finally{accountsLoading=false;}
 }
 function accountsPage() {
   if(!accountsData){if(!accountsLoading)queueMicrotask(loadAccounts);return heading('账号管理','管理员与员工分别登录，权限由服务器执行。')+'<div class="panel session-loading" role="status">正在加载账号…</div>';}
   const list=accountsData.accounts,active=list.filter(x=>x.status==='active'),unlinked=state.users.filter(u=>!list.some(x=>x.userId===u.id));
-  return heading('账号管理','登记员工的登录邮箱，分配角色，并关联已有项目成员。',button('开通账号','new-account','','primary','plus'))+`<div class="account-summary"><span><strong>${active.length}</strong> 已启用账号</span><span><strong>${list.filter(x=>x.role==='admin').length}</strong> 管理员</span><span><strong>${unlinked.length}</strong> 位成员尚未关联账号</span><button class="text-link" data-action="refresh-accounts">刷新列表</button></div><div class="account-access-note">${icon('users')}<div><strong>管理端与员工端独立使用</strong><p>开通账号后，还需在本站的共享设置中授权同一邮箱访问。员工用自己的 ChatGPT 账号登录，系统自动进入员工工作台；这里不会自动发送邀请。</p></div></div><section class="panel"><div class="table-wrap"><table class="data-table account-table"><thead><tr><th>姓名 / 登录邮箱</th><th>角色与工作台</th><th>账号状态</th><th>登录关联</th><th>操作</th></tr></thead><tbody>${list.map(a=>`<tr><td><strong>${e(a.name)}</strong><span class="cell-subtext">${e(a.email)}</span></td><td>${roleLabel(a.role)}<span class="cell-subtext">${a.role==='admin'?'管理端 · 全局数据':'员工端 · 参与项目'}</span></td><td>${statusPill(a.status==='active'?'done':'todo',a.status==='active'?'已启用':'已停用')}</td><td>${a.linked?'已绑定 ChatGPT':'等待首次登录'}<span class="cell-subtext">${a.lastLoginAt?`最近登录 ${fullDate(a.lastLoginAt)}`:'请使用登记的邮箱登录'}</span></td><td>${button('管理','edit-account',a.id,'small secondary')}${a.userId===actorId?'<span class="cell-subtext">当前账号</span>':''}</td></tr>`).join('')}</tbody></table></div></section>${unlinked.length?`<section class="panel unlinked-members"><div class="panel-header"><div><h2>尚未开通账号的项目成员</h2><p class="panel-subtitle">业务中的负责人记录不会自动成为登录账号。开通时选择“关联已有成员”即可保留原有任务归属。</p></div></div><div class="unlinked-member-list">${unlinked.map(u=>`<span>${avatar(u.id)}${e(u.name)}<small>${roleLabel(u.role)}</small></span>`).join('')}</div></section>`:''}`;
+  return heading('账号管理','开通独立账号、分配角色，并关联项目成员。',button('开通账号','new-account','','primary','plus'))+`<div class="account-summary"><span><strong>${active.length}</strong> 已启用账号</span><span><strong>${list.filter(x=>x.role==='admin').length}</strong> 管理员</span><span><strong>${unlinked.length}</strong> 位成员尚未关联账号</span><button class="text-link" data-action="refresh-accounts">刷新列表</button></div><div class="account-access-note">${icon('users')}<div><strong>管理端与员工端独立使用</strong><p>开通账号时选择参与项目；之后可在“管理”中调整。员工首次登录需设置新密码，只能看到自己参与的项目；账号信息由管理员内部通知。</p></div></div><section class="panel"><div class="table-wrap"><table class="data-table account-table"><thead><tr><th>姓名 / 登录账号</th><th>角色与工作台</th><th>账号状态</th><th>登录情况</th><th>操作</th></tr></thead><tbody>${list.map(a=>`<tr><td><strong>${e(a.name)}</strong><span class="cell-subtext">${e(a.login||a.email||'—')}</span></td><td>${roleLabel(a.role)}<span class="cell-subtext">${a.role==='admin'?'管理端 · 全局数据':'员工端 · 参与项目'}</span></td><td>${statusPill(a.status==='active'?'done':'todo',a.status==='active'?'已启用':'已停用')}</td><td>${a.mustChangePassword?'待设置新密码':a.lastLoginAt?'正常使用':'等待首次登录'}<span class="cell-subtext">${a.lastLoginAt?`最近登录 ${fullDate(a.lastLoginAt)}`:'尚无登录记录'}</span></td><td><div class="account-row-actions">${button('管理','edit-account',a.id,'small secondary')}${a.userId===actorId?button('修改密码','change-password','','small ghost'):button('重置密码','reset-password',a.id,'small ghost')}</div>${a.userId===actorId?'<span class="cell-subtext">当前账号</span>':''}</td></tr>`).join('')}</tbody></table></div></section>${unlinked.length?`<section class="panel unlinked-members"><div class="panel-header"><div><h2>尚未开通账号的项目成员</h2><p class="panel-subtitle">业务中的负责人记录不会自动成为登录账号。开通时选择“关联已有成员”即可保留原有任务归属。</p></div></div><div class="unlinked-member-list">${unlinked.map(u=>`<span>${avatar(u.id)}${e(u.name)}<small>${roleLabel(u.role)}</small></span>`).join('')}</div></section>`:''}`;
 }
 function accountRoleOptions(selected='member') {return [['member','员工'],['manager','项目负责人'],['admin','管理员']].map(([id,label])=>`<option value="${id}" ${selected===id?'selected':''}>${label}</option>`).join('');}
+function accountProjectNotice(role) {
+  return role==='admin'?'管理员可查看全部项目；这里记录参与关系，不限制管理员权限。':'员工只可访问参与或负责的项目。移出项目会撤销该员工的访问权限，已有任务负责人不会自动更换。';
+}
+function accountProjectFields(userId='',role='member') {
+  return `<fieldset class="account-projects field full"><legend>参与项目</legend><p class="field-help" id="account-project-help">${accountProjectNotice(role)}</p><div class="account-project-list">${state.projects.map(p=>{const owned=p.ownerId===userId,selected=owned||p.memberIds.includes(userId);return `<label class="account-project-choice"><input type="checkbox" name="projectIds" value="${e(p.id)}" ${selected?'checked':''} ${owned?'disabled':''}><span><strong>${e(p.name)}</strong><small>${e(p.code||'项目')}${owned?' · 项目负责人，保留访问权限':''}</small></span></label>`;}).join('')||'<p class="field-help">暂无项目，可以先开通账号，再新建项目并选择成员。</p>'}</div></fieldset>`;
+}
+function selectedAccountProjects(data,userId='') {
+  return [...new Set([...data.getAll('projectIds'),...state.projects.filter(p=>p.ownerId===userId).map(p=>p.id)])];
+}
 function newAccount() {
   if(!isAdmin())return;
   const linked=new Set((accountsData?.accounts||[]).map(a=>a.userId));
-  showModal('开通独立账号',`<p class="form-intro">登记对方实际用于 ChatGPT 登录的邮箱。员工无法自己选择或提升角色。</p><div class="form-grid">${field('登录邮箱','email','','email','required maxlength="254" autocomplete="off"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号角色','role',accountRoleOptions())}${selectField('关联项目成员','existingUserId','<option value="new">创建新成员</option>'+state.users.filter(u=>!linked.has(u.id)).map(u=>`<option value="${e(u.id)}">${e(u.name)} · ${roleLabel(u.role)}</option>`).join(''))}${field('职位','title','','text','maxlength="40"')}${field('部门','department','','text','maxlength="40"')}</div><p class="field-help">关联已有成员将保留其任务和项目归属，并使用上面的姓名、角色。管理员可以访问全部公司数据，请谨慎分配。</p>`,'开通账号','create-account');
+  showModal('开通独立账号',`<p class="form-intro">设置员工专属账号与初始密码。首次登录需改密，员工不能自行提升角色。</p><div class="form-grid">${field('登录账号','login','','text','required minlength="3" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9._@\\-]{3,64}" aria-describedby="account-login-help"')}${field('初始密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号角色','role',accountRoleOptions())}${selectField('关联项目成员','existingUserId','<option value="new">创建新成员</option>'+state.users.filter(u=>!linked.has(u.id)).map(u=>`<option value="${e(u.id)}">${e(u.name)} · ${roleLabel(u.role)}</option>`).join(''))}${field('职位','title','','text','maxlength="40"')}${field('部门','department','','text','maxlength="40"')}<div class="field full" id="account-project-memberships">${accountProjectFields()}</div></div><p id="account-login-help" class="field-help">账号支持 3–64 个英文字母、数字、点、下划线、短横线或 @，可使用手机号或邮箱。密码需为 12–128 个字符。</p><p class="field-help">关联已有成员将保留其任务和项目归属。请将账号和初始密码通过公司内部渠道告知员工。管理员可以访问全部公司数据，请谨慎分配。</p>`,'开通账号','create-account');
 }
 function editAccount(id) {
   const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
   const own=a.userId===actorId;
-  showModal('管理账号',`<p class="form-intro"><strong>${e(a.name)}</strong><br>${e(a.email)}</p>${selectField('账号角色','role',accountRoleOptions(a.role))}${selectField('账号状态','status',`<option value="active" ${a.status==='active'?'selected':''}>启用</option><option value="disabled" ${a.status==='disabled'?'selected':''} ${own?'disabled':''}>停用</option>`)}<p class="field-help">${own?'不能停用当前账号，也不能移除最后一名管理员。':'停用后，该账号立即失去平台数据访问和操作权限。项目与任务历史记录仍会保留。'} 修改角色不会自动变更项目负责人或任务归属。</p>`,'保存账号设置','edit-account',id);
+  showModal('管理账号',`<p class="form-intro"><strong>${e(a.name)}</strong><br>${e(a.login||a.email||'—')}</p>${selectField('账号角色','role',accountRoleOptions(a.role))}${selectField('账号状态','status',`<option value="active" ${a.status==='active'?'selected':''}>启用</option><option value="disabled" ${a.status==='disabled'?'selected':''} ${own?'disabled':''}>停用</option>`)}<div id="account-project-memberships">${accountProjectFields(a.userId,a.role)}</div><p class="field-help">${own?'不能停用当前账号，也不能移除最后一名管理员。':'停用后，该账号立即失去平台数据访问和操作权限。项目与任务历史记录仍会保留。'} 修改角色不会自动变更项目负责人或任务归属。</p>`,'保存账号设置','edit-account',id);
+}
+function resetPassword(id) {
+  const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
+  if(a.userId===actorId)return changePassword();
+  showModal('重置员工密码',`<p class="form-intro">为 <strong>${e(a.name)}</strong>（${e(a.login||a.email)}）设置临时密码。保存后该账号将退出其他设备，下次登录需重新设置密码。</p>${field('临时密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('再次输入临时密码','confirmPassword','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}<p class="field-help">使用 12–128 个字符。请通过公司内部渠道单独告知员工，密码不会在页面中再次展示。</p>`,'重置密码','reset-password',id);
+}
+async function savePasswordReset(payload,id) {
+  if(payload.password!==payload.confirmPassword)throw new Error('两次输入的临时密码不一致，请重新确认。');
+  if(saving)return;saving=true;const epoch=sessionEpoch,submit=modal.querySelector('[type="submit"]');submit.disabled=true;
+  try{const data=await api(`/api/accounts/${encodeURIComponent(id)}/password`,{method:'POST',body:JSON.stringify({password:payload.password,revision:accountsData?.revision??revision})});if(epoch!==sessionEpoch)return;acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();modal.innerHTML='';render();toast('密码已重置，请单独通知员工。');}
+  catch(error){if(error.status===409)await loadAccounts();if(error.status===401||error.status===403)await loadSession(true);throw error;}
+  finally{saving=false;submit.disabled=false;}
 }
 async function saveAccount(action,payload,id) {
-  if(saving)return;saving=true;const submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
+  if(saving)return;saving=true;const epoch=sessionEpoch,submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
   try{
     if(!payload.existingUserId||payload.existingUserId==='new')delete payload.existingUserId;
     const data=await api(action==='create-account'?'/api/accounts':`/api/accounts/${encodeURIComponent(id)}`,{method:action==='create-account'?'POST':'PATCH',body:JSON.stringify({...payload,revision:accountsData?.revision??revision})});
-    acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();render();toast(action==='create-account'?'账号已开通；请确认站点共享权限也已授予该邮箱。':'账号设置已保存。');
+    if(epoch!==sessionEpoch)return;acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();modal.innerHTML='';render();toast(action==='create-account'?'账号已开通；请向员工告知账号、初始密码和平台网址。':'账号设置已保存。');
   }catch(error){if(error.status===409)await loadAccounts();throw error;}finally{saving=false;if(submit)submit.disabled=false;}
 }
 function searchPage() {
@@ -353,7 +424,7 @@ function dataForExport() {
   return {...state,projects,tasks,milestones,extensions,logs,users:state.users.filter(u=>users.has(u.id))};
 }
 function exportFile(name,body,type) {const blob=new Blob([body],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('文件已生成，请查看浏览器下载。');}
-function exportWeek() {const {r,ts,ms,done,late}=reportData();const lines=[`# 鼎峰项目周报`,`${r.start} — ${r.end}`,'',`统计范围：${isAdmin()?'所有项目':`${actor().name} 可见项目`}`,'',`## 本周概况`,`- 到期任务：${ts.length} 项`,`- 已验收完成：${done.length} 项`,`- 周节点达成：${ms.filter(m=>m.status==='done').length}/${ms.length}`,`- 逾期任务：${late.length} 项`,'','## 已完成工作',...done.map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${project(t.projectId)?.name}；提交 ${fullDate(t.submittedAt)}；验收 ${fullDate(t.reviewedAt)}）`),'','## 本周里程碑',...ms.map(m=>`- ${m.title}：${m.status==='done'?'已达成':'未达成'}；截止 ${fullDate(m.dueDate)}`),'','## 逾期待跟进',...late.map(t=>`- ${t.title}：${`超过截止时间 ${fullDate(t.dueDate)}`}`),'','## 下周到期任务',...visibleTasks().filter(t=>inRange(t.dueDate,{start:shift(r.start,7),end:shift(r.end,7)})).map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${fullDate(t.dueDate)}）`),'','## 负责人补充与确认','请补充延期原因、需要协调的资源与下周重点。','','此文件根据当前可见的云端项目数据自动汇总，时间均为北京时间。'];exportFile(`鼎峰周报_${r.start}.md`,lines.join('\n'),'text/markdown;charset=utf-8');}
+function exportWeek() {const {r,ts,ms,done,late}=reportData();const lines=[`# 鼎峰项目周报`,`${r.start} — ${r.end}`,'',`统计范围：${isAdmin()?'所有项目':`${actor().name} 可见项目`}`,'',`## 本周概况`,`- 到期任务：${ts.length} 项`,`- 已验收完成：${done.length} 项`,`- 周节点达成：${ms.filter(m=>m.status==='done').length}/${ms.length}`,`- 逾期任务：${late.length} 项`,'','## 已完成工作',...done.map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${project(t.projectId)?.name}；提交 ${fullDate(t.submittedAt)}；验收 ${fullDate(t.reviewedAt)}）`),'','## 本周里程碑',...ms.map(m=>`- ${m.title}：${m.status==='done'?'已达成':'未达成'}；截止 ${fullDate(m.dueDate)}`),'','## 逾期待跟进',...late.map(t=>`- ${t.title}：${`超过截止时间 ${fullDate(t.dueDate)}`}`),'','## 下周到期任务',...visibleTasks().filter(t=>inRange(t.dueDate,{start:shift(r.start,7),end:shift(r.end,7)})).map(t=>`- ${t.title}（${user(t.ownerId)?.name}；${fullDate(t.dueDate)}）`),'','## 负责人补充与确认','请补充延期原因、需要协调的资源与下周重点。','','此文件根据当前可见的服务器项目数据自动汇总，时间均为北京时间。'];exportFile(`鼎峰周报_${r.start}.md`,lines.join('\n'),'text/markdown;charset=utf-8');}
 
 document.addEventListener('click',async event=>{
   if(event.target.closest('.skip-link')){event.preventDefault();document.querySelector('#content')?.focus();return;}
@@ -363,7 +434,10 @@ document.addEventListener('click',async event=>{
   try {
     if(action==='reload-session'){await loadSession();if(state&&route()[0]==='accounts')await loadAccounts();return;}
     if(action==='refresh-accounts'){await loadAccounts();return;}
+    if(action==='logout')return await logout();
     if(!state)return;
+    if(action==='change-password')return changePassword();
+    if(action==='reset-password')return resetPassword(id);
     if(action==='flow-filter'){flowScope=['all','week','mine'].includes(id)?id:'all';renderContent();document.querySelector(`[data-action="flow-filter"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
     if(action==='flow-toggle'){const viewport=document.querySelector('.flow-scroll'),pos=viewport&&[viewport.scrollLeft,viewport.scrollTop];expandedFlowIds.has(id)?expandedFlowIds.delete(id):expandedFlowIds.add(id);renderContent();const next=document.querySelector('.flow-scroll');if(next&&pos){next.scrollLeft=pos[0];next.scrollTop=pos[1];}document.querySelector(`[data-action="flow-toggle"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
     if(action==='new-account')return newAccount();
@@ -402,7 +476,11 @@ document.addEventListener('click',async event=>{
 document.addEventListener('submit',async event=>{
   const form=event.target.closest('form[data-form]');if(!form)return;event.preventDefault();const data=new FormData(form),payload=Object.fromEntries(data),action=form.dataset.form,id=form.dataset.id;const err=form.querySelector('.form-error');
   try {
-    if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
+    if(err){err.hidden=true;err.textContent='';}
+    if(action==='login'||action==='change-password')return await submitAuth(form,payload,action);
+    if(!state)return;
+    if(action==='reset-password')return await savePasswordReset(payload,id);
+    if(action==='create-account'||action==='edit-account'){const userId=action==='create-account'?payload.existingUserId:accountsData?.accounts.find(a=>a.id===id)?.userId;payload.projectIds=selectedAccountProjects(data,userId);return await saveAccount(action,payload,id);}
     if(action==='createProject'){payload.memberIds=data.getAll('memberIds');return await commit(action,payload,'项目已创建，可以开始添加里程碑与任务。');}
     if(action==='createTask'){return await commit(action,payload,'任务已创建并分配。');}
     if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id},'申请已提交，管理员批准后才生效。');}
@@ -413,7 +491,7 @@ document.addEventListener('submit',async event=>{
     if(action==='requestExtension'){payload.affectedTasks=data.getAll('taskIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));payload.affectedMilestones=data.getAll('milestoneIds').map(id=>({id,newDueDate:data.get(`date-${id}`)}));return await commit(action,payload,'延期申请已提交，等待管理员审批。');}
     if(action==='approveExtension'||action==='rejectExtension')return await commit('reviewExtension',{id,approve:action==='approveExtension',comment:payload.comment},action==='approveExtension'?'延期已批准，相关计划已同步更新。':'延期申请已驳回，原计划保持不变。');
 
-  } catch(error){if(err&&modal.open){err.hidden=false;err.textContent=error.message;err.scrollIntoView({block:'nearest'});}else toast(error.message,true);}
+  } catch(error){if(err&&form.isConnected){err.hidden=false;err.textContent=error.message;err.scrollIntoView({block:'nearest'});}else toast(error.message,true);}
 });
 document.addEventListener('change',event=>{
   const el=event.target;
@@ -422,7 +500,8 @@ document.addEventListener('change',event=>{
   if(el.hasAttribute('data-preserve-all-day')){const input=el.closest('form').elements.dueDate;input.disabled=el.checked;input.required=!el.checked;return;}
   if(el.dataset.reschedule){const input=modal.querySelector(`[data-reschedule-date="${CSS.escape(el.dataset.reschedule)}"]`);if(input){input.disabled=!el.checked;input.required=el.checked;}return;}
   const form=el.closest('form');if(!form)return;
-  if(form.dataset.form==='create-account'&&el.name==='existingUserId'){const u=user(el.value);if(u){form.elements.name.value=u.name;form.elements.role.value=u.role;form.elements.title.value=u.title||'';form.elements.department.value=u.department||'';}return;}
+  if(form.dataset.form==='create-account'&&el.name==='existingUserId'){const u=user(el.value);if(u){form.elements.name.value=u.name;form.elements.role.value=u.role;form.elements.title.value=u.title||'';form.elements.department.value=u.department||'';}form.querySelector('#account-project-memberships').innerHTML=accountProjectFields(u?.id||'',form.elements.role.value);return;}
+  if(['create-account','edit-account'].includes(form.dataset.form)&&el.name==='role'){form.querySelector('#account-project-help').textContent=accountProjectNotice(el.value);return;}
   if(el.name==='projectId'&&form.dataset.form==='requestExtension'){document.querySelector('#extension-dates').innerHTML=extensionFields(el.value);return;}
   if(form.dataset.form==='createTask'&&el.name==='projectId'){
     const p=project(el.value),ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done');
@@ -441,5 +520,6 @@ window.addEventListener('hashchange',()=>{searchTerm='';projectView='flow';expan
 
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)modal.close();}});
 app.innerHTML='<div class="session-loading" role="status">正在载入你的工作台…</div>';
+initPWA();
 await loadSession();
-setInterval(()=>{if(state&&!document.hidden&&!modal.open&&!saving&&route()[0]!=='accounts'&&!searchTerm)loadSession(true);},45000);
+setInterval(()=>{if(state&&!authBusy&&!document.hidden&&!modal.open&&!saving&&route()[0]!=='accounts'&&!searchTerm)loadSession(true);},45000);

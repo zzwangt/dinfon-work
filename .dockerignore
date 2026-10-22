@@ -1,0 +1,14 @@
+.git
+.qa
+node_modules
+.env*
+.dev.vars
+config/runtime.json
+config/deploy.env
+data
+dist
+.wrangler
+.migration-starter
+.sites-runtime
+*.zip
+*.tar.gz

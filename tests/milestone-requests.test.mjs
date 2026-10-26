@@ -120,12 +120,12 @@ test('rejection keeps new and changed plans untouched and processed requests can
   }
 });
 
-test('node reviews require administrator role, an explicit decision and an explanation', () => {
+test('node reviews require administrator role, an explicit decision and valid optional explanation', () => {
   const pending = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
   for (const actorId of ['u-engineer', 'u-manager', 'u-ops']) assert.throws(() => review(pending, true, actorId), /仅后台管理员/);
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, comment: '说明' }, 'u-admin'), /请选择批准或驳回/);
   for (const approve of [true, false]) {
-    assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve, comment: ' ' }, 'u-admin'), /审批意见|驳回原因/);
+    assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve, comment: {} }, 'u-admin'), /文本长度/);
   }
 });
 
@@ -141,7 +141,7 @@ test('request validation rejects bad fields, nonexistent dates and out-of-projec
   for (const kind of [undefined, 'delete', 'createMilestone']) assert.throws(() => attempt({ kind }), /类型无效/);
   assert.throws(() => attempt({ title: ' ' }), /节点名称/);
   assert.throws(() => attempt({ title: '名'.repeat(101) }), /不能超过 100/);
-  assert.throws(() => attempt({ reason: '' }), /申请原因/);
+  assert.throws(() => attempt({ reason: {} }), /文本长度/);
   assert.throws(() => attempt({ reason: '因'.repeat(2001) }), /不能超过 2000/);
   assert.throws(() => attempt({ dueDate: '2026-02-30' }), /节点截止日期无效/);
   assert.throws(() => attempt({ dueDate: addDays(byId(state.projects, 'p-mower').startDate, -1) }), /早于项目开始日期/);
@@ -252,12 +252,12 @@ test('approval rechecks current project dates and saved proposal validation', ()
     (state) => { byId(state.projects, 'p-mower').dueDate = today(); },
     (state) => { state.milestoneRequests[0].proposed.dueDate = 'invalid'; },
     (state) => { state.milestoneRequests[0].proposed.title = ''; },
-    (state) => { state.milestoneRequests[0].reason = ''; },
+    (state) => { state.milestoneRequests[0].reason = {}; },
   ]) {
     const state = structuredClone(pending);
     change(state);
     const before = structuredClone(state);
-    assert.throws(() => review(state), /项目延期|节点截止日期|节点名称|申请原因/);
+    assert.throws(() => review(state), /项目延期|节点截止日期|节点名称|文本长度/);
     assert.deepEqual(state, before);
   }
 });

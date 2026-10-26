@@ -6,8 +6,8 @@ import * as domain from '../public/client/domain.js';
 import * as times from '../public/client/time.js';
 import { canAccessRoute, sanitizeStateForActor } from '../public/client/access.js';
 import { renderMilestoneProgress } from '../public/client/milestone-progress.js';
-import { renderAdminOverview } from '../public/client/dashboard.js';
 import { renderProjectFlow } from '../public/client/flow.js';
+import * as noticeUI from '../public/client/notifications.js';
 import { renderProjectPeopleSummary } from '../public/client/project-team.js';
 import { renderProgressNote, renderProgressTrack } from '../public/client/progress.js';
 
@@ -27,16 +27,16 @@ function harness(fetchImpl) {
     addEventListener: (name,fn) => listeners.set(`document:${name}`,fn),
   };
   const context = {
-    ...domain, ...times, canAccessRoute, document, location,
+    ...domain, ...times, ...noticeUI, canAccessRoute, document, location,
     window: { addEventListener:(name,fn)=>listeners.set(`window:${name}`,fn), scrollTo() {} },
     history: { replaceState(_state,_unused,url) { location.hash=url.includes('#')?url.slice(url.indexOf('#')):''; } },
     fetch: fetchImpl, FormData, Response, URL, Blob, Set, console,
     setInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, queueMicrotask,
     renderInstallCard:()=>'<aside>手机桌面版</aside>', initPWA() {},
-    renderMilestoneProgress, renderProgressNote, renderProgressTrack, renderAdminOverview,
+    renderMilestoneProgress, renderProgressNote, renderProgressTrack,
     renderProjectFlow, renderProjectPeopleSummary, bindFlowCanvas() {},
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,accountProjectFields,selectedAccountProjects,newAccount,projectRow,projectWorkspace,dashboardPage};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,accountProjectFields,selectedAccountProjects,newAccount,projectRow,projectWorkspace,taskRow,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners};
 }
 function session(overrides={}) {
@@ -53,6 +53,93 @@ function form() {
   return {button,elements:{password},querySelector:()=>button,setAttribute:(key,value)=>attributes.set(key,value),removeAttribute:key=>attributes.delete(key),attributes,reset(){password.value='';this.resetCalled=true;}};
 }
 function deferred() {let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve};}
+
+const notice=(id,category='tasks',entityId='qa-task',projectId='p-mower')=>({id,category,entityId,projectId,title:'新的任务动态',createdAt:'2026-10-26T08:00:00.000Z',target:'#tasks'});
+
+test('unread counts appear on the correct navigation and task and escape notification titles',()=>{
+  const {ui,app,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();const target=data.state.tasks[0];
+  data.notifications=[notice('n1','tasks',target.id,target.projectId),notice('n2','approvals','r1',target.projectId)];
+  data.notifications[0].title='<img src=x onerror=alert(1)>';
+  ui.acceptSession(data);ui.render();
+  assert.match(app.innerHTML,/data-unread-category="tasks"[^>]*><span class="unread-count"[^>]*>1<\/span>/);
+  assert.match(app.innerHTML,/data-unread-category="approvals"[^>]*><span class="unread-count"[^>]*>1<\/span>/);
+  assert.match(ui.taskRow(target),new RegExp(`data-unread-entity="${target.id}"[^>]*><span class="unread-count"`));
+  ui.notificationCenter();assert.match(modal.innerHTML,/&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(modal.innerHTML,/<img/);
+});
+
+test('reading notifications preserves concurrent new arrivals and filters a stale refresh',async()=>{
+  const pending=deferred();let sent;
+  const {ui}=harness(async(path,options)=>{sent={path,body:JSON.parse(options.body)};return pending.promise;});
+  ui.acceptSession(session({notifications:[notice('n1')]}));
+  const reading=ui.markNotificationsRead(['n1']);
+  ui.acceptSession(session({revision:2,notifications:[notice('n2'),notice('n1')]}));
+  pending.resolve(Response.json({notifications:[]}));await reading;
+  assert.equal(sent.path,'/api/notifications/read');assert.deepEqual(sent.body,{ids:['n1']});
+  assert.equal(ui.getNotifications().map(n=>n.id).join(','),'n2');
+  ui.acceptSession(session({revision:2,notifications:[notice('n2'),notice('n1')]}));
+  assert.equal(ui.getNotifications().map(n=>n.id).join(','),'n2');
+});
+
+test('failed notification reads remain unread and account switching cannot leak messages',async()=>{
+  const {ui,app}=harness(async()=>Response.json({error:'offline'},{status:503}));
+  ui.acceptSession(session({notifications:[notice('n1')]}));
+  await ui.markNotificationsRead(['n1'],{silent:true});assert.equal(ui.getNotifications().length,1);
+  ui.acceptSession(session({account:{id:'a-other',login:'other',mustChangePassword:false},notifications:[]}));
+  ui.render();assert.equal(ui.getNotifications().length,0);assert.doesNotMatch(app.innerHTML,/class="unread-count"/);
+  ui.authScreen();assert.equal(ui.getNotifications().length,0);
+});
+
+test('large read batches keep successful receipts and leave a failed batch unread',async()=>{
+  const batches=[];
+  const {ui}=harness(async(_path,options)=>{batches.push(JSON.parse(options.body).ids);return batches.length===1?Response.json({notifications:[]}):Response.json({error:'offline'},{status:503});});
+  const messages=Array.from({length:1001},(_,index)=>notice(`n${index}`));
+  ui.acceptSession(session({notifications:messages}));
+  await ui.markNotificationsRead(messages.map(n=>n.id),{silent:true});
+  assert.deepEqual(batches.map(batch=>batch.length),[1000,1]);
+  assert.equal(ui.getNotifications().map(n=>n.id).join(','),'n1000');
+});
+
+test('opening the retired dashboard returns to the project center without its navigation entry',()=>{
+  const {ui,app,location}=harness(async()=>{throw new Error('Unexpected request');});
+  ui.acceptSession(session());location.hash='#dashboard';ui.render();
+  assert.equal(location.hash,'#overview');assert.doesNotMatch(app.innerHTML,/href="#dashboard"|管理后台/);
+  assert.match(app.innerHTML,/href="#approvals"/);assert.match(app.innerHTML,/href="#accounts"/);
+});
+
+test('polling updates badges even when only read receipts changed and revision did not',async()=>{
+  const {ui,app}=harness(async()=>Response.json(session({notifications:[]})));
+  ui.acceptSession(session({notifications:[notice('n1')]}));ui.render();assert.match(app.innerHTML,/class="unread-count"/);
+  await ui.loadSession(true);assert.doesNotMatch(app.innerHTML,/class="unread-count"/);
+});
+
+test('account refresh supplies project options from the same revision snapshot',async()=>{
+  const fresh=session({revision:8});fresh.accounts=[];
+  fresh.state.projects.push({...fresh.state.projects[0],id:'p-fresh',name:'另一管理员刚建立的项目',memberIds:[]});
+  const {ui}=harness(async()=>Response.json(fresh));ui.acceptSession(session());
+  await ui.loadAccounts();assert.ok(ui.getState().projects.some(p=>p.id==='p-fresh'));
+  assert.match(ui.accountProjectFields(),/另一管理员刚建立的项目/);
+});
+
+test('adding a member keeps their other memberships and sends the account snapshot revision',async()=>{
+  const fresh=session({revision:12});
+  const employee={id:'u-member-qa',name:'测试成员',role:'member'};fresh.state.users.push(employee);
+  fresh.state.projects[0].memberIds.push(employee.id);
+  const target=fresh.state.projects[1];target.memberIds=target.memberIds.filter(id=>id!==employee.id);
+  fresh.accounts=[{id:'a-member-qa',userId:employee.id,status:'active',name:employee.name,role:'member'}];
+  let sent;
+  const {ui,toast}=harness(async(path,options)=>{
+    if(path==='/api/accounts')return Response.json(fresh);
+    sent={path,body:JSON.parse(options.body)};
+    const result=structuredClone(fresh);result.revision++;result.state.projects[1].memberIds.push(employee.id);return Response.json(result);
+  });
+  ui.acceptSession(session());await ui.loadAccounts();
+  const input=form();await ui.saveProjectMember(input,{accountId:'a-member-qa'},target.id);
+  assert.deepEqual(sent,{path:'/api/accounts/a-member-qa',body:{projectIds:[fresh.state.projects[0].id,target.id],revision:12}});
+  assert.ok(ui.getState().projects[1].memberIds.includes(employee.id));assert.match(toast.textContent,/已加入项目/);
+  assert.equal(input.button.disabled,false);assert.equal(input.attributes.has('aria-busy'),false);
+});
 
 test('mandatory password change clears previous business data and cannot render project routes',()=>{
   const {ui,app,location,listeners}=harness(async()=>{throw new Error('Unexpected request');});
@@ -150,7 +237,7 @@ test('a password change unlocks the scoped employee workspace without requiring 
   await ui.submitAuth(target,{currentPassword:'temporary-password',newPassword:'new-personal-password',confirmPassword:'new-personal-password',username:'employee.phone'},'change-password');
   assert.equal(sent.path,'/api/auth/password');
   assert.deepEqual(JSON.parse(sent.options.body),{currentPassword:'temporary-password',newPassword:'new-personal-password'});
-  assert.equal(location.hash,'#tasks');
+  assert.equal(location.hash,'#overview');
   assert.equal(ui.getAccount().login,'employee.phone');
   assert.equal(ui.getAccount().email,undefined);
   assert.match(app.innerHTML,/employee-workspace/);
@@ -196,7 +283,7 @@ test('project submission includes locked owned projects and deduplicates checked
   assert.deepEqual(Array.from(ui.selectedAccountProjects(new FormData(),'u-engineer')),[]);
 });
 
-test('project cards, flow summaries and admin tracks agree as tasks finish before milestone confirmation',()=>{
+test('project cards and flow summaries agree as tasks finish before milestone confirmation',()=>{
   const {ui}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session();
   const project=data.state.projects.find(item=>item.id==='p-mower');
@@ -209,7 +296,7 @@ test('project cards, flow summaries and admin tracks agree as tasks finish befor
   ui.acceptSession(data);
   for(const expected of [50,100]) {
     if(expected===100)ui.getState().tasks[1].status='done';
-    for(const html of [ui.projectRow(project),ui.projectWorkspace(project),ui.dashboardPage()]) {
+    for(const html of [ui.projectRow(project),ui.projectWorkspace(project)]) {
       assert.match(html,new RegExp(`任务完成率[\\s\\S]*?<strong>${expected}%</strong>`));
       assert.match(html,new RegExp(`aria-label="任务完成率"[^>]+aria-valuenow="${expected}"`));
       assert.doesNotMatch(html,/milestone-progress-step is-done|个节点完成/);
@@ -219,7 +306,7 @@ test('project cards, flow summaries and admin tracks agree as tasks finish befor
   }
 });
 
-test('empty project progress displays a dash across project cards, flow summaries and admin tracks',()=>{
+test('empty project progress displays a dash across project cards and flow summaries',()=>{
   const {ui}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session();
   const project=data.state.projects[0];
@@ -227,7 +314,7 @@ test('empty project progress displays a dash across project cards, flow summarie
   data.state.tasks=[];
   data.state.milestones=[];
   ui.acceptSession(data);
-  for(const html of [ui.projectRow(project),ui.projectWorkspace(project),ui.dashboardPage()]) {
+  for(const html of [ui.projectRow(project),ui.projectWorkspace(project)]) {
     assert.match(html,/任务完成率[\s\S]*?<strong>—<\/strong>/);
     assert.match(html,/aria-label="任务完成率"[^>]+aria-valuenow="0"/);
     assert.doesNotMatch(html,/NaN|Infinity|milestone-progress-dot/);

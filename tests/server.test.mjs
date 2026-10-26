@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { handleApi } from '../server/service.mjs';
+import { addDays } from '../public/client/domain.js';
 
 const ORIGIN = 'https://management.example';
 const ADMIN = { userId: 'auth-owner', email: 'owner@example.com', displayName: '平台负责人' };
@@ -584,4 +585,71 @@ test('submission timestamps always come from the server clock despite client-pro
   assert.equal(task.reviewedAt, null);
   assert.ok(Date.parse(task.submittedAt) >= earliest);
   assert.ok(Date.parse(task.submittedAt) <= Date.now());
+});
+
+test('API persists blank reasons and opinions for node creation/update approval and rejection', async (t) => {
+  for (const kind of ['create', 'update']) for (const approve of [true, false]) {
+    const f = fixture(t);
+    const staff = await provision(f, ENGINEER, 'u-engineer');
+    const node = staff.data.state.milestones.find(item => item.id === 'm-pcb-2');
+    const beforeNodes = structuredClone(f.stored().state.milestones);
+    const request = await f.call('/api/command', ENGINEER, {
+      revision: staff.data.revision, action: 'requestMilestone',
+      payload: nodeProposal(staff.data, {
+        kind, title: '无需原因的阶段调整', reason: undefined,
+        ...(kind === 'update' ? { milestoneId: node.id, dueDate: node.dueDate } : {}),
+      }),
+    });
+    assert.equal(request.status, 200, JSON.stringify(request.data));
+    const application = request.data.state.milestoneRequests[0];
+    assert.equal(application.reason, '');
+    assert.deepEqual(f.stored().state.milestones, beforeNodes);
+    const reviewed = await f.call('/api/command', ADMIN, {
+      revision: request.data.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve },
+    });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    const stored = f.stored().state;
+    const saved = stored.milestoneRequests.find(item => item.id === application.id);
+    assert.equal(saved.status, approve ? 'approved' : 'rejected');
+    assert.equal(saved.reason, '');
+    assert.equal(saved.comment, '');
+    assert.equal(saved.reviewerId, 'u-admin');
+    assert.ok(saved.reviewedAt);
+    assert.doesNotMatch(stored.logs[0].message, /[；;]\s*$/);
+    if (!approve) assert.deepEqual(stored.milestones, beforeNodes);
+    else if (kind === 'create') assert.equal(stored.milestones.length, beforeNodes.length + 1);
+    else assert.equal(stored.milestones.find(item => item.id === node.id).title, application.proposed.title);
+  }
+});
+
+test('API persists blank extension reason and approval opinions without changing pending or rejected deadlines', async (t) => {
+  for (const approve of [true, false]) {
+    const f = fixture(t);
+    const manager = await provision(f, MANAGER, 'u-manager', 'manager');
+    const project = manager.data.state.projects.find(item => item.id === 'p-mower');
+    const newDueDate = addDays(project.dueDate, 1);
+    const request = await f.call('/api/command', MANAGER, {
+      revision: manager.data.revision, action: 'requestExtension',
+      payload: { projectId: project.id, newDueDate, reason: null, plan: '追加复测后交付', impact: '项目截止顺延一天' },
+    });
+    assert.equal(request.status, 200, JSON.stringify(request.data));
+    const extension = request.data.state.extensions[0];
+    assert.equal(extension.reason, '');
+    assert.equal(f.stored().state.projects.find(item => item.id === project.id).dueDate, project.dueDate);
+    const reviewed = await f.call('/api/command', ADMIN, {
+      revision: request.data.revision, action: 'reviewExtension', payload: { id: extension.id, approve, comment: ' \n\t ' },
+    });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    const stored = f.stored().state;
+    const saved = stored.extensions.find(item => item.id === extension.id);
+    assert.equal(saved.status, approve ? 'approved' : 'rejected');
+    assert.equal(saved.reason, '');
+    assert.equal(saved.comment, '');
+    assert.equal(saved.reviewerId, 'u-admin');
+    assert.ok(saved.reviewedAt);
+    const updated = stored.projects.find(item => item.id === project.id);
+    assert.equal(updated.originalDueDate, project.originalDueDate);
+    assert.equal(updated.dueDate, approve ? newDueDate : project.dueDate);
+    assert.doesNotMatch(stored.logs[0].message, /[；;]\s*$/);
+  }
 });

@@ -61,19 +61,19 @@ function personRow(context, project, id, kind = 'member') {
 }
 
 /** Compact summary for the project header; reviewers are not counted as members. */
-export function renderProjectPeopleSummary(state = {}, project = {}) {
+export function renderProjectPeopleSummary(state = {}, project = {}, { actions = '' } = {}) {
   const context = collect(state, project);
   const owner = validId(project.ownerId) ? context.profile(project.ownerId).name : '未指定';
   const otherMembers = context.memberIds.filter(id => id !== project.ownerId);
   const names = otherMembers.map(id => escape(context.profile(id).name)).join('、');
-  return `<div class="project-people-summary">${peopleIcon}<div class="project-people-names"><span>负责人 <strong>${escape(owner)}</strong></span>${otherMembers.length ? `<span>成员 ${names}</span>` : '<span>暂无其他项目成员</span>'}${context.reviewerIds.length ? `<span class="project-people-support">另有 ${context.reviewerIds.length} 名验收协作</span>` : ''}${context.collaboratorIds.length ? `<span class="project-people-support">另有 ${context.collaboratorIds.length} 名任务协作</span>` : ''}</div><button type="button" class="project-people-open" data-action="project-view" data-id="people">查看分工${arrowIcon}</button></div>`;
+  return `<div class="project-people-summary">${peopleIcon}<div class="project-people-names"><span>负责人 <strong>${escape(owner)}</strong></span>${otherMembers.length ? `<span>成员 ${names}</span>` : '<span>暂无其他项目成员</span>'}${context.reviewerIds.length ? `<span class="project-people-support">另有 ${context.reviewerIds.length} 名验收协作</span>` : ''}${context.collaboratorIds.length ? `<span class="project-people-support">另有 ${context.collaboratorIds.length} 名任务协作</span>` : ''}</div><button type="button" class="project-people-open" data-action="project-view" data-id="people">查看分工${arrowIcon}</button>${actions}</div>`;
 }
 
 /** Read-only project membership and concrete responsibilities; actions use app delegation. */
-export function renderProjectTeam(state = {}, project = {}) {
+export function renderProjectTeam(state = {}, project = {}, { actions = '' } = {}) {
   const context = collect(state, project);
   const members = context.memberIds.length ? `<ul class="project-team-list">${context.memberIds.map(id => personRow(context, project, id)).join('')}</ul>` : '<div class="project-team-empty"><h3>尚未设置项目成员</h3><p>成员加入项目后，这里会显示每个人的具体分工。</p></div>';
   const collaborators = context.collaboratorIds.length ? `<section class="project-team-support"><header><h3>任务协作人员 <span>${context.collaboratorIds.length}</span></h3><p>项目组外的执行人员</p></header><ul class="project-team-list">${context.collaboratorIds.map(id => personRow(context, project, id, 'collaborator')).join('')}</ul></section>` : '';
   const reviewers = context.reviewerIds.length ? `<section class="project-team-support is-review"><header><h3>验收协作 <span>${context.reviewerIds.length}</span></h3><p>不计入项目成员人数</p></header><ul class="project-team-list">${context.reviewerIds.map(id => personRow(context, project, id, 'reviewer')).join('')}</ul></section>` : '';
-  return `<section class="panel project-team"><header class="panel-header project-team-header"><h2>项目人员与分工</h2><span class="project-team-total">${context.memberIds.length} 名项目成员</span></header>${members}${collaborators}${reviewers}</section>`;
+  return `<section class="panel project-team"><header class="panel-header project-team-header"><h2>项目人员与分工</h2><span class="project-team-total">${context.memberIds.length} 名项目成员</span>${actions}</header>${members}${collaborators}${reviewers}</section>`;
 }

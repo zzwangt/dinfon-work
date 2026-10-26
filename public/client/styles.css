@@ -86,6 +86,23 @@ strong { font-weight: 600; }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .nav-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 19px; margin-left: auto; padding: 0 5px; border-radius: 5px; font-size: 12px; font-weight: 600; color: #86502e; background: #fbecdf; font-variant-numeric: tabular-nums; }
 .nav-item.active .nav-count { color: var(--accent-dark); background: #d6eae2; }
+.unread-slot:empty { display: none; }
+.unread-slot { display: inline-flex; vertical-align: middle; margin-inline-start: 7px; flex-shrink: 0; }
+.unread-count { display: inline-flex; align-items: center; justify-content: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 999px; background: #d72d37; color: #fff; font-size: 11px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; text-decoration: none; }
+.nav-item > .unread-slot { margin-inline-start: auto; }
+.notification-trigger { position: relative; flex-shrink: 0; width: 44px; height: 44px; }
+.notification-trigger > .unread-slot { position: absolute; top: -1px; right: -3px; margin: 0; pointer-events: none; }
+.notification-list { display: grid; gap: 5px; }
+.notification-item { display: flex; gap: 12px; align-items: center; width: 100%; min-height: 72px; padding: 14px 12px; text-align: left; border: 1px solid transparent; border-radius: 12px; background: #f6f7f9; color: var(--text); }
+.notification-copy { display: grid; gap: 5px; flex: 1; min-width: 0; }
+.notification-copy strong { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+.notification-copy small { color: #626873; font-size: 12px; }
+.notification-arrow { color: #626873; font-size: 22px; }
+.notification-unread-dot { height: 7px; width: 7px; background: #d72d37; border-radius: 50%; flex-shrink: 0; }
+.notification-empty { text-align: center; padding: 34px 10px; }
+.notification-empty p { margin-top: 8px; color: #626873; }
+@media (hover: hover) { .notification-item:hover { background: #edf1f6; } }
+.mobile-nav .nav-item > .unread-slot { position: absolute; top: 0; right: 14%; margin: 0; }
 .sidebar-bottom { margin-top: auto; padding-top: 26px; }
 .demo-note { display: flex; gap: 8px; align-items: flex-start; padding: 12px 11px; border-radius: 7px; background: #f6f8f8; color: var(--secondary); font-size: 12px; line-height: 1.8; }
 .demo-note svg { margin-top: 2px; width: 14px; height: 14px; }

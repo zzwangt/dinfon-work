@@ -100,7 +100,7 @@ test('one pending extension per project and a meaningful later deadline are requ
   const state = seed();
   assert.throws(() => transact(state, 'requestExtension', requestFor(state, { projectId: 'p-pcb' }), 'u-manager'), /已有待审批/);
   assert.throws(() => transact(state, 'requestExtension', requestFor(state, { newDueDate: byId(state.projects, 'p-mower').dueDate }), 'u-manager'), /晚于当前/);
-  assert.throws(() => transact(state, 'requestExtension', requestFor(state, { reason: '  ' }), 'u-manager'), /延期原因/);
+  assert.throws(() => transact(state, 'requestExtension', requestFor(state, { plan: '  ' }), 'u-manager'), /后续安排/);
 });
 
 test('extension rejects cross-project, completed and duplicate adjustments', () => {

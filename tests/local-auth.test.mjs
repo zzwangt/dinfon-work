@@ -243,6 +243,86 @@ test('administrator can assign a new employee to existing projects; removing mem
   assert.deepEqual(f.stored().state.tasks, before.state.tasks);
 });
 
+test('administrator can add an existing employee to an existing project while retaining their other projects and task ownership', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  const account = await f.add(owner.cookie);
+  const employee = await f.signIn('engineer', TEMP_PASSWORD);
+  const changed = await f.call('/api/auth/password', { currentPassword: TEMP_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: employee.cookie });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(changed.data.state.projects.map((project) => project.id).sort(), ['p-mower', 'p-pcb']);
+  const before = f.stored();
+  const listed = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  const selected = [...listed.data.state.projects.filter((project) => project.memberIds.includes(account.userId)).map((project) => project.id), 'p-site'];
+  const added = await f.call(`/api/accounts/${account.id}`, { revision: listed.data.revision, projectIds: selected }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+  const after = f.stored();
+  assert.deepEqual(after.state.projects.filter((project) => project.memberIds.includes(account.userId)).map((project) => project.id).sort(), ['p-mower', 'p-pcb', 'p-site']);
+  for (const project of before.state.projects.filter((project) => project.id !== 'p-site')) {
+    assert.deepEqual(after.state.projects.find((entry) => entry.id === project.id), project);
+  }
+  assert.deepEqual(after.state.tasks, before.state.tasks);
+  const newLogs = after.state.logs.filter((entry) => !before.state.logs.some((old) => old.id === entry.id));
+  const membershipLogs = newLogs.filter((entry) => entry.projectId !== null);
+  assert.equal(membershipLogs.length, 1);
+  assert.equal(membershipLogs[0].projectId, 'p-site');
+  assert.equal(membershipLogs[0].actorId, owner.data.actor.id);
+  assert.match(membershipLogs[0].message, /工程师.*加入/);
+  assert(newLogs.some((entry) => entry.projectId === null && /更新账号 工程师/.test(entry.message)));
+  assert.equal((await f.call('/api/session', null, { cookie: changed.cookie })).status, 401);
+  const fresh = await f.signIn('engineer', NEW_PASSWORD);
+  assert.deepEqual(fresh.data.state.projects.map((project) => project.id).sort(), ['p-mower', 'p-pcb', 'p-site']);
+  assert(fresh.data.state.tasks.every((task) => selected.includes(task.projectId)));
+  assert(fresh.data.state.logs.some((entry) => entry.id === membershipLogs[0].id));
+  assert.equal((await f.call('/api/accounts', null, { cookie: fresh.cookie })).status, 403);
+  const current = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  const removed = await f.call(`/api/accounts/${account.id}`, { revision: current.data.revision, projectIds: ['p-mower', 'p-pcb'] }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert(removed.data.state.logs.some((entry) => entry.projectId === 'p-site' && /工程师.*移出/.test(entry.message)));
+  assert.deepEqual(f.stored().state.tasks, before.state.tasks);
+});
+
+test('account refresh returns projects and revision from the same session snapshot and stale membership changes fail atomically', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  const account = await f.add(owner.cookie);
+  const initial = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.data.actor.id, owner.data.actor.id);
+  assert.equal(initial.data.account.id, owner.data.account.id);
+  assert.equal(initial.data.capabilities.manageAccounts, true);
+  assert.deepEqual(initial.data.users, initial.data.state.users);
+  const created = await f.call('/api/command', {
+    revision: initial.data.revision, action: 'createProject',
+    payload: { name: '后创建的项目', ownerId: 'u-admin', memberIds: [], startDate: '2099-10-25T09:00', dueDate: '2099-10-30T18:00' },
+  }, { cookie: owner.cookie });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  const project = created.data.state.projects.at(-1);
+  assert.equal(initial.data.state.projects.some((entry) => entry.id === project.id), false);
+  const before = f.stored();
+  const credentialBefore = f.db.sqlite.prepare('SELECT version FROM auth_credentials WHERE account_id = ?').get(account.id).version;
+  const stale = await f.call(`/api/accounts/${account.id}`, { revision: initial.data.revision, projectIds: ['p-mower', 'p-pcb', project.id] }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(f.stored(), before);
+  assert.equal(f.db.sqlite.prepare('SELECT version FROM auth_credentials WHERE account_id = ?').get(account.id).version, credentialBefore);
+  const refreshed = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  const session = await f.call('/api/session', null, { cookie: owner.cookie });
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.data.revision, created.data.revision);
+  assert.equal(refreshed.data.revision, session.data.revision);
+  assert.deepEqual(refreshed.data.state, session.data.state);
+  assert.deepEqual(refreshed.data.actor, session.data.actor);
+  assert.deepEqual(refreshed.data.account, session.data.account);
+  assert.deepEqual(refreshed.data.users, refreshed.data.state.users);
+  assert(refreshed.data.state.projects.some((entry) => entry.id === project.id));
+  assert(refreshed.data.accounts.some((entry) => entry.id === account.id));
+  const selected = refreshed.data.state.projects.filter((entry) => entry.memberIds.includes(account.userId)).map((entry) => entry.id);
+  const added = await f.call(`/api/accounts/${account.id}`, { revision: refreshed.data.revision, projectIds: [...selected, project.id] }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+  assert.equal(added.data.revision, refreshed.data.revision + 1);
+  assert(added.data.state.projects.find((entry) => entry.id === project.id).memberIds.includes(account.userId));
+});
+
 test('malformed project assignments, owner access removal and employee self-assignment fail atomically', async (t) => {
   const f = await fixture(t);
   const owner = await f.signIn();

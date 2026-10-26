@@ -151,13 +151,13 @@ test('employee and manager route policies exclude global administration', () => 
 });
 
 test('administrator routes are allowed and unauthenticated or malformed route requests are denied', () => {
-  for (const route of ['dashboard', 'accounts', 'accounts/new', 'team', 'settings', 'my-account', 'projects/p-mower']) {
+  for (const route of ['overview', 'approvals', 'accounts', 'accounts/new', 'team', 'settings', 'my-account', 'projects/p-mower']) {
     assert.equal(canAccessRoute({ role: 'admin' }, route), true);
   }
   for (const actor of [null, undefined, {}, { role: 'superadmin' }]) {
     assert.equal(canAccessRoute(actor, 'overview'), false);
   }
-  for (const route of ['', ' ', '/', '#', null, undefined, {}, ['projects']]) {
+  for (const route of ['', ' ', '/', '#', 'dashboard', '#dashboard', 'dashboard/legacy', 'unknown', null, undefined, {}, ['projects']]) {
     assert.equal(canAccessRoute({ role: 'admin' }, route), false);
   }
 });

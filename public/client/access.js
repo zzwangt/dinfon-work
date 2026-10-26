@@ -8,6 +8,7 @@ const COLLECTIONS = ['users', 'projects', 'milestones', 'tasks', 'extensions', '
 const USER_FIELDS = ['id', 'name', 'role', 'title', 'department', 'color'];
 const ROLES = new Set(['admin', 'manager', 'member']);
 const EMPLOYEE_ROUTES = new Set(['overview', 'projects', 'tasks', 'weekly', 'approvals', 'my-account']);
+const ADMIN_ROUTES = new Set([...EMPLOYEE_ROUTES, 'team', 'accounts', 'settings']);
 
 function profile(user) {
   const result = {};
@@ -90,5 +91,5 @@ export function canAccessRoute(actor, route) {
   if (!actor || !ROLES.has(actor.role) || typeof route !== 'string') return false;
   const routeName = route.trim().replace(/^#?\/?/, '').split(/[/?#]/, 1)[0];
   if (!routeName) return false;
-  return actor.role === 'admin' || EMPLOYEE_ROUTES.has(routeName);
+  return (actor.role === 'admin' ? ADMIN_ROUTES : EMPLOYEE_ROUTES).has(routeName);
 }

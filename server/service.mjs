@@ -1,6 +1,7 @@
 import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
+import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['admin', 'manager', 'member']);
@@ -75,7 +76,7 @@ async function readWorkspace(db) {
 
 async function saveWorkspace(db, next, previousRevision) {
   const result = await db.prepare('UPDATE workspace SET payload = ?, revision = revision + 1 WHERE id = ? AND revision = ?')
-    .bind(JSON.stringify({ state: next.state, accounts: next.accounts }), WORKSPACE_ID, previousRevision).run();
+    .bind(workspacePayload(next), WORKSPACE_ID, previousRevision).run();
   if (result.meta?.changes !== 1) fail(409, 'REVISION_CONFLICT', '数据已被其他人更新，请刷新后重试；本次修改尚未保存');
   return { ...next, revision: previousRevision + 1 };
 }
@@ -145,13 +146,14 @@ async function context(db, env, identity, { bind = false } = {}) {
   }
 }
 
-function session(workspace, identity) {
+async function session(db, workspace, identity) {
   const { account, actor } = lookupAccount(workspace, identity);
   const state = sanitizeStateForActor(workspace.state, actor.id);
   return {
     actor: state.users.find((user) => user.id === actor.id),
     account: { id: account.id, email: account.email || '', login: account.login || '', role: actor.role, status: account.status },
     state,
+    notifications: await unreadNotifications(db, workspace, account, actor),
     revision: workspace.revision,
     capabilities: { manageAccounts: actor.role === 'admin', manageAllData: actor.role === 'admin', createProjects: actor.role !== 'member' },
   };
@@ -172,8 +174,8 @@ function adminOnly(actor) {
   if (actor.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '仅管理账号可以执行此操作');
 }
 
-function log(workspace, actorId, message) {
-  workspace.state.logs.unshift({ id: identifier('log'), at: new Date().toISOString(), actorId, projectId: null, message });
+function log(workspace, actorId, message, projectId = null) {
+  workspace.state.logs.unshift({ id: identifier('log'), at: new Date().toISOString(), actorId, projectId, message });
 }
 
 function accessibleCommand(workspace, actor, action, payload) {
@@ -191,14 +193,12 @@ function assignAccountProjects(workspace, user, projectIds, actor) {
   const selected = new Set(projectIds);
   requireValue(projectIds.every((id) => workspace.state.projects.some((project) => project.id === id)), '选择的项目不存在，请刷新后重试');
   requireValue(workspace.state.projects.every((project) => project.ownerId !== user.id || selected.has(project.id)), '项目负责人不能移除自己负责的项目，请先调整项目负责人');
-  let changes = 0;
   for (const project of workspace.state.projects) {
     const member = project.memberIds.includes(user.id);
     if (member === selected.has(project.id)) continue;
     project.memberIds = selected.has(project.id) ? [...project.memberIds, user.id] : project.memberIds.filter((id) => id !== user.id);
-    changes += 1;
+    log(workspace, actor.id, `将成员 ${user.name} ${selected.has(project.id) ? '加入' : '移出'}项目“${project.name}”；既有任务负责人保持不变`, project.id);
   }
-  if (changes) log(workspace, actor.id, `更新成员 ${user.name} 的项目权限：参与 ${selected.size} 个项目；既有任务负责人保持不变`);
 }
 
 function provisionAccount(workspace, data, actor, local = false) {
@@ -269,12 +269,23 @@ export async function handleApi(request, env, authenticatedIdentity) {
     const method = request.method.toUpperCase();
     if (path === '/api/session' && method === 'GET') {
       const { workspace } = await context(env.DB, env, identity, { bind: true });
-      return json(session(workspace, identity));
+      return json(await session(env.DB, workspace, identity));
     }
     const { workspace, actor, account } = await context(env.DB, env, identity);
     if (path === '/api/accounts' && method === 'GET') {
       adminOnly(actor);
-      return json({ accounts: accountList(workspace), users: sanitizeStateForActor(workspace.state, actor.id).users, revision: workspace.revision });
+      const snapshot = await session(env.DB, workspace, identity);
+      return json({ ...snapshot, accounts: accountList(workspace), users: snapshot.state.users });
+    }
+    if (path === '/api/notifications/read' && method === 'POST') {
+      const data = await body(request);
+      requireValue(Array.isArray(data.ids) && data.ids.length <= 1000 && data.ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 100), '通知列表格式不正确');
+      // Read receipts do not touch the business revision. A stale page can mark
+      // its own visible events read without overwriting newer project changes.
+      await markNotificationsRead(env.DB, workspace, account, actor, data.ids);
+      const latest = await readWorkspace(env.DB);
+      const current = lookupAccount(latest, identity);
+      return json({ notifications: await unreadNotifications(env.DB, latest, current.account, current.actor) });
     }
     if (path === '/api/command' && method === 'POST') {
       const data = await body(request);
@@ -292,8 +303,9 @@ export async function handleApi(request, env, authenticatedIdentity) {
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
-      const saved = await saveWorkspace(env.DB, { ...workspace, state }, workspace.revision);
-      return json(session(saved, identity));
+      const next = appendNotifications(workspace, { ...workspace, state }, actor.id, data.action, payload);
+      const saved = await saveWorkspace(env.DB, next, workspace.revision);
+      return json(await session(env.DB, saved, identity));
     }
     const accountId = path.match(/^\/api\/accounts\/([^/]+)$/)?.[1];
     if ((path === '/api/accounts' && method === 'POST') || (accountId && method === 'PATCH')) {
@@ -303,8 +315,9 @@ export async function handleApi(request, env, authenticatedIdentity) {
       const next = structuredClone(workspace);
       if (accountId) changeAccount(next, accountId, data, actor, account);
       else provisionAccount(next, data, actor);
+      appendNotifications(workspace, next, actor.id, 'accountMemberships');
       const saved = await saveWorkspace(env.DB, next, workspace.revision);
-      return json({ ...session(saved, identity), accounts: accountList(saved) }, accountId ? 200 : 201);
+      return json({ ...await session(env.DB, saved, identity), accounts: accountList(saved) }, accountId ? 200 : 201);
     }
     fail(404, 'NOT_FOUND', '接口不存在');
   } catch (error) {
@@ -317,7 +330,7 @@ export async function handleApi(request, env, authenticatedIdentity) {
 
 function workspaceUpdate(db, workspace, previousRevision) {
   return db.prepare('UPDATE workspace SET payload = ?, revision = revision + 1 WHERE id = ? AND revision = ?')
-    .bind(JSON.stringify({ state: workspace.state, accounts: workspace.accounts }), WORKSPACE_ID, previousRevision);
+    .bind(workspacePayload(workspace), WORKSPACE_ID, previousRevision);
 }
 
 function assertChanged(result) {
@@ -395,7 +408,7 @@ export async function recoverLocalAdmin(env, { login, password }) {
   return { recovered: true, accountId: account.id };
 }
 
-function localSession(workspace, credential) {
+async function localSession(db, workspace, credential) {
   const identity = { localAccountId: credential.account_id };
   const { account, actor } = lookupAccount(workspace, identity);
   const mustChangePassword = Boolean(credential.must_change);
@@ -405,7 +418,7 @@ function localSession(workspace, credential) {
     // No projects, employee directory, tasks, or business history are disclosed.
     return { actor: { id: actor.id, name: actor.name, role: actor.role }, account: accountView, mustChangePassword, capabilities: {}, revision: workspace.revision };
   }
-  return { ...session(workspace, identity), account: accountView, mustChangePassword: false };
+  return { ...await session(db, workspace, identity), account: accountView, mustChangePassword: false };
 }
 
 async function localAccountList(db, workspace) {
@@ -468,7 +481,7 @@ export async function handleHttpApi(request, env) {
       if (!current || current.version !== credential.version || current.must_change !== credential.must_change) fail(401, 'AUTH_REQUIRED', '账号信息已更新，请使用最新密码重新登录');
       await clearAuthAttempts(db, `login:${login}`);
       const cookie = await issueSession(db, env, current, sessionToken(request, env));
-      const response = json(localSession(saved, current));
+      const response = json(await localSession(db, saved, current));
       response.headers.set('Set-Cookie', cookie);
       return response;
     }
@@ -485,7 +498,7 @@ export async function handleHttpApi(request, env) {
     if (!workspace) fail(503, 'SETUP_REQUIRED', '平台尚未初始化，请联系管理员');
     const identity = { localAccountId: credential.account_id };
     const { account, actor } = lookupAccount(workspace, identity);
-    if (path === '/api/session' && method === 'GET') return json(localSession(workspace, credential));
+    if (path === '/api/session' && method === 'GET') return json(await localSession(db, workspace, credential));
     if (path === '/api/auth/password' && method === 'POST') {
       const data = await body(request);
       validatePassword(data.newPassword);
@@ -507,14 +520,15 @@ export async function handleHttpApi(request, env) {
       const latestWorkspace = await readWorkspace(db);
       await clearAuthAttempts(db, `password:${account.id}`);
       const cookie = await issueSession(db, env, refreshed);
-      const response = json(localSession(latestWorkspace, refreshed));
+      const response = json(await localSession(db, latestWorkspace, refreshed));
       response.headers.set('Set-Cookie', cookie);
       return response;
     }
     if (credential.must_change) fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码，再进入工作平台');
     if (path === '/api/accounts' && method === 'GET') {
       adminOnly(actor);
-      return json({ accounts: await localAccountList(db, workspace), users: sanitizeStateForActor(workspace.state, actor.id).users, revision: workspace.revision });
+      const snapshot = await localSession(db, workspace, credential);
+      return json({ ...snapshot, accounts: await localAccountList(db, workspace), users: snapshot.state.users });
     }
     if (path === '/api/accounts' && method === 'POST') {
       adminOnly(actor);
@@ -522,6 +536,7 @@ export async function handleHttpApi(request, env) {
       revisionMatches(data.revision, workspace.revision);
       const next = structuredClone(workspace);
       const added = provisionAccount(next, data, actor, true);
+      appendNotifications(workspace, next, actor.id, 'accountMemberships');
       if (await db.prepare('SELECT account_id FROM auth_credentials WHERE login = ?').bind(added.login).first()) fail(400, 'LOGIN_EXISTS', '此账号已存在');
       const passwordHash = await hashPassword(data.password);
       const results = await db.batch([
@@ -531,7 +546,7 @@ export async function handleHttpApi(request, env) {
       ]);
       assertChanged(results[0]);
       next.revision += 1;
-      return json({ ...localSession(next, credential), accounts: await localAccountList(db, next) }, 201);
+      return json({ ...await localSession(db, next, credential), accounts: await localAccountList(db, next) }, 201);
     }
     const resetAccountId = path.match(/^\/api\/accounts\/([^/]+)\/password$/)?.[1];
     if (resetAccountId && method === 'POST') {
@@ -555,7 +570,7 @@ export async function handleHttpApi(request, env) {
       ]);
       assertChanged(results[0]);
       next.revision += 1;
-      return json({ ...localSession(next, credential), accounts: await localAccountList(db, next) });
+      return json({ ...await localSession(db, next, credential), accounts: await localAccountList(db, next) });
     }
     const accountId = path.match(/^\/api\/accounts\/([^/]+)$/)?.[1];
     if (accountId && method === 'PATCH') {
@@ -564,6 +579,7 @@ export async function handleHttpApi(request, env) {
       revisionMatches(data.revision, workspace.revision);
       const next = structuredClone(workspace);
       changeAccount(next, accountId, data, actor, account);
+      appendNotifications(workspace, next, actor.id, 'accountMemberships');
       const statements = [workspaceUpdate(db, next, workspace.revision)];
       if (accountId !== account.id) {
         statements.push(db.prepare('UPDATE auth_credentials SET version = version + 1 WHERE account_id = ? AND changes() = 1').bind(accountId));
@@ -572,7 +588,7 @@ export async function handleHttpApi(request, env) {
       const results = await db.batch(statements);
       assertChanged(results[0]);
       next.revision += 1;
-      return json({ ...localSession(next, credential), accounts: await localAccountList(db, next) });
+      return json({ ...await localSession(db, next, credential), accounts: await localAccountList(db, next) });
     }
     // Business commands reuse the tested project-level authorization engine.
     const response = await handleApi(request, env, identity);

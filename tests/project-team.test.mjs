@@ -33,6 +33,15 @@ test('project owner is first and membership is deduplicated', () => {
   assert.match(html, /尚未分配执行任务/);
 });
 
+test('membership actions are opt-in in both the project summary and people view', () => {
+  const { state, project } = fixture();
+  const actions = '<button type="button" data-action="add-project-member" data-id="p">添加成员</button>';
+  for (const render of [renderProjectPeopleSummary, renderProjectTeam]) {
+    assert.doesNotMatch(render(state, project), /add-project-member|添加成员/);
+    assert.match(render(state, project, { actions }), /data-action="add-project-member" data-id="p">添加成员/);
+  }
+});
+
 test('only current-project responsibilities are shown with accurate task counts', () => {
   const { state, project } = fixture();
   const html = renderProjectTeam(state, project);

@@ -256,7 +256,7 @@ export function transact(state, action, payload = {}, actorId) {
     requireProjectAccess(actor, project);
     check(['create', 'update'].includes(payload.kind), '节点申请类型无效');
     const proposed = milestoneProposal(payload, project);
-    const reason = text(payload.reason, '申请原因');
+    const reason = optionalText(payload.reason);
     let milestoneId = null;
     let before = null;
     if (payload.kind === 'update') {
@@ -283,7 +283,7 @@ export function transact(state, action, payload = {}, actorId) {
     const request = find(next.milestoneRequests, payload.id, '节点申请');
     check(request.status === 'pending', '该节点申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
-    const comment = text(payload.comment, payload.approve ? '审批意见' : '驳回原因');
+    const comment = optionalText(payload.comment);
     let planChanged = false;
     if (payload.approve) {
       const project = find(next.projects, request.projectId, '项目');
@@ -291,7 +291,7 @@ export function transact(state, action, payload = {}, actorId) {
       check(applicant.role === 'admin' || applicant.id === project.ownerId || project.memberIds.includes(applicant.id), '申请人已无项目访问权限，请驳回后由现有项目成员重新申请');
       check(['create', 'update'].includes(request.kind), '节点申请类型无效');
       const proposed = milestoneProposal(request.proposed, project);
-      text(request.reason, '申请原因');
+      optionalText(request.reason);
       if (request.kind === 'update') {
         const milestone = find(next.milestones, request.milestoneId, '节点');
         check(milestone.projectId === project.id, '节点不属于该项目');
@@ -319,7 +319,7 @@ export function transact(state, action, payload = {}, actorId) {
     request.reviewedAt = at;
     request.reviewerId = actor.id;
     request.comment = comment;
-    record(request.projectId, `${payload.approve ? '批准' : '驳回'}${request.kind === 'create' ? '新增' : '修改'}节点申请“${request.proposed.title}”${payload.approve ? (planChanged ? '，节点计划已生效，任务日期保持不变' : '，记录已结案，当前计划保持不变') : '，原计划继续生效'}；${comment}`);
+    record(request.projectId, `${payload.approve ? '批准' : '驳回'}${request.kind === 'create' ? '新增' : '修改'}节点申请“${request.proposed.title}”${payload.approve ? (planChanged ? '，节点计划已生效，任务日期保持不变' : '，记录已结案，当前计划保持不变') : '，原计划继续生效'}${comment ? `；${comment}` : ''}`);
   } else if (action === 'completeMilestone') {
     const milestone = find(next.milestones, payload.id, '节点');
     const project = find(next.projects, milestone.projectId, '项目');
@@ -363,7 +363,7 @@ export function transact(state, action, payload = {}, actorId) {
     validateSchedule(proposed, proposedProject);
     const extension = {
       id: uid('e'), projectId: project.id, applicantId: actor.id, originalDueDate: project.dueDate,
-      newDueDate, reason: text(payload.reason, '延期原因'), plan: text(payload.plan, '后续安排'),
+      newDueDate, reason: optionalText(payload.reason), plan: text(payload.plan, '后续安排'),
       impact: text(payload.impact, '影响范围'), status: 'pending', affectedMilestones, affectedTasks,
       createdAt: at, reviewedAt: null, reviewerId: null, comment: '',
     };
@@ -375,7 +375,7 @@ export function transact(state, action, payload = {}, actorId) {
     check(actor.id !== extension.applicantId, '不能审批自己提交的延期申请，请由其他管理员处理');
     check(extension.status === 'pending', '该延期申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
-    const comment = text(payload.comment, payload.approve ? '审批意见' : '驳回原因');
+    const comment = optionalText(payload.comment);
     const project = find(next.projects, extension.projectId, '项目');
     if (payload.approve) {
       check(deadlineMs(project.dueDate) === deadlineMs(extension.originalDueDate), '项目计划已变化，请重新提交延期申请');
@@ -401,7 +401,7 @@ export function transact(state, action, payload = {}, actorId) {
     extension.reviewedAt = at;
     extension.reviewerId = actor.id;
     extension.comment = comment;
-    record(project.id, `${payload.approve ? '批准' : '驳回'}项目延期申请${payload.approve ? `，当前截止日期调整为 ${project.dueDate}，保留原计划 ${project.originalDueDate}` : '，原计划继续生效'}；${comment}`);
+    record(project.id, `${payload.approve ? '批准' : '驳回'}项目延期申请${payload.approve ? `，当前截止日期调整为 ${project.dueDate}，保留原计划 ${project.originalDueDate}` : '，原计划继续生效'}${comment ? `；${comment}` : ''}`);
   } else if (action === 'addUser') {
     check(actor.role === 'admin', '仅管理员可以添加成员');
     check(ROLES.includes(payload.role), '成员角色无效');

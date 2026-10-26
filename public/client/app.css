@@ -180,3 +180,10 @@
  .task-detail-meta>div:last-child{grid-column:1/-1}
  .date-box strong{font-size:16px}
 }
+
+/* One full-width task completion measure keeps milestone circles readable. */
+.project-workspace>.flow-summary-bar{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:14px}
+.flow-summary-bar>.flow-summary-progress{width:100%;max-width:none;min-width:0}
+.flow-summary-bar .project-progress-head{flex-wrap:wrap;row-gap:4px}
+.flow-summary-bar .project-progress-head>small{white-space:nowrap}
+.flow-summary-bar>.flow-deadline{max-width:none}

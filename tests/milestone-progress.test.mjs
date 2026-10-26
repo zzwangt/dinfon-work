@@ -38,6 +38,30 @@ test('aggregate progress retains the shared green completion and red schedule ga
   assert.match(html, /aria-valuetext="实际 33%，计划 67%，落后 34%"/);
 });
 
+test('task-based track advances for accepted tasks without marking their milestone complete', () => {
+  const data = state([node('stage', '2026-10-28')], [
+    { id: 'accepted', milestoneId: 'stage', status: 'done', dueDate: '2026-10-20' },
+    { id: 'review', milestoneId: 'stage', status: 'review', dueDate: '2026-10-21' },
+    { id: 'unrelated', milestoneId: 'stage', status: 'done', projectId: 'other', dueDate: '2026-10-20' },
+  ]);
+  const html = renderMilestoneProgress(data, 'p', { now, basis: 'tasks' });
+  assert.match(html, /aria-label="任务完成率"[^>]+aria-valuenow="50"/);
+  assert.match(html, /schedule-progress-lag" style="left:50%;width:50%"/);
+  assert.match(html, /data-id="stage"[^>]+aria-label="大节点 1：节点stage，进行中/);
+  data.tasks[1].status = 'done';
+  const completed = renderMilestoneProgress(data, 'p', { now, basis: 'tasks' });
+  assert.match(completed, /aria-label="任务完成率"[^>]+aria-valuenow="100"/);
+  assert.doesNotMatch(completed, /milestone-progress-step is-done/);
+  assert.match(render(data), /aria-valuenow="0"/);
+});
+
+test('task-based track supports an empty plan without inventing milestone nodes or invalid rates', () => {
+  const html = renderMilestoneProgress(state(), 'p', { now, basis: 'tasks' });
+  assert.match(html, /aria-label="任务完成率"[^>]+aria-valuenow="0"/);
+  assert.match(html, /暂无计划任务/);
+  assert.doesNotMatch(html, /NaN|Infinity|milestone-progress-dot/);
+});
+
 test('out-of-order completion keeps each node state independent from the green bar', () => {
   const html = render(state([node('early', '2026-10-20'), node('later', '2026-10-29', { status: 'done' })]));
   assert.match(html, /schedule-progress-actual" style="width:50%"/);

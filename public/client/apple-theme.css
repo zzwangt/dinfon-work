@@ -159,23 +159,24 @@ h2 { letter-spacing: -.018em; }
 .milestone-progress-date, .milestone-progress-scroll-hint, .milestone-progress-empty { color: var(--secondary); }
 .milestone-progress-node:focus-visible { outline-color: var(--focus-ring); }
 
-/* Preserve the flow's coordinates and dimensions; refine only its material. */
+/* Flow geometry is supplied by flow.js; the theme only sets its materials. */
 .project-flow { --flow-done: #1b6c32; --flow-doing: #005bb5; --flow-review: #7137a6; --flow-required: #985b00; --flow-overdue: #b2342f; --flow-todo: #626269; }
-.flow-scroll { background-color: #f8f8fa; background-image: radial-gradient(#d8d8e0 .75px, transparent .75px); scrollbar-color: #c1c1ca #f1f1f5; }
+.flow-scroll { background-color: #f8f8fa; background-image: radial-gradient(#e1e1e8 .65px, transparent .65px); scrollbar-color: #c1c1ca #f1f1f5; }
 .flow-scroll::-webkit-scrollbar-track { background: #f1f1f5; }
 .flow-scroll::-webkit-scrollbar-thumb { border-color: #f1f1f5; background: #c1c1ca; }
-.flow-sequence, .flow-arrowhead { stroke: #9cabb7; }
-.flow-sequence.is-done, .flow-arrowhead.is-done { stroke: #6aa779; }
-.flow-branch { stroke: #c8ced5; }
-.flow-junction { fill: #f8f8fa; stroke: #b3bbc5; }
-.flow-phase { border-radius: 14px; box-shadow: 0 4px 14px #1d1d1f06; }
-.flow-task { border-radius: 12px; color: var(--ink); box-shadow: 0 2px 6px #1d1d1f04; }
+.flow-sequence, .flow-arrowhead { stroke: #5c718f; }
+.flow-sequence.is-done, .flow-arrowhead.is-done { stroke: #4c805b; }
+.flow-branch { stroke: #858f9c; }
+.flow-junction, .flow-port { fill: #fff; stroke: #858f9c; }
+.flow-phase { border-radius: 16px; box-shadow: 0 5px 16px #1d1d1f0d; }
+.flow-phase:focus-within { box-shadow:0 0 0 3px var(--focus-ring); }
+.flow-task { border-radius: 10px; color: var(--ink); box-shadow: 0 2px 6px #1d1d1f04; }
 .flow-phase h3, .flow-phase-completion strong { color: var(--ink); }
 .flow-phase-meta, .flow-phase-bottom, .flow-overview, .flow-stage-count, .flow-filter-summary,
 .flow-children-heading, .flow-children-heading strong, .flow-task-date, .flow-person,
 .flow-task-open, .flow-footer, .flow-no-tasks, .flow-no-tasks small { color: var(--secondary); }
 .flow-toolbar, .flow-overview, .flow-footer { border-color: var(--line); }
-.flow-step { border-radius: 7px; }
+.flow-step { border-radius: 50%; }
 .flow-tools button, .flow-filter { border-radius: 8px; }
 .flow-tools button:hover, .flow-toggle:hover { color: var(--accent); background: var(--accent-soft); }
 .flow-confirm { color: var(--success-dark); }

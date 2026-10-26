@@ -30,7 +30,8 @@ export function dashboardData(state, now = Date.now()) {
 
   const projects = projectRecords.map((project) => {
     const nodes = milestones.filter((item) => item.projectId === project.id).sort(deadlineOrder);
-    return { project, metrics: progressAgainstPlan(nodes, instant), milestones: nodes, owner: userById.get(project.ownerId) || null };
+    const projectTasks = tasks.filter((item) => item.projectId === project.id);
+    return { project, metrics: progressAgainstPlan(projectTasks, instant), milestones: nodes, owner: userById.get(project.ownerId) || null };
   });
 
   const required = milestones

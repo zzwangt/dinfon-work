@@ -126,10 +126,27 @@ test('only formal plans contribute, current approved deadlines override old base
   assert.equal(data.projects[0].owner, null);
   assert.equal(data.projects[0].metrics.actual, 0);
   assert.deepEqual(data.projects[1].milestones.map((entry) => entry.id), ['done', 'late', 'future']);
-  assert.deepEqual(data.projects[1].metrics, { actual: 33, planned: 67, lag: 34, total: 3, completed: 1, due: 2, overdueCount: 1 });
+  assert.deepEqual(data.projects[1].metrics, { actual: 0, planned: 0, lag: 0, total: 1, completed: 0, due: 0, overdueCount: 0 });
   assert.deepEqual(data.required.map((entry) => entry.milestone.id), ['late']);
   assert.equal(data.people[0].weeklyTotal, 0);
   assert.deepEqual(input, before);
+});
+
+test('project progress counts all accepted tasks independently of milestone confirmation and other projects', () => {
+  const input = state({ tasks: [
+    task('accepted', '2026-10-20T18:00', 'done'),
+    task('waiting', '2026-10-23T18:00', 'review'),
+    task('unrelated', '2026-10-20T18:00', 'done', { projectId: 'other' }),
+  ] });
+  const half = dashboardData(input, NOW).projects[0].metrics;
+  assert.equal(half.actual, 50);
+  assert.equal(half.total, 2);
+  input.tasks[1].status = 'done';
+  assert.equal(dashboardData(input, NOW).projects[0].metrics.actual, 100);
+  assert.equal(input.milestones[0].status, 'pending');
+  assert.deepEqual(dashboardData(state(), NOW).projects[0].metrics, {
+    actual: 0, planned: 0, lag: 0, total: 0, completed: 0, due: 0, overdueCount: 0,
+  });
 });
 
 test('empty collections, malformed dates and orphan records never create false overdue work', () => {

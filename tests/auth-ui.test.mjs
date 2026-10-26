@@ -5,6 +5,11 @@ import { runInNewContext } from 'node:vm';
 import * as domain from '../public/client/domain.js';
 import * as times from '../public/client/time.js';
 import { canAccessRoute, sanitizeStateForActor } from '../public/client/access.js';
+import { renderMilestoneProgress } from '../public/client/milestone-progress.js';
+import { renderAdminOverview } from '../public/client/dashboard.js';
+import { renderProjectFlow } from '../public/client/flow.js';
+import { renderProjectPeopleSummary } from '../public/client/project-team.js';
+import { renderProgressNote, renderProgressTrack } from '../public/client/progress.js';
 
 // Exercise the browser controller with controlled network timing. No credentials are real.
 const source = (await readFile(new URL('../public/client/app.js', import.meta.url), 'utf8'))
@@ -28,9 +33,10 @@ function harness(fetchImpl) {
     fetch: fetchImpl, FormData, Response, URL, Blob, Set, console,
     setInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, queueMicrotask,
     renderInstallCard:()=>'<aside>手机桌面版</aside>', initPWA() {},
-    renderMilestoneProgress:()=>'', renderProgressNote:()=>'', renderProgressTrack:()=>'', bindFlowCanvas() {},
+    renderMilestoneProgress, renderProgressNote, renderProgressTrack, renderAdminOverview,
+    renderProjectFlow, renderProjectPeopleSummary, bindFlowCanvas() {},
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,accountProjectFields,selectedAccountProjects,newAccount};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,accountProjectFields,selectedAccountProjects,newAccount,projectRow,projectWorkspace,dashboardPage};})()`,context);
   return {ui,app,content,toast,modal,location,listeners};
 }
 function session(overrides={}) {
@@ -188,4 +194,42 @@ test('project submission includes locked owned projects and deduplicates checked
   assert.deepEqual(Array.from(ui.selectedAccountProjects(choices,'u-manager')),['p-delivery','p-mower','p-pcb','p-site']);
   assert.deepEqual(Array.from(ui.selectedAccountProjects(new FormData(),'u-manager')),['p-mower','p-pcb','p-site']);
   assert.deepEqual(Array.from(ui.selectedAccountProjects(new FormData(),'u-engineer')),[]);
+});
+
+test('project cards, flow summaries and admin tracks agree as tasks finish before milestone confirmation',()=>{
+  const {ui}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();
+  const project=data.state.projects.find(item=>item.id==='p-mower');
+  data.state.projects=[project];
+  data.state.milestones=data.state.milestones.filter(item=>item.projectId===project.id);
+  data.state.milestones.forEach(item=>{item.status='pending';item.acceptedAt=null;});
+  data.state.tasks=data.state.tasks.filter(item=>item.projectId===project.id).slice(0,2);
+  data.state.tasks[0].status='done';
+  data.state.tasks[1].status='review';
+  ui.acceptSession(data);
+  for(const expected of [50,100]) {
+    if(expected===100)ui.getState().tasks[1].status='done';
+    for(const html of [ui.projectRow(project),ui.projectWorkspace(project),ui.dashboardPage()]) {
+      assert.match(html,new RegExp(`任务完成率[\\s\\S]*?<strong>${expected}%</strong>`));
+      assert.match(html,new RegExp(`aria-label="任务完成率"[^>]+aria-valuenow="${expected}"`));
+      assert.doesNotMatch(html,/milestone-progress-step is-done|个节点完成/);
+    }
+    assert.equal(domain.projectProgress(ui.getState(),project.id),0);
+    assert.doesNotMatch(ui.projectRow(project),/class="status green">已完成/);
+  }
+});
+
+test('empty project progress displays a dash across project cards, flow summaries and admin tracks',()=>{
+  const {ui}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();
+  const project=data.state.projects[0];
+  data.state.projects=[project];
+  data.state.tasks=[];
+  data.state.milestones=[];
+  ui.acceptSession(data);
+  for(const html of [ui.projectRow(project),ui.projectWorkspace(project),ui.dashboardPage()]) {
+    assert.match(html,/任务完成率[\s\S]*?<strong>—<\/strong>/);
+    assert.match(html,/aria-label="任务完成率"[^>]+aria-valuenow="0"/);
+    assert.doesNotMatch(html,/NaN|Infinity|milestone-progress-dot/);
+  }
 });

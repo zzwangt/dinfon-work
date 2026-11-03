@@ -342,7 +342,7 @@ test('malformed project assignments, owner access removal and employee self-assi
   const owned = projects.find((project) => project.ownerId !== 'u-admin');
   const targetUser = f.stored().state.users.find((user) => user.id === owned.ownerId);
   const latest = await f.call('/api/session', null, { cookie: owner.cookie });
-  const badLink = await f.call('/api/accounts', { revision: latest.data.revision, login: 'project-owner', password: TEMP_PASSWORD, name: targetUser.name, role: 'manager', existingUserId: targetUser.id, projectIds: [] }, { cookie: owner.cookie });
+  const badLink = await f.call('/api/accounts', { revision: latest.data.revision, login: 'project-owner', password: TEMP_PASSWORD, name: targetUser.name, role: 'member', existingUserId: targetUser.id, projectIds: [] }, { cookie: owner.cookie });
   assert.equal(badLink.status, 400);
   assert.equal(f.stored().accounts.length, 2);
 });
@@ -354,13 +354,13 @@ test('role changes invalidate old cookies and new sessions immediately enforce t
   const employee = await f.signIn('engineer', TEMP_PASSWORD);
   const changed = await f.call('/api/auth/password', { currentPassword: TEMP_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: employee.cookie });
   const current = await f.call('/api/session', null, { cookie: owner.cookie });
-  const promoted = await f.call(`/api/accounts/${account.id}`, { revision: current.data.revision, role: 'manager' }, { cookie: owner.cookie, method: 'PATCH' });
+  const promoted = await f.call(`/api/accounts/${account.id}`, { revision: current.data.revision, role: 'admin' }, { cookie: owner.cookie, method: 'PATCH' });
   assert.equal(promoted.status, 200);
   assert.equal((await f.call('/api/session', null, { cookie: changed.cookie })).status, 401);
   const fresh = await f.signIn('engineer', NEW_PASSWORD);
-  assert.equal(fresh.data.actor.role, 'manager');
-  assert.equal(fresh.data.capabilities.manageAccounts, false);
-  assert.equal((await f.call('/api/accounts', null, { cookie: fresh.cookie })).status, 403);
+  assert.equal(fresh.data.actor.role, 'admin');
+  assert.equal(fresh.data.capabilities.manageAccounts, true);
+  assert.equal((await f.call('/api/accounts', null, { cookie: fresh.cookie })).status, 200);
 });
 
 test('a password change that races an administrator reset cannot overwrite the newer password or mint a usable session', async (t) => {
@@ -507,38 +507,39 @@ async function addAdmin(f, owner, login='peer-admin') {
   return changed;
 }
 
-test('all administrators can create, promote, reset, disable and demote peer administrators',async(t)=>{
+test('only the super administrator can manage administrator accounts; regular administrators manage employees',async(t)=>{
   const f=await fixture(t),owner=await f.signIn();
-  const peer=await addAdmin(f,owner);
-  const legacy=f.stored();legacy.accounts.find(a=>a.id===owner.data.account.id).isSuperAdmin=true;
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(legacy));
-  let current=await f.call('/api/accounts',null,{cookie:peer.cookie});
-  assert.equal('isSuperAdmin' in current.data.account,false);
-  assert.equal('manageAdministrators' in current.data.capabilities,false);
-  assert.ok(current.data.accounts.every(a=>!('isSuperAdmin' in a)));
-  const reset=await f.call(`/api/accounts/${owner.data.account.id}/password`,{revision:current.data.revision,password:TEMP_PASSWORD},{cookie:peer.cookie});
-  assert.equal(reset.status,200,JSON.stringify(reset.data));
-  assert.equal((await f.call('/api/session',null,{cookie:owner.cookie})).status,401);
-  assert.ok(f.stored().accounts.every(a=>!('isSuperAdmin' in a)));
-  const login=await f.signIn('owner',TEMP_PASSWORD);assert.equal(login.data.mustChangePassword,true);
-  current=await f.call('/api/session',null,{cookie:peer.cookie});
-  const disabled=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:current.data.revision,status:'disabled'},{cookie:peer.cookie,method:'PATCH'});
-  assert.equal(disabled.status,200);
-  assert.equal((await f.call('/api/session',null,{cookie:login.cookie})).status,401);
-  const enabled=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:disabled.data.revision,status:'active'},{cookie:peer.cookie,method:'PATCH'});
-  assert.equal(enabled.status,200);
-  const demoted=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:enabled.data.revision,role:'member'},{cookie:peer.cookie,method:'PATCH'});
-  assert.equal(demoted.status,200);
-  const promoted=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:demoted.data.revision,role:'admin'},{cookie:peer.cookie,method:'PATCH'});
-  assert.equal(promoted.status,200);
-  const added=await f.call('/api/accounts',{revision:promoted.data.revision,login:'third-admin',password:TEMP_PASSWORD,name:'第三管理员',role:'admin'},{cookie:peer.cookie});
-  assert.equal(added.status,201);
-  for(const change of [{status:'disabled'},{role:'member'}]){
-    const self=await f.call(`/api/accounts/${peer.data.account.id}`,{revision:added.data.revision,...change},{cookie:peer.cookie,method:'PATCH'});
-    assert.equal(self.data.code,'SELF_LOCKOUT');
+  assert.equal(owner.data.account.role,'superadmin');
+  const peer=await addAdmin(f,owner),second=await addAdmin(f,owner,'second-admin');
+  const employee=await f.add(owner.cookie);
+  const current=await f.call('/api/accounts',null,{cookie:peer.cookie});
+  const before=f.stored(),credentials=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  for(const target of [owner.data.account,peer.data.account,second.data.account]){
+    for(const change of [{title:'强改职位'},{department:'强改部门'},{status:'disabled'},{role:'member'},{projectIds:[]}]){
+      const result=await f.call(`/api/accounts/${target.id}`,{revision:current.data.revision,...change},{cookie:peer.cookie,method:'PATCH'});
+      assert.equal(result.status,403,JSON.stringify(result.data));
+    }
+    const deleted=await f.call(`/api/accounts/${target.id}`,{revision:current.data.revision},{cookie:peer.cookie,method:'DELETE'});
+    assert.equal(deleted.status,target.id===peer.data.account.id?400:403);
+    const reset=await f.call(`/api/accounts/${target.id}/password`,{revision:current.data.revision,password:TEMP_PASSWORD},{cookie:peer.cookie});
+    assert.equal(reset.status,target.id===peer.data.account.id?400:403);
   }
-  const ownReset=await f.call(`/api/accounts/${peer.data.account.id}/password`,{revision:added.data.revision,password:TEMP_PASSWORD},{cookie:peer.cookie});
-  assert.equal(ownReset.data.code,'USE_PASSWORD_CHANGE');
+  for(const role of ['admin','superadmin','manager']){
+    const created=await f.call('/api/accounts',{revision:current.data.revision,login:'forged-'+role,password:TEMP_PASSWORD,name:'越权账号',role},{cookie:peer.cookie});
+    assert.ok([400,403].includes(created.status));
+    const elevated=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,role},{cookie:peer.cookie,method:'PATCH'});
+    assert.ok([400,403].includes(elevated.status));
+  }
+  assert.deepEqual(f.stored(),before);assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),credentials);
+  const edited=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,title:'工程师',projectIds:['p-mower']},{cookie:peer.cookie,method:'PATCH'});assert.equal(edited.status,200);
+  const reset=await f.call(`/api/accounts/${employee.id}/password`,{revision:edited.data.revision,password:TEMP_PASSWORD},{cookie:peer.cookie});assert.equal(reset.status,200);
+  const removed=await f.call(`/api/accounts/${employee.id}`,{revision:reset.data.revision},{cookie:peer.cookie,method:'DELETE'});assert.equal(removed.status,200);
+  const latest=await f.call('/api/session',null,{cookie:owner.cookie});
+  const promoted=await f.call(`/api/accounts/${second.data.account.id}`,{revision:latest.data.revision,role:'member'},{cookie:owner.cookie,method:'PATCH'});assert.equal(promoted.status,200);
+  assert.equal((await f.call('/api/session',null,{cookie:second.cookie})).status,401);
+  for(const change of [{status:'disabled'},{role:'admin'},{role:'member'}]){
+    const denied=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:promoted.data.revision,...change},{cookie:owner.cookie,method:'PATCH'});assert.equal(denied.data.code,'SELF_LOCKOUT');
+  }
 });
 
 test('deleting an account revokes every login and preserves all business history; reused login is a new identity',async(t)=>{
@@ -588,18 +589,13 @@ test('account deletion rejects employees, self-lockout, unknown IDs, cross-origi
   assert.equal((await f.call('/api/session',null,{cookie:employee.cookie})).status,200);
 });
 
-test('an administrator can delete another administrator including the formerly designated owner',async(t)=>{
-  const f=await fixture(t),owner=await f.signIn();
-  const peer=await addAdmin(f,owner);
-  const legacy=f.stored();legacy.accounts.find(a=>a.id===owner.data.account.id).isSuperAdmin=true;
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(legacy));
-  const removed=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:peer.data.revision},{cookie:peer.cookie,method:'DELETE'});
-  assert.equal(removed.status,200,JSON.stringify(removed.data));
-  assert.equal(removed.data.accounts.filter(a=>a.status==='active'&&a.role==='admin').length,1);
-  assert.equal((await f.call('/api/session',null,{cookie:owner.cookie})).status,401);
-  const self=await f.call(`/api/accounts/${peer.data.account.id}`,{revision:removed.data.revision},{cookie:peer.cookie,method:'DELETE'});
+test('the super administrator can delete an administrator but cannot delete itself',async(t)=>{
+  const f=await fixture(t),owner=await f.signIn(),peer=await addAdmin(f,owner);
+  const removed=await f.call(`/api/accounts/${peer.data.account.id}`,{revision:peer.data.revision},{cookie:owner.cookie,method:'DELETE'});
+  assert.equal(removed.status,200);assert.equal((await f.call('/api/session',null,{cookie:peer.cookie})).status,401);
+  assert.equal(removed.data.accounts.filter(a=>a.role==='superadmin').length,1);
+  const self=await f.call(`/api/accounts/${owner.data.account.id}`,{revision:removed.data.revision},{cookie:owner.cookie,method:'DELETE'});
   assert.equal(self.data.code,'SELF_LOCKOUT');
-  assert.equal(f.stored().accounts.filter(a=>a.status==='active').length,1);
 });
 
 test('deletion CAS race leaves credentials and all sessions intact when workspace changed',async(t)=>{
@@ -619,20 +615,55 @@ test('deletion CAS race leaves credentials and all sessions intact when workspac
   assert.equal((await f.call('/api/session',null,{cookie:employee.cookie})).status,200);
 });
 
-test('explicit hosted-to-local migration keeps the selected administrator usable without owner designation',async(t)=>{
+test('explicit hosted-to-local migration binds the sole super administrator and preserves project records',async(t)=>{
   const db=openDatabase(':memory:');t.after(()=>db.close());
   const identity={userId:'hosted-owner',email:'owner@example.com',displayName:'原管理员'};
   const env={DB:db,SITE_ORIGIN:ORIGIN,FIRST_ADMIN_EMAIL:identity.email};
   const owner=await(await handleApi(new Request(`${ORIGIN}/api/session`),env,identity)).json();
   const createdResponse=await handleApi(new Request(`${ORIGIN}/api/accounts`,{method:'POST',headers:{Origin:ORIGIN,'Content-Type':'application/json'},body:JSON.stringify({revision:owner.revision,email:'second@example.com',name:'迁移管理员',role:'admin'})}),env,identity);
   assert.equal(createdResponse.status,201);
-  const target=(await createdResponse.json()).accounts.find(a=>a.email==='second@example.com');
+  const list=(await createdResponse.json()).accounts;const target=list.find(a=>a.role==='superadmin');const ordinary=list.find(a=>a.email==='second@example.com');
   const before=JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
   await initializeAuthSchema(db);
+  await assert.rejects(provisionInitialCredential({...env,INITIAL_ADMIN_LOGIN:'ordinary-admin',INITIAL_ADMIN_PASSWORD_HASH:INITIAL_HASH},{accountId:ordinary.id}),{code:'ADMIN_REQUIRED'});
   await provisionInitialCredential({...env,INITIAL_ADMIN_LOGIN:'selected-admin',INITIAL_ADMIN_PASSWORD_HASH:INITIAL_HASH},{accountId:target.id});
   const response=await handleHttpApi(new Request(`${ORIGIN}/api/auth/login`,{method:'POST',headers:{Origin:ORIGIN,'Content-Type':'application/json'},body:JSON.stringify({login:'selected-admin',password:OWNER_PASSWORD})}),env);
   assert.equal(response.status,200);
-  const session=await response.json();assert.equal(session.account.role,'admin');assert.equal('isSuperAdmin' in session.account,false);assert.equal(session.capabilities.manageAccounts,true);
+  const session=await response.json();assert.equal(session.account.role,'superadmin');assert.equal('isSuperAdmin' in session.account,false);assert.equal(session.capabilities.manageAccounts,true);
   const after=JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
   assert.deepEqual(after.state.projects,before.state.projects);assert.deepEqual(after.state.tasks,before.state.tasks);
+});
+
+test('legacy roles migrate once with credentials, sessions and project duties intact; the policy never re-elects',async t=>{
+  const f=await fixture(t),owner=await f.signIn(),peer=await addAdmin(f,owner);
+  const employee=await f.add(owner.cookie,'former-manager','u-manager');
+  const legacy=f.stored();delete legacy.accountPolicyVersion;
+  legacy.state.users.find(u=>u.id==='u-admin').role='admin';
+  legacy.state.users.find(u=>u.id==='u-manager').role='manager';
+  const beforeProjects=structuredClone(legacy.state.projects),beforeTasks=structuredClone(legacy.state.tasks);
+  const credentials=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(legacy));
+  await initializeLocalWorkspace(f.env);
+  const migrated=f.stored();assert.equal(migrated.accountPolicyVersion,2);
+  assert.equal(migrated.state.users.find(u=>u.id==='u-admin').role,'superadmin');
+  assert.equal(migrated.state.users.find(u=>u.id==='u-manager').role,'member');
+  assert.deepEqual(migrated.state.projects,beforeProjects);assert.deepEqual(migrated.state.tasks,beforeTasks);
+  assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),credentials);
+  assert.equal((await f.call('/api/session',null,{cookie:owner.cookie})).data.account.role,'superadmin');
+  const snapshot=f.stored();await initializeLocalWorkspace(f.env);assert.deepEqual(f.stored(),snapshot);
+  snapshot.state.users.find(u=>u.id==='u-admin').role='member';
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(snapshot));
+  await initializeLocalWorkspace(f.env);assert.ok(f.stored().state.users.every(u=>u.role!=='superadmin'));
+  assert.equal((await f.call('/api/session',null,{cookie:peer.cookie})).data.account.role,'admin');
+  await assert.rejects(recoverLocalAdmin(f.env,{login:'peer-admin',password:NEW_PASSWORD}),{code:'ADMIN_REQUIRED'});
+});
+
+test('retired manager and additional super administrator roles cannot be created or assigned',async t=>{
+  const f=await fixture(t),owner=await f.signIn(),employee=await f.add(owner.cookie);
+  const current=await f.call('/api/session',null,{cookie:owner.cookie});const before=f.stored();
+  for(const role of ['manager','superadmin']){
+    assert.equal((await f.call('/api/accounts',{revision:current.data.revision,login:'new-'+role,password:TEMP_PASSWORD,name:'不能新增',role},{cookie:owner.cookie})).status,400);
+    assert.equal((await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,role},{cookie:owner.cookie,method:'PATCH'})).status,400);
+  }
+  assert.deepEqual(f.stored(),before);
 });

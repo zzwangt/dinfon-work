@@ -1,3 +1,4 @@
+import { isSuperAdminRole } from '../public/client/roles.js';
 import { backup } from 'node:sqlite';
 import { mkdir, stat, readFile, rm, chmod, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -51,7 +52,7 @@ export async function createMaintenanceManager({DB,config,root,requestRestart,no
   async function waitIdle(){const end=Date.now()+30000;while(requests>0){if(Date.now()>end)fail(409,'REQUESTS_BUSY','仍有操作正在保存，请稍后升级');await new Promise(done=>setTimeout(done,25));}}
   async function handle(request,{actor,authorize}){
     let ownsOperation=false;
-    const authorizeAdmin=async()=>{const current=authorize?await authorize():{actor};if(current.actor?.role!=='admin')fail(403,'ADMIN_REQUIRED','仅管理员可以管理备份与升级');};
+    const authorizeAdmin=async()=>{const current=authorize?await authorize():{actor};if(!isSuperAdminRole(current.actor?.role))fail(403,'ADMIN_REQUIRED','仅总管理员可以管理备份与升级');};
     try{
       await authorizeAdmin();
       const path=new URL(request.url).pathname,method=request.method;

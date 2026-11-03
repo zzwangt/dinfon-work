@@ -74,7 +74,7 @@ test('maintenance delegates a verified current administrator with server-derived
   assert.equal(f.calls.length, routes.length);
   const admin = f.stored().accounts.find(account => account.userId === 'u-admin');
   for (const call of f.calls) {
-    assert.equal(call.actor.role, 'admin');
+    assert.equal(call.actor.role, 'superadmin');
     assert.equal(call.account.id, admin.id);
     assert.equal(Object.hasOwn(call, 'credential'), false);
   }
@@ -88,4 +88,12 @@ test('missing maintenance runtime fails clearly without bypassing administrator 
   assert.equal(missing.status, 503);
   assert.equal(missing.data.code, 'MAINTENANCE_UNAVAILABLE');
   assert.deepEqual(f.calls, []);
+});
+
+
+test('ordinary administrators cannot access complete backups or executable upgrades',async t=>{
+  const f=await fixture(t),workspace=f.stored();workspace.state.users.find(user=>user.id==='u-manager').role='admin';
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(workspace));
+  for(const [path,method] of routes){const result=await f.call(path,method,'u-manager');assert.equal(result.status,403);assert.equal(result.data.code,'SUPERADMIN_REQUIRED');}
+  assert.deepEqual(f.calls,[]);
 });

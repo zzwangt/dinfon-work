@@ -122,7 +122,7 @@ test('invalid identities and unrecognized roles fail closed', () => {
   const state = createSeedState();
   assert.throws(() => sanitizeStateForActor(state, ''), /请先登录/);
   assert.throws(() => sanitizeStateForActor(state, 'not-a-user'), /账号不存在/);
-  state.users.push({ id: 'u-invalid', role: 'superadmin' });
+  state.users.push({ id: 'u-invalid', role: 'root' });
   assert.throws(() => sanitizeStateForActor(state, 'u-invalid'), /有效访问角色/);
   assert.throws(() => sanitizeStateForActor({ version: 1, users: [] }, 'u-admin'), /业务数据结构/);
 });
@@ -151,10 +151,10 @@ test('employee and manager route policies exclude global administration', () => 
 });
 
 test('administrator routes are allowed and unauthenticated or malformed route requests are denied', () => {
-  for (const route of ['overview', 'approvals', 'accounts', 'accounts/new', 'team', 'settings', 'my-account', 'projects/p-mower']) {
+  for (const route of ['overview', 'approvals', 'accounts', 'accounts/new', 'team', 'my-account', 'projects/p-mower']) {
     assert.equal(canAccessRoute({ role: 'admin' }, route), true);
   }
-  for (const actor of [null, undefined, {}, { role: 'superadmin' }]) {
+  for (const actor of [null, undefined, {}, { role: 'root' }]) {
     assert.equal(canAccessRoute(actor, 'overview'), false);
   }
   for (const route of ['', ' ', '/', '#', 'dashboard', '#dashboard', 'dashboard/legacy', 'unknown', null, undefined, {}, ['projects']]) {

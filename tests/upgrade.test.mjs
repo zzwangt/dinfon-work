@@ -44,11 +44,11 @@ test('administrator prepares then applies with fresh authorization, a full backu
   const root=await directory(t);await mkdir(resolve(root,'server'));await mkdir(resolve(root,'public'));const config={DB_PATH:resolve(root,'data/dinfon.sqlite')},DB=openDatabase(config.DB_PATH);let job;
   await DB.prepare('INSERT INTO workspace VALUES(?,?,?)').bind('main','{"accounts":[{"id":"original-account"}],"projects":["p1"]}',8).run();
   const manager=await createMaintenanceManager({DB,config,root,autoStart:false,requestRestart:async value=>{job=value;}});t.after(async()=>{await manager.close();DB.close();});
-  const prepare=async(extra={})=>{const form=new FormData();form.append('archive',new Blob([release()]),'release.zip');return manager.handle(new Request('http://localhost/api/maintenance/upgrade/prepare',{method:'POST',headers:{Origin:'http://localhost'},body:form}),{actor:{role:'admin'},...extra});};
-  let authorizations=0;const denied=await prepare({authorize:async()=>({actor:{role:++authorizations<3?'admin':'member'}})});assert.equal(denied.status,403);assert.equal((await manager.status()).upgrade.staged,null);
+  const prepare=async(extra={})=>{const form=new FormData();form.append('archive',new Blob([release()]),'release.zip');return manager.handle(new Request('http://localhost/api/maintenance/upgrade/prepare',{method:'POST',headers:{Origin:'http://localhost'},body:form}),{actor:{role:'superadmin'},...extra});};
+  let authorizations=0;const denied=await prepare({authorize:async()=>({actor:{role:++authorizations<3?'superadmin':'member'}})});assert.equal(denied.status,403);assert.equal((await manager.status()).upgrade.staged,null);
   const prepared=await prepare();assert.equal(prepared.status,200);const {stage}=await prepared.json();assert.equal((await manager.status()).upgrade.status,'staged');
   assert.equal(manager.beginRequest(),true);
-  const applying=manager.handle(new Request('http://localhost/api/maintenance/upgrade/apply',{method:'POST',headers:{Origin:'http://localhost','Content-Type':'application/json'},body:JSON.stringify({stageId:stage.id})}),{actor:{role:'admin'}});
+  const applying=manager.handle(new Request('http://localhost/api/maintenance/upgrade/apply',{method:'POST',headers:{Origin:'http://localhost','Content-Type':'application/json'},body:JSON.stringify({stageId:stage.id})}),{actor:{role:'superadmin'}});
   await waitFor(()=>manager.isUpgrading);assert.equal(manager.beginRequest(),false);manager.endRequest();const response=await applying;assert.equal(response.status,202);assert.equal((await manager.status()).upgrade.status,'applying');
   await waitFor(()=>job);assert.equal(job.stageId,stage.id);const copy=new DatabaseSync(job.backupPath,{readOnly:true});try{const row=copy.prepare('SELECT * FROM workspace').get();assert.equal(row.revision,8);assert.match(row.payload,/original-account/);}finally{copy.close();}
 });

@@ -1,3 +1,4 @@
+import { isAdminRole } from './roles.js';
 import { sanitizeStateForActor } from './access.js';
 import { addDays, progressAgainstPlan } from './domain.js';
 import { datePart, deadlineMs, formatDateTime, isOverdue } from './time.js';
@@ -31,7 +32,7 @@ export function buildWeeklyReport(state, { actorId, range, now = Date.now() } = 
   const taskWidths = [34, 26, 14, 20, 23, 23, 23, 42];
   return {
     title: '鼎峰项目周报', range: { ...range }, generatedAt: formatDateTime(new Date(now).toISOString()),
-    scope: actor.role === 'admin' ? '全部项目' : `${actor.name}参与的项目`,
+    scope: isAdminRole(actor.role) ? '全部项目' : `${actor.name}参与的项目`,
     tables: [
       { title: '本周概况', headers: ['指标', '数量'], widths: [28, 20], rows: [['本周到期任务', tasks.length], ['已验收完成', done], ['未完成任务', tasks.length - done], ['逾期任务', late], ['本周大节点', milestones.length], ['已达成大节点', milestones.filter(item => item.status === 'done').length]] },
       { title: '项目进度', headers: ['项目', '负责人', '任务总数', '已验收完成', '任务完成率', '项目截止时间'], widths: [38, 16, 16, 18, 18, 24], percentColumns: [4], rows: scoped.projects.map(item => { const progress = progressAgainstPlan(scoped.tasks.filter(task => task.projectId === item.id), now); return [item.name, users.get(item.ownerId)?.name || '未分配', progress.total, progress.completed, progress.total ? progress.actual / 100 : '—', formatDateTime(item.dueDate)]; }) },

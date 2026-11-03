@@ -17,7 +17,7 @@ async function fixture(t,options={}) {
   await DB.prepare('INSERT INTO files VALUES(?,?)').bind('file-1',new Uint8Array([0,5,127,255])).run();
   const manager=await createMaintenanceManager({DB,config,root,autoStart:false,...options});
   t.after(async()=>{await manager.close();DB.close();await rm(root,{recursive:true,force:true});});
-  const call=async(path,method='GET',body,actor={role:'admin'},extra={})=>manager.handle(new Request(`http://localhost/api/maintenance${path}`,{method,headers:{Origin:'http://localhost','Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{actor,...extra});
+  const call=async(path,method='GET',body,actor={role:'superadmin'},extra={})=>manager.handle(new Request(`http://localhost/api/maintenance${path}`,{method,headers:{Origin:'http://localhost','Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})}),{actor,...extra});
   return {root,config,DB,manager,call};
 }
 
@@ -47,8 +47,8 @@ test('backup controls and downloads require administrator, same-origin writes an
   const f=await fixture(t);
   assert.equal((await f.call('','GET',undefined,{role:'member'})).status,403);
   assert.equal((await f.call('/backup','POST',{}, {role:'member'})).status,403);
-  const wrong=await f.manager.handle(new Request('http://localhost/api/maintenance/backup',{method:'POST',headers:{Origin:'https://other.example','Content-Type':'application/json'},body:'{}'}),{actor:{role:'admin'}});assert.equal(wrong.status,403);
-  let calls=0;const revoked=await f.call('/backup','POST',{}, {role:'admin'},{authorize:async()=>({actor:{role:++calls===1?'admin':'member'}})});assert.equal(revoked.status,403);assert.equal((await f.manager.status()).backups.length,0);
+  const wrong=await f.manager.handle(new Request('http://localhost/api/maintenance/backup',{method:'POST',headers:{Origin:'https://other.example','Content-Type':'application/json'},body:'{}'}),{actor:{role:'superadmin'}});assert.equal(wrong.status,403);
+  let calls=0;const revoked=await f.call('/backup','POST',{}, {role:'superadmin'},{authorize:async()=>({actor:{role:++calls===1?'superadmin':'member'}})});assert.equal(revoked.status,403);assert.equal((await f.manager.status()).backups.length,0);
   assert.equal((await f.call('/settings','POST',{enabled:true,time:'99:12',retention:0})).status,400);
   assert.equal((await f.call('/settings','POST',{enabled:false,time:'01:30',retention:9})).status,200);
   await f.manager.tick();assert.equal((await f.manager.status()).backups.length,0);
@@ -57,7 +57,7 @@ test('backup controls and downloads require administrator, same-origin writes an
 
 test('maintenance write operations are serialized and startup applying state keeps business writes closed',async t=>{
   const f=await fixture(t);let release;const gate=new Promise(done=>release=done);let calls=0;
-  const pending=f.call('/settings','POST',{enabled:false,time:'02:00',retention:14},{role:'admin'},{authorize:async()=>{if(++calls===2)await gate;return {actor:{role:'admin'}};}});
+  const pending=f.call('/settings','POST',{enabled:false,time:'02:00',retention:14},{role:'superadmin'},{authorize:async()=>{if(++calls===2)await gate;return {actor:{role:'superadmin'}};}});
   await new Promise(done=>setTimeout(done,10));assert.equal((await f.call('/backup','POST',{})).status,409);release();assert.equal((await pending).status,200);
   await writeFile(resolve(f.manager.stageDirectory,'status.json'),JSON.stringify({status:'applying',staged:{id:'pending'}}));
   const second=await createMaintenanceManager({DB:f.DB,config:f.config,root:f.root,autoStart:false});

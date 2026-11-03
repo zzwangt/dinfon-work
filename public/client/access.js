@@ -1,3 +1,5 @@
+import { isAdminRole, normalizeRole } from './roles.js';
+
 /**
  * Shared server/client authorization policy for business data.
  * The server must derive actorId from its authenticated session, never from a
@@ -6,15 +8,16 @@
 
 const COLLECTIONS = ['users', 'projects', 'milestones', 'tasks', 'extensions', 'logs'];
 const USER_FIELDS = ['id', 'name', 'role', 'title', 'department', 'color'];
-const ROLES = new Set(['admin', 'manager', 'member']);
+const ROLES = new Set(['superadmin', 'admin', 'member']);
 const EMPLOYEE_ROUTES = new Set(['overview', 'projects', 'tasks', 'weekly', 'approvals', 'my-account']);
-const ADMIN_ROUTES = new Set([...EMPLOYEE_ROUTES, 'team', 'accounts', 'settings']);
+const ADMIN_ROUTES = new Set([...EMPLOYEE_ROUTES, 'team', 'accounts']);
 
 function profile(user) {
   const result = {};
   for (const field of USER_FIELDS) {
     if (Object.hasOwn(user, field)) result[field] = user[field];
   }
+  result.role = normalizeRole(result.role);
   return result;
 }
 
@@ -31,9 +34,9 @@ export function sanitizeStateForActor(state, actorId) {
   if (!Array.isArray(allMilestoneRequests)) throw new Error('节点申请数据结构不兼容，无法确定访问权限');
   if (typeof actorId !== 'string' || !actorId) throw new Error('请先登录有效账号');
   const actor = state.users.find((user) => user.id === actorId);
-  if (!actor || !ROLES.has(actor.role)) throw new Error('账号不存在或没有有效访问角色');
+  if (!actor || !ROLES.has(normalizeRole(actor.role))) throw new Error('账号不存在或没有有效访问角色');
 
-  if (actor.role === 'admin') {
+  if (isAdminRole(actor.role)) {
     return structuredClone({
       version: state.version,
       users: state.users.map(profile),
@@ -90,8 +93,9 @@ export function sanitizeStateForActor(state, actorId) {
  * domain authorization. A project id in the URL never grants project access.
  */
 export function canAccessRoute(actor, route) {
-  if (!actor || !ROLES.has(actor.role) || typeof route !== 'string') return false;
+  if (!actor || !ROLES.has(normalizeRole(actor.role)) || typeof route !== 'string') return false;
   const routeName = route.trim().replace(/^#?\/?/, '').split(/[/?#]/, 1)[0];
   if (!routeName) return false;
-  return (actor.role === 'admin' ? ADMIN_ROUTES : EMPLOYEE_ROUTES).has(routeName);
+  if (routeName === 'settings') return actor.role === 'superadmin';
+  return (isAdminRole(actor.role) ? ADMIN_ROUTES : EMPLOYEE_ROUTES).has(routeName);
 }

@@ -1,3 +1,4 @@
+import { isAdminRole } from '../public/client/roles.js';
 import { createHash } from 'node:crypto';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -30,7 +31,7 @@ function identifier(value, label) {
 }
 function projectFor(context, projectId) {
   const project = context.workspace.state.projects.find(item => item.id === projectId);
-  if (!project || !(context.actor.role === 'admin' || project.ownerId === context.actor.id || project.memberIds?.includes(context.actor.id))) fail(404, 'NOT_FOUND', '项目或文件不存在，或你无权访问');
+  if (!project || !(isAdminRole(context.actor.role) || project.ownerId === context.actor.id || project.memberIds?.includes(context.actor.id))) fail(404, 'NOT_FOUND', '项目或文件不存在，或你无权访问');
   return project;
 }
 function entityFor(context, projectId, entityType, entityId) {
@@ -40,7 +41,7 @@ function entityFor(context, projectId, entityType, entityId) {
   return entity;
 }
 function canDelete(context, project, row) {
-  return context.actor.role === 'admin' || project.ownerId === context.actor.id || row.uploaded_by === context.actor.id;
+  return isAdminRole(context.actor.role) || project.ownerId === context.actor.id || row.uploaded_by === context.actor.id;
 }
 function metadata(context, project, row) {
   return { id: row.id, projectId: row.project_id, entityType: row.entity_type, entityId: row.entity_id, name: row.name, size: row.size, mimeType: row.mime_type, uploadedBy: row.uploaded_by, uploaderName: context.workspace.state.users.find(user => user.id === row.uploaded_by)?.name || '已移除成员', uploadedAt: row.uploaded_at, canDelete: canDelete(context, project, row) };

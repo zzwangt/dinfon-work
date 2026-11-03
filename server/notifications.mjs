@@ -1,3 +1,4 @@
+import { isAdminRole } from '../public/client/roles.js';
 // Events commit in the same workspace CAS as the business change. Read receipts
 // live separately, so opening a notification never conflicts with a task edit.
 // Old workspaces start with an empty event stream; historical logs are not replayed.
@@ -17,19 +18,19 @@ async function initializeReadReceipts(db) {
 const projectMembers = (project) => new Set([project?.ownerId, ...(project?.memberIds || [])].filter(Boolean));
 const hasProjectAccess = (state, user, projectId) => {
   const project = state.projects.find((entry) => entry.id === projectId);
-  return Boolean(project && (user?.role === 'admin' || projectMembers(project).has(user?.id)));
+  return Boolean(project && (isAdminRole(user?.role) || projectMembers(project).has(user?.id)));
 };
 const newEntry = (before, after) => after.find((entry) => !before.some((old) => old.id === entry.id));
 
 export function workspacePayload(workspace) {
-  return JSON.stringify({ state: workspace.state, accounts: workspace.accounts, notifications: workspace.notifications || [] });
+  return JSON.stringify({ state: workspace.state, accounts: workspace.accounts, notifications: workspace.notifications || [], ...(workspace.accountPolicyVersion ? { accountPolicyVersion: workspace.accountPolicyVersion } : {}) });
 }
 
 /** Called only after the domain command succeeds, before its atomic CAS save. */
 export function appendNotifications(previous, next, actorId, action, payload = {}) {
   next.notifications = [...(previous.notifications || [])];
   const state = next.state;
-  const admins = state.users.filter((user) => user.role === 'admin').map((user) => user.id);
+  const admins = state.users.filter((user) => isAdminRole(user.role)).map((user) => user.id);
   const projectAudience = (projectId) => [...projectMembers(state.projects.find((project) => project.id === projectId)), ...admins];
   const createdAt = state.logs.find((entry) => !previous.state.logs.some((old) => old.id === entry.id))?.at || new Date().toISOString();
   const emitted = new Set();
@@ -37,7 +38,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     for (const account of next.accounts) {
       const user = state.users.find((entry) => entry.id === account.userId);
       if (account.status !== 'active' || !user || user.id === actorId || !recipients.includes(user.id)) continue;
-      if (!hasProjectAccess(state, user, data.projectId)) continue;
+      if (!hasProjectAccess(action === 'deleteProject' ? previous.state : state, user, data.projectId)) continue;
       // One operation appears once per recipient, even when they hold several roles.
       const key = `${account.id}:${data.entityId}`;
       if (emitted.has(key)) continue;
@@ -51,6 +52,14 @@ export function appendNotifications(previous, next, actorId, action, payload = {
   if (action === 'createProject') {
     const project = newEntry(previous.state.projects, state.projects);
     if (project) projectNotice(project, `你参与的项目已建立：${project.name}`);
+  } else if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(action)) {
+    const wholeProject = action === 'deleteProject';
+    const target = previous.state[wholeProject ? 'projects' : action === 'deleteMilestone' ? 'milestones' : 'tasks'].find(entry => entry.id === payload.id);
+    const project = previous.state.projects.find(entry => entry.id === (wholeProject ? target?.id : target?.projectId));
+    if (target && project) {
+      emit([...projectMembers(project), ...admins], { category: 'projects', projectId: project.id, entityId: project.id,
+        title: `${wholeProject ? '项目' : action === 'deleteMilestone' ? '大节点' : '小节点'}已删除：${target.name || target.title}`, target: wholeProject ? '#overview' : `#projects/${project.id}` });
+    }
   } else if (action === 'setProjectReviewer') {
     const project = state.projects.find((entry) => entry.id === payload.id);
     if (project) {
@@ -118,7 +127,10 @@ export function appendNotifications(previous, next, actorId, action, payload = {
 function visibleNotifications(workspace, account, actor) {
   if (account.status !== 'active') return [];
   return (workspace.notifications || []).filter((entry) => {
-    if (entry.accountId !== account.id || !hasProjectAccess(workspace.state, actor, entry.projectId)) return false;
+    if (entry.accountId !== account.id) return false;
+    if (entry.action === 'deleteProject' && entry.category === 'projects' && !workspace.state.projects.some(project => project.id === entry.projectId)) return true;
+    if (!hasProjectAccess(workspace.state, actor, entry.projectId)) return false;
+    if (entry.category === 'tasks' && !workspace.state.tasks.some(task => task.id === entry.entityId)) return false;
     if (entry.action === 'requestMilestone' || entry.action === 'requestExtension') {
       const project = workspace.state.projects.find((item) => item.id === entry.projectId);
       const requests = entry.action === 'requestMilestone' ? workspace.state.milestoneRequests || [] : workspace.state.extensions;

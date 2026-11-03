@@ -298,15 +298,16 @@ test('personal statistics use latest submission in Shanghai time and ignore revi
   assert.equal(empty.firstPassRate, null);
 });
 
-test('create-project validates date ordering, owner role and member permissions', () => {
+test('only administrators create projects and may assign any employee as project owner', () => {
   const state = seed();
   const input = { name: '新项目', description: '真实项目待补充', category: '研发', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: today(), dueDate: addDays(today(), 14) };
   const next = transact(state, 'createProject', input, 'u-admin');
   assert.equal(next.projects.length, 5);
   assert.deepEqual(next.projects.at(-1).memberIds, ['u-manager', 'u-engineer']);
   assert.equal(next.projects.at(-1).originalDueDate, input.dueDate);
-  assert.throws(() => transact(state, 'createProject', input, 'u-engineer'), /仅管理员或项目负责人/);
-  assert.throws(() => transact(state, 'createProject', { ...input, ownerId: 'u-engineer' }, 'u-admin'), /负责人或管理员角色/);
+  assert.throws(() => transact(state, 'createProject', input, 'u-engineer'), /仅管理员/);
+  assert.throws(() => transact(state, 'createProject', input, 'u-manager'), /仅管理员/);
+  assert.equal(transact(state, 'createProject', { ...input, ownerId: 'u-engineer' }, 'u-admin').projects.at(-1).ownerId, 'u-engineer');
   assert.throws(() => transact(state, 'createProject', { ...input, dueDate: addDays(today(), -1) }, 'u-admin'), /不能早于开始/);
 });
 

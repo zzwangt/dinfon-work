@@ -1,13 +1,14 @@
+import { isAdminRole, isSuperAdminRole, ROLE_LABELS } from '../public/client/roles.js';
 import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
 import { canApproveProject } from '../public/client/approval-access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
 import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
-import { handleFileApi } from './files.mjs';
+import { handleFileApi, initializeFileSchema } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
-const ROLES = new Set(['admin', 'manager', 'member']);
-const COMMANDS = new Set(['createProject', 'setProjectReviewer', 'createTask', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const ROLES = new Set(['superadmin', 'admin', 'member']);
+const COMMANDS = new Set(['createProject', 'setProjectReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
 
 class ApiError extends Error {
@@ -66,15 +67,34 @@ function revisionMatches(value, expected) {
 }
 
 async function readWorkspace(db) {
-  const row = await db.prepare('SELECT payload, revision FROM workspace WHERE id = ?').bind(WORKSPACE_ID).first();
-  if (!row) return null;
-  const value = JSON.parse(row.payload);
-  if (!value || !Array.isArray(value.accounts) || !value.state || !Number.isSafeInteger(row.revision)) throw new Error('Invalid workspace');
-  // Normalize retired statuses only in the loaded copy. Reading does not reset
-  // business history, change deadlines or advance the stored revision.
-  value.state = normalizeState(value.state);
-  for (const account of value.accounts) delete account.isSuperAdmin;
-  return { ...value, revision: row.revision };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const row = await db.prepare('SELECT payload, revision FROM workspace WHERE id = ?').bind(WORKSPACE_ID).first();
+    if (!row) return null;
+    const value = JSON.parse(row.payload);
+    if (!value || !Array.isArray(value.accounts) || !value.state || !Number.isSafeInteger(row.revision)) throw new Error('Invalid workspace');
+    value.state = normalizeState(value.state);
+    if (value.accountPolicyVersion !== 2) {
+      // One durable upgrade only. Never elect a new administrator after policy v2
+      // was installed, even if an operator has damaged the sole owner's record.
+      const activeAdmins = value.accounts.filter(account => account.status === 'active' && isAdminRole(value.state.users.find(user => user.id === account.userId)?.role))
+        .sort((a,b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || a.id.localeCompare(b.id));
+      const existing = activeAdmins.filter(account => value.state.users.find(user => user.id === account.userId)?.role === 'superadmin');
+      requireValue(existing.length <= 1, '存在多个总管理员，请先由服务器操作员核对账号');
+      const ownerAccount = existing[0] || activeAdmins.find(account => account.isSuperAdmin === true) || activeAdmins[0];
+      if (!ownerAccount) fail(503, 'ROLE_MIGRATION_REQUIRED', '没有有效管理账号，无法迁移总管理员，请联系服务器操作员');
+      value.state.users.find(user => user.id === ownerAccount.userId).role = 'superadmin';
+      value.accountPolicyVersion = 2;
+      for (const account of value.accounts) delete account.isSuperAdmin;
+      log(value, ownerAccount.userId, '升级账号权限：启用总管理员，原项目负责人账号改为员工；项目分工与登录凭据保留');
+      const result = await db.prepare('UPDATE workspace SET payload = ?, revision = revision + 1 WHERE id = ? AND revision = ?')
+        .bind(workspacePayload(value), WORKSPACE_ID, row.revision).run();
+      if (result.meta?.changes !== 1) continue;
+      return { ...value, revision: row.revision + 1 };
+    }
+    for (const account of value.accounts) delete account.isSuperAdmin;
+    return { ...value, revision: row.revision };
+  }
+  fail(409, 'REVISION_CONFLICT', '账号权限更新期间数据发生变化，请刷新后重试');
 }
 
 async function saveWorkspace(db, next, previousRevision) {
@@ -90,6 +110,7 @@ async function bootstrap(db, env, identity) {
   if (identity.email !== configured) fail(403, 'ACCOUNT_NOT_PROVISIONED', '当前账号尚未开通，请联系管理员添加你的 ChatGPT 登录邮箱');
   const state = createSeedState();
   const owner = state.users.find((user) => user.id === 'u-admin');
+  owner.role = 'superadmin';
   // Hosting may use the login email as its display-name fallback. Keep that
   // authentication detail out of business profiles shared with project members.
   owner.name = identity.displayName && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity.displayName) ? identity.displayName : '管理员';
@@ -97,7 +118,7 @@ async function bootstrap(db, env, identity) {
   const accounts = [{ id: identifier('a'), userId: owner.id, email: identity.email, authId: identity.authId, status: 'active', createdAt: at, updatedAt: at, lastLoginAt: at }];
   state.logs.unshift({ id: identifier('log'), at, actorId: owner.id, projectId: null, message: '完成管理员账号绑定，启用独立账号与共享数据' });
   await db.prepare('INSERT OR IGNORE INTO workspace (id, payload, revision) VALUES (?, ?, 1)')
-    .bind(WORKSPACE_ID, JSON.stringify({ state, accounts })).run();
+    .bind(WORKSPACE_ID, JSON.stringify({ state, accounts, accountPolicyVersion: 2 })).run();
   return readWorkspace(db);
 }
 
@@ -158,7 +179,7 @@ async function session(db, workspace, identity) {
     state,
     notifications: await unreadNotifications(db, workspace, account, actor),
     revision: workspace.revision,
-    capabilities: { manageAccounts: actor.role === 'admin', manageAllData: actor.role === 'admin', createProjects: actor.role !== 'member' },
+    capabilities: { manageAccounts: isAdminRole(actor.role), manageAllData: isAdminRole(actor.role), createProjects: isAdminRole(actor.role), manageMaintenance: isSuperAdminRole(actor.role) },
   };
 }
 
@@ -175,7 +196,16 @@ function accountList(workspace) {
 }
 
 function adminOnly(actor) {
-  if (actor.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '仅管理账号可以执行此操作');
+  if (!isAdminRole(actor.role)) fail(403, 'ADMIN_REQUIRED', '仅管理账号可以执行此操作');
+}
+
+function superadminOnly(actor) {
+  if (!isSuperAdminRole(actor.role)) fail(403, 'SUPERADMIN_REQUIRED', '仅总管理员可以管理备份与升级');
+}
+
+function manageAccountTarget(actor, user) {
+  adminOnly(actor);
+  if (!isSuperAdminRole(actor.role) && user?.role !== 'member') fail(403, 'ACCOUNT_MANAGER_REQUIRED', '管理员只能管理员工账号；管理账号由总管理员处理');
 }
 
 function log(workspace, actorId, message, projectId = null) {
@@ -186,9 +216,9 @@ function accessibleCommand(workspace, actor, action, payload) {
   if (action === 'createProject') return;
   const scope = sanitizeStateForActor(workspace.state, actor.id);
   let projectId = payload.projectId;
-  if (action === 'setProjectReviewer') projectId = payload.id;
-  if (['updateTask', 'editTaskContent', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
-  if (['completeMilestone', 'editMilestoneContent'].includes(action)) projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
+  if (action === 'setProjectReviewer' || action === 'deleteProject') projectId = payload.id;
+  if (['updateTask', 'deleteTask', 'editTaskContent', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
+  if (['completeMilestone', 'editMilestoneContent', 'deleteMilestone'].includes(action)) projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
   const approval = action === 'reviewExtension' || action === 'reviewMilestoneRequest';
   if (approval) {
     const requests = action === 'reviewExtension' ? workspace.state.extensions : workspace.state.milestoneRequests || [];
@@ -196,7 +226,8 @@ function accessibleCommand(workspace, actor, action, payload) {
   }
   if (!scope.projects.some((project) => project.id === projectId)) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
   if (approval && !canApproveProject(scope.projects.find((project) => project.id === projectId), actor.id)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅项目负责人或项目验收人可以审批申请');
-  if (action === 'editMilestoneContent') adminOnly(actor);
+  if (action === 'editMilestoneContent' || ['deleteTask', 'deleteMilestone'].includes(action)) adminOnly(actor);
+  if (action === 'deleteProject' && !isSuperAdminRole(actor.role)) fail(403, 'SUPERADMIN_REQUIRED', '仅总管理员可以删除整个项目');
 }
 
 function assignAccountProjects(workspace, user, projectIds, actor) {
@@ -220,13 +251,15 @@ function provisionAccount(workspace, data, actor, local = false) {
   const normalized = local && !data.email ? '' : email(data.email);
   const login = local ? normalizeLogin(data.login) : '';
   const name = string(data.name, '姓名', 30);
-  requireValue(ROLES.has(data.role), '请选择有效的账号角色');
+  requireValue(['admin', 'member'].includes(data.role), '只能开通管理员或员工账号');
+  if (!isSuperAdminRole(actor.role) && data.role !== 'member') fail(403, 'ACCOUNT_MANAGER_REQUIRED', '仅总管理员可以开通管理员账号');
   requireValue(!normalized || !workspace.accounts.some((account) => account.email === normalized), '此邮箱已经开通账号');
   if (local) requireValue(!workspace.accounts.some((account) => account.login === login), '此账号已存在');
   let user;
   if (data.existingUserId) {
     user = workspace.state.users.find((entry) => entry.id === data.existingUserId);
     requireValue(user, '要关联的项目成员不存在');
+    manageAccountTarget(actor, user);
     requireValue(!workspace.accounts.some((account) => account.userId === user.id), '此项目成员已关联登录账号');
     user.name = name;
     user.role = data.role;
@@ -235,7 +268,7 @@ function provisionAccount(workspace, data, actor, local = false) {
   } else {
     user = {
       id: identifier('u'), name, role: data.role,
-      title: string(data.title, '岗位', 60, true) || (data.role === 'member' ? '项目成员' : data.role === 'manager' ? '项目负责人' : '管理员'),
+      title: string(data.title, '岗位', 60, true) || ROLE_LABELS[data.role],
       department: string(data.department, '部门', 60, true) || '未分配部门',
       color: ['#52756e', '#526ba0', '#977951', '#8a6e9b'][workspace.state.users.length % 4],
     };
@@ -245,7 +278,7 @@ function provisionAccount(workspace, data, actor, local = false) {
   const at = new Date().toISOString();
   const account = { id: identifier('a'), userId: user.id, email: normalized, authId: null, status: 'active', createdAt: at, updatedAt: at, lastLoginAt: null, ...(local ? { login } : {}) };
   workspace.accounts.push(account);
-  log(workspace, actor.id, `开通${data.role === 'admin' ? '管理' : data.role === 'manager' ? '项目负责人' : '员工'}账号：${name}`);
+  log(workspace, actor.id, `开通${ROLE_LABELS[data.role]}账号：${name}`);
   return account;
 }
 
@@ -254,24 +287,26 @@ function changeAccount(workspace, id, data, actor, currentAccount) {
   if (!account) fail(404, 'NOT_FOUND', '账号不存在');
   const user = workspace.state.users.find((entry) => entry.id === account.userId);
   requireValue(user, '关联成员不存在');
+  manageAccountTarget(actor, user);
   requireValue(data.role != null || data.status != null || data.active != null || data.projectIds !== undefined || data.title !== undefined || data.department !== undefined, '请选择要修改的账号资料、状态或项目权限');
   if (data.login != null || data.password != null || data.email != null || data.userId != null || data.authId != null || data.existingUserId != null) fail(400, 'IMMUTABLE_IDENTITY', '账号身份不可直接更改，请通过重置密码操作修改密码');
   const role = data.role ?? user.role;
   requireValue(ROLES.has(role), '请选择有效的账号角色');
+  if (role === 'superadmin' && user.role !== 'superadmin') fail(400, 'SINGLE_SUPERADMIN', '平台仅保留一个总管理员，不能另行提升账号');
+  if (!isSuperAdminRole(actor.role) && role !== 'member') fail(403, 'ACCOUNT_MANAGER_REQUIRED', '仅总管理员可以调整管理员权限');
   if (data.active != null) requireValue(typeof data.active === 'boolean', '账号状态无效');
   const status = data.status ?? (data.active == null ? account.status : data.active ? 'active' : 'disabled');
   requireValue(['active', 'disabled'].includes(status), '账号状态无效');
   if (data.status != null && data.active != null) requireValue((status === 'active') === data.active, '账号状态不一致');
-  if (account.id === currentAccount.id && (status === 'disabled' || role !== 'admin')) fail(400, 'SELF_LOCKOUT', '不能停用或降级当前登录的管理账号');
-  const remainingAdmins = workspace.accounts.filter((entry) => entry.id !== account.id && entry.status === 'active' && workspace.state.users.find((person) => person.id === entry.userId)?.role === 'admin');
-  if (user.role === 'admin' && account.status === 'active' && (role !== 'admin' || status !== 'active') && !remainingAdmins.length) fail(400, 'LAST_ADMIN', '必须保留至少一个有效管理账号');
+  if (account.id === currentAccount.id && (status !== 'active' || role !== user.role)) fail(400, 'SELF_LOCKOUT', '不能停用或降级当前登录的管理账号');
+  if (user.role === 'superadmin' && (role !== 'superadmin' || status !== 'active')) fail(400, 'SUPERADMIN_PROTECTED', '总管理员不能停用或降级');
   if (data.title !== undefined) user.title = string(data.title, '职位', 60, true);
   if (data.department !== undefined) user.department = string(data.department, '部门', 60, true);
   if (data.projectIds !== undefined) assignAccountProjects(workspace, user, data.projectIds, actor);
   user.role = role;
   account.status = status;
   account.updatedAt = new Date().toISOString();
-  log(workspace, actor.id, `更新账号 ${user.name}：${role === 'admin' ? '管理员' : role === 'manager' ? '项目负责人' : '员工'}，${status === 'active' ? '启用' : '停用'}${data.title !== undefined ? `；职位：${user.title || '未设置'}` : ''}${data.department !== undefined ? `；部门：${user.department || '未设置'}` : ''}`);
+  log(workspace, actor.id, `更新账号 ${user.name}：${ROLE_LABELS[role]}，${status === 'active' ? '启用' : '停用'}${data.title !== undefined ? `；职位：${user.title || '未设置'}` : ''}${data.department !== undefined ? `；部门：${user.department || '未设置'}` : ''}`);
 }
 
 function deleteAccount(workspace, id, actor, currentAccount) {
@@ -279,8 +314,8 @@ function deleteAccount(workspace, id, actor, currentAccount) {
   if (!account) fail(404, 'NOT_FOUND', '账号不存在或已删除');
   if (account.id === currentAccount.id) fail(400, 'SELF_LOCKOUT', '不能删除当前登录账号，请使用另一位管理员账号操作');
   const user = workspace.state.users.find((entry) => entry.id === account.userId);
-  const remainingAdmins = workspace.accounts.filter((entry) => entry.id !== id && entry.status === 'active' && workspace.state.users.find((person) => person.id === entry.userId)?.role === 'admin');
-  if (user?.role === 'admin' && account.status === 'active' && !remainingAdmins.length) fail(400, 'LAST_ADMIN', '必须保留至少一个有效管理账号');
+  manageAccountTarget(actor, user);
+  if (user?.role === 'superadmin') fail(400, 'SUPERADMIN_PROTECTED', '总管理员不能删除');
   // Authentication is removed separately; business identities remain stable so
   // project ownership, deliverables, approvals and audit trails stay intact.
   workspace.accounts = workspace.accounts.filter((entry) => entry.id !== id);
@@ -334,7 +369,19 @@ export async function handleApi(request, env, authenticatedIdentity) {
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
       const next = appendNotifications(workspace, { ...workspace, state }, actor.id, data.action, payload);
-      const saved = await saveWorkspace(env.DB, next, workspace.revision);
+      let saved;
+      if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(data.action)) {
+        await initializeFileSchema(env.DB);
+        const removedTasks = workspace.state.tasks.filter(task => !next.state.tasks.some(item => item.id === task.id)).map(task => task.id);
+        const removedMilestones = workspace.state.milestones.filter(node => !next.state.milestones.some(item => item.id === node.id)).map(node => node.id);
+        const removedProjects = workspace.state.projects.filter(project => !next.state.projects.some(item => item.id === project.id)).map(project => project.id);
+        const results = await env.DB.batch([
+          workspaceUpdate(env.DB, next, workspace.revision),
+          env.DB.prepare("DELETE FROM project_files WHERE changes() = 1 AND (project_id IN (SELECT value FROM json_each(?)) OR (entity_type = 'task' AND entity_id IN (SELECT value FROM json_each(?))) OR (entity_type = 'milestone' AND entity_id IN (SELECT value FROM json_each(?))))").bind(JSON.stringify(removedProjects), JSON.stringify(removedTasks), JSON.stringify(removedMilestones)),
+        ]);
+        assertChanged(results[0]);
+        saved = { ...next, revision: workspace.revision + 1 };
+      } else saved = await saveWorkspace(env.DB, next, workspace.revision);
       return json(await session(env.DB, saved, identity));
     }
     const accountId = path.match(/^\/api\/accounts\/([^/]+)$/)?.[1];
@@ -387,6 +434,7 @@ export async function initializeLocalWorkspace(env) {
   if (!validPasswordHash(env.INITIAL_ADMIN_PASSWORD_HASH)) fail(503, 'SETUP_REQUIRED', '请先运行本机初始化命令创建管理账号');
   const state = createSeedState();
   const owner = state.users.find((user) => user.id === 'u-admin');
+  owner.role = 'superadmin';
   owner.name = typeof env.INITIAL_ADMIN_NAME === 'string' && env.INITIAL_ADMIN_NAME.trim() ? env.INITIAL_ADMIN_NAME.trim().slice(0, 30) : '管理员';
   if (env.SEED_DEMO_DATA !== 'true' && env.SEED_DEMO_DATA !== true) {
     state.users = [owner];
@@ -396,7 +444,7 @@ export async function initializeLocalWorkspace(env) {
   const account = { id: identifier('a'), userId: owner.id, login, email: '', authId: null, status: 'active', createdAt: now, updatedAt: now, lastLoginAt: null };
   state.logs.unshift({ id: identifier('log'), at: now, actorId: owner.id, projectId: null, message: '完成平台初始化，启用独立账号登录' });
   await env.DB.batch([
-    env.DB.prepare('INSERT OR IGNORE INTO workspace (id, payload, revision) VALUES (?, ?, 1)').bind(WORKSPACE_ID, JSON.stringify({ state, accounts: [account] })),
+    env.DB.prepare('INSERT OR IGNORE INTO workspace (id, payload, revision) VALUES (?, ?, 1)').bind(WORKSPACE_ID, JSON.stringify({ state, accounts: [account], accountPolicyVersion: 2 })),
     env.DB.prepare('INSERT INTO auth_credentials (account_id, login, password_hash, must_change, version, updated_at) SELECT ?, ?, ?, 0, 1, ? WHERE changes() = 1')
       .bind(account.id, login, env.INITIAL_ADMIN_PASSWORD_HASH, now),
   ]);
@@ -411,7 +459,7 @@ export async function provisionInitialCredential(env, { accountId }) {
   if (await env.DB.prepare('SELECT account_id FROM auth_credentials LIMIT 1').first()) fail(409, 'ALREADY_INITIALIZED', '平台已有独立账号，不能重新绑定首位管理员');
   const account = workspace.accounts.find((entry) => entry.id === accountId && entry.status === 'active');
   const actor = workspace.state.users.find((entry) => entry.id === account?.userId);
-  if (!account || actor?.role !== 'admin') fail(400, 'ADMIN_REQUIRED', '请选择现有的有效管理账号进行迁移');
+  if (!account || !isSuperAdminRole(actor?.role)) fail(400, 'ADMIN_REQUIRED', '请选择现有的有效管理账号进行迁移');
   if (!validPasswordHash(env.INITIAL_ADMIN_PASSWORD_HASH)) fail(400, 'INVALID_PASSWORD_HASH', '管理员密码摘要无效');
   account.login = normalizeLogin(env.INITIAL_ADMIN_LOGIN);
   account.updatedAt = new Date().toISOString();
@@ -433,7 +481,7 @@ export async function recoverLocalAdmin(env, { login, password }) {
   const credential = await env.DB.prepare('SELECT * FROM auth_credentials WHERE login = ?').bind(normalized).first();
   const account = workspace?.accounts.find((entry) => entry.id === credential?.account_id && entry.status === 'active');
   const actor = workspace?.state.users.find((entry) => entry.id === account?.userId);
-  if (!account || actor?.role !== 'admin') fail(400, 'ADMIN_REQUIRED', '请填写现有的有效管理账号');
+  if (!account || !isSuperAdminRole(actor?.role)) fail(400, 'ADMIN_REQUIRED', '请填写现有的有效管理账号');
   const passwordHash = await hashPassword(password);
   account.updatedAt = new Date().toISOString();
   log(workspace, actor.id, '通过本机管理命令恢复管理账号密码，已退出全部设备；下次登录须修改密码');
@@ -566,7 +614,7 @@ export async function handleHttpApi(request, env) {
     }
     if (credential.must_change) fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码，再进入工作平台');
     if (path === '/api/maintenance' || path.startsWith('/api/maintenance/')) {
-      adminOnly(actor);
+      superadminOnly(actor);
       if (!env.MAINTENANCE) fail(503, 'MAINTENANCE_UNAVAILABLE', '当前服务尚未启用备份与升级，请使用新版启动入口');
       return await env.MAINTENANCE.handle(request, { actor, account, authorize: async () => {
         const currentCredential = await readSession(db, request, env);
@@ -575,7 +623,7 @@ export async function handleHttpApi(request, env) {
         const currentWorkspace = await readWorkspace(db);
         if (!currentWorkspace) fail(503, 'SETUP_REQUIRED', '平台尚未初始化，请联系管理员');
         const current = lookupAccount(currentWorkspace, identity);
-        adminOnly(current.actor);
+        superadminOnly(current.actor);
         return current;
       } });
     }
@@ -621,6 +669,7 @@ export async function handleHttpApi(request, env) {
       const next = structuredClone(workspace);
       const target = next.accounts.find((entry) => entry.id === resetAccountId);
       if (!target) fail(404, 'NOT_FOUND', '账号不存在');
+      manageAccountTarget(actor, next.state.users.find(user => user.id === target.userId));
       const targetCredential = await db.prepare('SELECT * FROM auth_credentials WHERE account_id = ?').bind(target.id).first();
       if (!targetCredential) fail(400, 'MIGRATION_REQUIRED', '此旧账号尚未绑定独立登录，请通过本机迁移命令处理');
       const passwordHash = await hashPassword(data.password);
@@ -664,7 +713,7 @@ export async function handleHttpApi(request, env) {
       const updatedAccount = next.accounts.find((entry) => entry.id === accountId);
       const previousRole = workspace.state.users.find((entry) => entry.id === previousAccount.userId)?.role;
       const updatedRole = next.state.users.find((entry) => entry.id === updatedAccount.userId)?.role;
-      const membershipChanged = previousRole !== 'admin' && workspace.state.projects.some((project) => project.memberIds.includes(previousAccount.userId) !== next.state.projects.find((entry) => entry.id === project.id)?.memberIds.includes(previousAccount.userId));
+      const membershipChanged = !isAdminRole(previousRole) && workspace.state.projects.some((project) => project.memberIds.includes(previousAccount.userId) !== next.state.projects.find((entry) => entry.id === project.id)?.memberIds.includes(previousAccount.userId));
       const accessChanged = previousAccount.status !== updatedAccount.status || previousRole !== updatedRole || membershipChanged;
       if (accountId !== account.id && accessChanged) {
         statements.push(db.prepare('UPDATE auth_credentials SET version = version + 1 WHERE account_id = ? AND changes() = 1').bind(accountId));

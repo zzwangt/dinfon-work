@@ -1,3 +1,4 @@
+import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from '../public/client/roles.js';
 import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
 import { hasActiveFileOperations } from '../public/client/files.js';
@@ -20,7 +21,7 @@ function harness(state = domain.createSeedState()) {
   const modal = { innerHTML: '', open: false, showModal() { this.open = true; }, addEventListener() {} };
   const toast = { hidden: true, classList: { toggle() {} } };
   const context = {
-    ...domain, ...times, canApproveProject, canApproveRequest, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
+    ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
     document: {
       querySelector: selector => ({ '#app': app, '#modal': modal, '#toast': toast }[selector]),
       querySelectorAll: () => [], addEventListener() {},

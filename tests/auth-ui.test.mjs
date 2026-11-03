@@ -1,3 +1,4 @@
+import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from '../public/client/roles.js';
 import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
 import { hasActiveFileOperations } from '../public/client/files.js';
@@ -41,7 +42,7 @@ function harness(fetchImpl, overrides = {}) {
     addEventListener: (name,fn) => listeners.set(`document:${name}`,fn),
   };
   const context = {
-    ...domain, ...times, canApproveProject, canApproveRequest, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
+    ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
     window: { addEventListener:(name,fn)=>listeners.set(`window:${name}`,fn), scrollTo() {} },
     history: { replaceState(_state,_unused,url) { location.hash=url.includes('#')?url.slice(url.indexOf('#')):''; } },
     fetch: fetchImpl, FormData, Response, URL:DownloadURL, Blob, Set, console,
@@ -52,12 +53,12 @@ function harness(fetchImpl, overrides = {}) {
     renderProjectFlow, renderProjectPeopleSummary, renderNodeFiles, bindProjectFiles, resetProjectFiles, bindFlowCanvas() {},
     ...overrides,
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,newProject,newTask,setProjectReviewer,reviewNodeRequest,reviewExtension,tasksPage,milestoneDetail,editMilestoneContent,editTaskContent,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,myAccountPage,settingsPage,projectsPage,resetPassword,deleteAccount,saveAccountDeletion,savePasswordReset,saveAccount,projectRow,projectWorkspace,newProject,newTask,setProjectReviewer,reviewNodeRequest,reviewExtension,tasksPage,milestoneDetail,editMilestoneContent,editTaskContent,deleteTask,deleteMilestone,deleteProject,saveEntityDeletion,saveTaskDeletion,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};
 }
 function session(overrides={}) {
-  const state=domain.createSeedState();
-  return {state,actor:state.users.find(user=>user.id==='u-admin'),account:{id:'a-admin',login:'qa-admin',role:'admin',mustChangePassword:false},revision:1,...overrides};
+  const state=domain.createSeedState();state.users.find(user=>user.id==='u-admin').role='superadmin';
+  return {state,actor:state.users.find(user=>user.id==='u-admin'),account:{id:'a-admin',login:'qa-admin',role:'superadmin',mustChangePassword:false},revision:1,...overrides};
 }
 function restrictedSession() {
   return {actor:{id:'u-new',name:'新员工',role:'member'},account:{id:'a-new',login:'new.employee',role:'member',mustChangePassword:true},revision:1,mustChangePassword:true,capabilities:{}};
@@ -234,7 +235,7 @@ test('project reviewer selection preserves an assigned reviewer outside the memb
 
 test('project owners can start teammates tasks but cannot submit their deliverables',async()=>{
   const {ui,modal,listeners}=harness(async()=>{throw new Error('Unexpected request');});
-  const data=session();data.actor=data.state.users.find(user=>user.id==='u-manager');data.account={...data.account,role:'manager'};
+  const data=session();data.actor=data.state.users.find(user=>user.id==='u-manager');data.account={...data.account,role:'member'};
   const task=data.state.tasks.find(item=>item.id==='t-02');task.status='todo';
   ui.acceptSession(data);ui.taskDetail(task.id);
   assert.match(modal.innerHTML,/data-action="start-task"/);
@@ -284,10 +285,8 @@ function accountsSession() {
   return data;
 }
 
-test('administrators can manage peer administrators and employees without a super-administrator distinction',async()=>{
+test('the super administrator can manage administrators and employees but cannot create another super administrator',async()=>{
   const data=accountsSession();let requests=0;
-  // A stale designation from a pre-upgrade response must not change the UI.
-  data.accounts.find(item=>item.id==='a-peer-admin').isSuperAdmin=true;
   const {ui,modal}=harness(async()=>{requests++;return Response.json(data);});
   ui.acceptSession(data);await ui.loadAccounts();
   for(const id of ['a-peer-admin','a-engineer']){
@@ -301,11 +300,12 @@ test('administrators can manage peer administrators and employees without a supe
     ui.resetPassword(id);assert.match(modal.innerHTML,/data-form="reset-password"/);
   }
   ui.newAccount();assert.match(modal.innerHTML,/<option value="admin"/);
-  assert.doesNotMatch(ui.accountsPage(),/总管理员|super-admin-label/);
+  assert.match(ui.accountsPage(),/总管理员/);
+  assert.doesNotMatch(modal.innerHTML,/<option value="(?:superadmin|manager)"/);
   assert.equal(requests,1,'opening management forms must not submit mutations');
 });
 
-test('the current administrator retains self-password change but cannot disable, demote or delete themselves',async()=>{
+test('the current super administrator retains profile and self-password changes but cannot disable, demote or delete themselves',async()=>{
   const data=accountsSession();let requests=0;
   const {ui,modal}=harness(async()=>{requests++;return Response.json(data);});
   ui.acceptSession(data);await ui.loadAccounts();
@@ -317,6 +317,204 @@ test('the current administrator retains self-password change but cannot disable,
   assert.throws(()=>ui.deleteAccount(own.id),/当前|自己|本人/);
   await assert.rejects(ui.saveAccountDeletion(own.id),/当前|自己|本人/);
   assert.equal(requests,1,'self-deletion must fail before sending any mutation');
+});
+
+test('ordinary administrators manage only employees and direct calls cannot target privileged accounts',async()=>{
+  const data=accountsSession();data.actor=data.state.users.find(user=>user.id==='u-peer-admin');
+  data.account={...data.accounts.find(a=>a.id==='a-peer-admin'),mustChangePassword:false};
+  let requests=0;
+  const {ui,modal}=harness(async()=>{requests++;return Response.json(data);});
+  ui.acceptSession(data);await ui.loadAccounts();
+  for(const id of ['a-admin','a-peer-admin']){
+    const target=data.accounts.find(a=>a.id===id),before=modal.innerHTML;
+    assert.doesNotMatch(ui.accountRowActions(target),/data-action="(?:edit-account|reset-password|delete-account)"/);
+    ui.editAccount(id);assert.equal(modal.innerHTML,before);
+    if(id==='a-admin'){ui.resetPassword(id);assert.equal(modal.innerHTML,before);}
+    assert.throws(()=>ui.deleteAccount(id),/无权|当前/);
+    await assert.rejects(ui.saveAccountDeletion(id),/无权|当前/);
+    await assert.rejects(ui.saveAccount('edit-account',{title:'越权修改'},id),/无权/);
+    await assert.rejects(ui.savePasswordReset({password:'unused-test-phrase',confirmPassword:'unused-test-phrase'},id),/无权/);
+  }
+  const employee=data.accounts.find(a=>a.id==='a-engineer');
+  assert.match(ui.accountRowActions(employee),/data-action="edit-account"/);
+  assert.match(ui.accountRowActions(employee),/data-action="reset-password"/);
+  assert.match(ui.accountRowActions(employee),/data-action="delete-account"/);
+  ui.newAccount();assert.match(modal.innerHTML,/<option value="member"/);
+  assert.doesNotMatch(modal.innerHTML,/<option value="(?:admin|superadmin|manager)"/);
+  ui.editAccount(employee.id);assert.doesNotMatch(modal.innerHTML,/<option value="(?:admin|superadmin|manager)"/);
+  for(const role of ['admin','superadmin','manager']){
+    await assert.rejects(ui.saveAccount('create-account',{role},''),/不能授予/);
+    await assert.rejects(ui.saveAccount('edit-account',{role},employee.id),/不能授予/);
+  }
+  const candidates=ui.availableProjectAccounts({ownerId:'none',memberIds:[]});
+  assert.deepEqual(Array.from(candidates,a=>a.id),['a-engineer']);
+  await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-admin'},'p-mower'),/无权/);
+  ui.resetPassword('a-peer-admin');assert.match(modal.innerHTML,/data-form="change-password"/);
+  assert.equal(requests,1,'all forbidden operations stop before any mutation');
+});
+
+test('only the super administrator sees platform settings and full backup controls',()=>{
+  for(const role of ['superadmin','admin','member']){
+    const data=session();data.actor.role=role;data.account.role=role;
+    const {ui,app,content,location}=harness(async()=>{throw new Error('Unexpected request');});
+    ui.acceptSession(data);location.hash='#my-account';ui.render();
+    if(role==='superadmin')assert.match(app.innerHTML,/href="#settings"/);
+    else{assert.doesNotMatch(app.innerHTML,/href="#settings"/);assert.doesNotMatch(ui.myAccountPage(),/平台设置与数据备份/);}
+    if(role!=='superadmin'){
+      assert.doesNotMatch(ui.settingsPage(),/data-maintenance/);
+      location.hash='#settings';ui.render();
+      assert.match(content.innerHTML,/没有此页面的访问权限/);
+    }
+  }
+});
+
+test('only administrators create projects and may appoint an employee as project owner',()=>{
+  for(const role of ['superadmin','admin']){
+    const data=session();data.actor.role=role;data.account.role=role;
+    const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+    ui.acceptSession(data);ui.newProject();
+    const owners=modal.innerHTML.match(/<select[^>]+name="ownerId"[^>]*>([\s\S]*?)<\/select>/)[1];
+    assert.match(owners,/<option value="u-engineer"/);
+    assert.match(owners,/<option value="u-manager"/);
+  }
+  const data=session();data.actor=data.state.users.find(u=>u.id==='u-manager');data.actor.role='member';data.account={...data.account,role:'member'};
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});ui.acceptSession(data);
+  assert.doesNotMatch(ui.projectsPage(),/data-action="new-project"/);
+  assert.doesNotMatch(ui.projectWorkspace(data.state.projects[0]),/data-action="new-project"/);
+  ui.newProject();assert.equal(modal.open,false);
+  assert.match(ui.projectWorkspace(data.state.projects[0]),/data-action="set-project-reviewer"/,'employee project owners keep project responsibilities');
+});
+
+test('only administrators see small-node deletion and employee owners cannot open or submit it',async()=>{
+  for(const role of ['superadmin','admin','member']){
+    const data=session();
+    if(role==='member')data.actor=data.state.users.find(user=>user.id==='u-manager');
+    data.actor.role=role;data.account={...data.account,role};
+    const {ui,modal,listeners}=harness(async(path)=>{assert.match(path,/^\/api\/files\?/);return Response.json({files:[]});});
+    ui.acceptSession(data);ui.taskDetail('t-02');
+    if(role==='member'){
+      assert.doesNotMatch(modal.innerHTML,/data-action="delete-task"/);modal.close();
+      await ui.deleteTask('t-02');assert.equal(modal.open,false);
+      await clickUiAction(listeners,'delete-task','t-02');assert.equal(modal.open,false);
+      await assert.rejects(ui.saveTaskDeletion({confirm:true},'t-02'),/仅管理员/);
+    }else{
+      assert.match(modal.innerHTML,/data-action="delete-task"/);await ui.deleteTask('t-02');
+      assert.match(modal.innerHTML,/data-form="deleteTask"/);
+      assert.match(modal.innerHTML,/<input type="checkbox" name="confirm" required/);
+      assert.match(modal.innerHTML,/附件|完成率|延期申请/);
+      await assert.rejects(ui.saveTaskDeletion({},'t-02'),/勾选确认/);
+    }
+  }
+});
+
+test('small-node deletion waits for server success and sends explicit confirmation with the current revision',async()=>{
+  const data=session({revision:21}),after=structuredClone(data),pending=deferred();
+  after.revision=22;after.state.tasks=after.state.tasks.filter(task=>task.id!=='t-02');
+  let sent;
+  const {ui,modal,toast}=harness(async(path,options)=>{if(path.startsWith('/api/files?'))return Response.json({files:[]});sent={path,body:JSON.parse(options.body)};return pending.promise;});
+  ui.acceptSession(data);await ui.deleteTask('t-02');
+  const saving=ui.saveTaskDeletion({confirm:'on'},'t-02');
+  assert.equal(modal.open,true);assert.ok(ui.getState().tasks.some(task=>task.id==='t-02'));
+  assert.deepEqual(sent,{path:'/api/command',body:{action:'deleteTask',payload:{id:'t-02',confirm:true},revision:21}});
+  pending.resolve(Response.json(after));await saving;
+  assert.equal(modal.open,false);assert.ok(!ui.getState().tasks.some(task=>task.id==='t-02'));
+  assert.match(toast.textContent,/已删除/);
+});
+
+test('a rejected small-node deletion keeps its confirmation and task available for review',async()=>{
+  for(const status of [403,503]){
+    const data=session();let commands=0;
+    const {ui,modal,toast}=harness(async(path)=>{
+      if(path==='/api/command'){commands++;return Response.json({error:'删除未获批准'},{status});}
+      if(path.startsWith('/api/files?'))return Response.json({files:[]});
+      return Response.json(data);
+    });
+    ui.acceptSession(data);await ui.deleteTask('t-02');const before=modal.innerHTML;
+    await assert.rejects(ui.saveTaskDeletion({confirm:true},'t-02'),/删除未获批准/);
+    assert.equal(commands,1);assert.equal(modal.open,true);assert.equal(modal.innerHTML,before);
+    assert.ok(ui.getState().tasks.some(task=>task.id==='t-02'));
+    assert.doesNotMatch(toast.textContent||'',/已删除/);
+  }
+});
+
+test('major-node confirmation counts its tasks, direct and child files, and only affected pending applications',async()=>{
+  const data=session(),id='m-mower-2';data.actor.role='admin';data.account.role='admin';
+  const children=data.state.tasks.filter(task=>task.milestoneId===id);
+  data.state.milestoneRequests=[{id:'mr-pending',projectId:'p-mower',milestoneId:id,status:'pending'},{id:'mr-history',projectId:'p-mower',milestoneId:id,status:'approved'}];
+  data.state.extensions=[{id:'ex-task',projectId:'p-mower',status:'pending',affectedTasks:[{id:children[0].id}]},{id:'ex-node',projectId:'p-mower',status:'pending',affectedMilestones:[{id}]},{id:'ex-unrelated',projectId:'p-mower',status:'pending',affectedTasks:[{id:'other-task'}]}];
+  const files=[{projectId:'p-mower',entityType:'milestone',entityId:id},{projectId:'p-mower',entityType:'task',entityId:children[0].id},{projectId:'p-mower',entityType:'milestone',entityId:'m-mower-3'},{projectId:'p-pcb',entityType:'milestone',entityId:id}];
+  const {ui,modal}=harness(async()=>Response.json({files}));ui.acceptSession(data);ui.milestoneDetail(id);
+  assert.match(modal.innerHTML,/data-action="delete-milestone"/);
+  await ui.deleteMilestone(id);
+  assert.match(modal.innerHTML,new RegExp(`1 个大节点、${children.length} 项任务及全部附件（当前 2 个）`));
+  assert.match(modal.innerHTML,/3 项关联待审批申请会取消/);
+  assert.match(modal.innerHTML,/data-form="deleteMilestone"/);
+  assert.match(modal.innerHTML,/已审批历史和删除操作记录保留/);
+});
+
+test('only the super administrator can delete a whole project and successful deletion returns to all projects',async()=>{
+  for(const role of ['admin','member']){
+    const data=session();data.actor.role=role;data.account.role=role;
+    const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});ui.acceptSession(data);
+    assert.doesNotMatch(ui.projectWorkspace(data.state.projects[0]),/data-action="delete-project"/);
+    await ui.deleteProject('p-mower');assert.equal(modal.open,false);
+    await assert.rejects(ui.saveEntityDeletion('deleteProject',{confirm:true},'p-mower'),/仅总管理员/);
+  }
+  const data=session(),after=structuredClone(data),id='p-mower';
+  const tasks=data.state.tasks.filter(t=>t.projectId===id),milestones=data.state.milestones.filter(m=>m.projectId===id);
+  after.revision++;for(const collection of ['projects','tasks','milestones','milestoneRequests','extensions'])after.state[collection]=after.state[collection].filter(item=>collection==='projects'?item.id!==id:item.projectId!==id);
+  let sent;
+  const {ui,modal,location}=harness(async(path,options)=>{if(path.startsWith('/api/files?'))return Response.json({files:[{projectId:id,entityType:'task',entityId:tasks[0].id}]});sent=JSON.parse(options.body);return Response.json(after);});
+  ui.acceptSession(data);assert.match(ui.projectWorkspace(data.state.projects[0]),/data-action="delete-project"/);
+  await ui.deleteProject(id);
+  assert.match(modal.innerHTML,new RegExp(`${milestones.length} 个大节点、${tasks.length} 项任务及全部附件（当前 1 个）`));
+  assert.match(modal.innerHTML,/申请及项目记录一并删除/);
+  await ui.saveEntityDeletion('deleteProject',{confirm:true},id);
+  assert.equal(sent.action,'deleteProject');assert.deepEqual(sent.payload,{id,confirm:true});
+  assert.equal(location.hash,'#projects');assert.equal(modal.open,false);
+  assert.ok(!ui.getState().projects.some(p=>p.id===id));
+});
+
+test('file-count failures do not display zero files or enable destructive confirmation',async()=>{
+  const {ui,modal}=harness(async()=>Response.json({error:'文件服务暂不可用'},{status:503}));ui.acceptSession(session());
+  await ui.deleteMilestone('m-mower-2');
+  assert.match(modal.innerHTML,/无法核对文件数量/);
+  assert.doesNotMatch(modal.innerHTML,/name="confirm"|当前 0 个|data-form="deleteMilestone"/);
+  assert.match(modal.innerHTML,/重新核对/);
+  await assert.rejects(ui.saveEntityDeletion('deleteMilestone',{confirm:true},'m-mower-2'),/重新打开/);
+});
+
+test('deletion sends the reviewed revision and a conflict reloads counts with a fresh confirmation',async()=>{
+  const data=session({revision:21}),fresh=structuredClone(data),id='m-mower-2';fresh.revision=22;
+  fresh.state.tasks.push({...fresh.state.tasks.find(t=>t.milestoneId===id),id:'new-during-confirmation',title:'确认期间新增的任务'});
+  let sent;
+  const {ui,modal}=harness(async(path,options)=>{
+    if(path.startsWith('/api/files?'))return Response.json({files:[]});
+    if(path==='/api/session')return Response.json(fresh);
+    sent=JSON.parse(options.body);return Response.json({error:'数据已变化'},{status:409});
+  });
+  ui.acceptSession(data);await ui.deleteMilestone(id);ui.acceptSession(fresh);
+  await assert.rejects(ui.saveEntityDeletion('deleteMilestone',{confirm:true},id),/重新核对并确认/);
+  assert.equal(sent.revision,21,'background session updates cannot silently broaden the confirmed deletion');
+  assert.match(modal.innerHTML,new RegExp(`${fresh.state.tasks.filter(t=>t.milestoneId===id).length} 项任务`));
+  assert.match(modal.innerHTML,/<input type="checkbox" name="confirm" required>/);
+  assert.doesNotMatch(modal.innerHTML,/name="confirm"[^>]*checked/);
+});
+
+test('a late deletion preview cannot replace another modal or reopen a dismissed confirmation',async()=>{
+  const pending=deferred(),{ui,modal}=harness(async()=>pending.promise);ui.acceptSession(session());
+  const preview=ui.deleteProject('p-mower');assert.match(modal.innerHTML,/正在核对/);
+  ui.newTask('p-mower');const taskForm=modal.innerHTML;
+  pending.resolve(Response.json({files:[]}));await preview;
+  assert.equal(modal.innerHTML,taskForm);
+  await assert.rejects(ui.saveEntityDeletion('deleteProject',{confirm:true},'p-mower'),/重新打开/);
+});
+
+test('deleted-project notifications return to the project center without opening missing project details',async()=>{
+  const data=session({notifications:[{...notice('removed-project','projects','removed','removed'),action:'deleteProject',target:'#overview'}]});
+  const {ui,location,toast}=harness(async()=>Response.json({notifications:[]}));ui.acceptSession(data);
+  await ui.openNotification('removed-project');
+  assert.equal(location.hash,'#overview');assert.doesNotMatch(toast.textContent||'',/不可查看/);
 });
 
 test('deleting another account requires confirmation and sends DELETE with the current account revision',async()=>{
@@ -840,5 +1038,5 @@ test('ordinary project members can create tasks for teammates without gaining pr
   assert.doesNotMatch(projects,/<option value="p-site"/);
   modal.close();const previous=modal.innerHTML;
   ui.newProject();assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
-  assert.match(toast.textContent,/当前身份不能创建项目/);
+  assert.match(toast.textContent,/仅管理员可以创建项目/);
 });

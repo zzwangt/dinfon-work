@@ -52,8 +52,8 @@ async function fixture(t, filename = ':memory:') {
   };
   await session();
   const engineer = await provision(ENGINEER, 'u-engineer', 'member');
-  await provision(MANAGER, 'u-manager', 'manager');
-  const other = await provision(OTHER, 'u-ops', 'manager');
+  await provision(MANAGER, 'u-manager', 'member');
+  const other = await provision(OTHER, 'u-ops', 'member');
   for (const identity of [ADMIN, ENGINEER, MANAGER, OTHER]) await clear(identity);
   return {
     call, session, command, clear, engineer, other,

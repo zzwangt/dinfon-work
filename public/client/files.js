@@ -1,3 +1,4 @@
+import { isAdminRole } from './roles.js';
 import { formatDateTime } from './time.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[character]));
@@ -68,7 +69,7 @@ const accessible = (context, projectId) => {
   const actorId = context.getActorId();
   const actor = state?.users.find(user => user.id === actorId);
   const project = state?.projects.find(project => project.id === projectId);
-  return Boolean(project && actor && (actor.role === 'admin' || project.ownerId === actorId || project.memberIds.includes(actorId)));
+  return Boolean(project && actor && (isAdminRole(actor.role) || project.ownerId === actorId || project.memberIds.includes(actorId)));
 };
 async function request(path, options = {}) {
   const response = await fetch(path, { credentials:'same-origin', cache:'no-store', ...options });

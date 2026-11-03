@@ -5,8 +5,9 @@
 
 import { datePart, deadlineMs, startMs, validSchedule } from './time.js';
 import { canApproveProject } from './approval-access.js';
+import { isAdminRole, normalizeRole } from './roles.js';
 
-const ROLES = ['admin', 'manager', 'member'];
+const ROLES = ['admin', 'member'];
 
 export function today() {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -75,16 +76,16 @@ function contentChanges(before, after) {
 }
 
 function manageProject(actor, project) {
-  check(actor.role === 'admin' || actor.id === project.ownerId, '仅项目负责人或管理员可以执行此操作');
+  check(isAdminRole(actor.role) || actor.id === project.ownerId, '仅项目负责人或管理员可以执行此操作');
 }
 
 function requireProjectAccess(actor, project) {
-  check(actor.role === 'admin' || actor.id === project.ownerId || project.memberIds.includes(actor.id), '你已无权访问该项目，请联系项目负责人');
+  check(isAdminRole(actor.role) || actor.id === project.ownerId || project.memberIds.includes(actor.id), '你已无权访问该项目，请联系项目负责人');
 }
 
 function canChangeTask(actor, task, project) {
   requireProjectAccess(actor, project);
-  check(actor.role === 'admin' || actor.id === task.ownerId || actor.id === project.ownerId, '只能更新自己负责的任务');
+  check(isAdminRole(actor.role) || actor.id === task.ownerId || actor.id === project.ownerId, '只能更新自己负责的任务');
   check(task.status !== 'done', '已验收任务不能直接修改');
   check(task.status !== 'review', '任务正在等待验收，请由验收人处理');
 }
@@ -156,6 +157,7 @@ export function normalizeState(state) {
   const next = structuredClone(state);
   next.milestoneRequests ??= [];
   check(Array.isArray(next.milestoneRequests), '节点申请数据无效');
+  for (const user of next.users) user.role = normalizeRole(user.role);
   for (const task of next.tasks) {
     if (task.status === 'blocked') task.status = 'doing';
   }
@@ -188,10 +190,8 @@ export function transact(state, action, payload = {}, actorId) {
   const record = (projectId, message, changes) => next.logs.unshift({ id: uid('log'), at, actorId, projectId: projectId || null, message, ...(changes ? { changes } : {}) });
 
   if (action === 'createProject') {
-    check(actor.role === 'admin' || actor.role === 'manager', '仅管理员或项目负责人可以创建项目');
+    check(isAdminRole(actor.role), '仅管理员可以创建项目');
     const owner = find(next.users, payload.ownerId, '项目负责人');
-    check(owner.role === 'manager' || owner.role === 'admin', '项目负责人需要负责人或管理员角色');
-    check(actor.role === 'admin' || owner.id === actor.id, '项目负责人只能创建由自己负责的项目');
     const reviewerId = payload.reviewerId == null || payload.reviewerId === '' ? null : find(next.users, payload.reviewerId, '项目验收人').id;
     const memberIds = [...new Set([owner.id, ...(reviewerId ? [reviewerId] : []), ...(Array.isArray(payload.memberIds) ? payload.memberIds : [])])];
     memberIds.forEach((id) => find(next.users, id, '项目成员'));
@@ -221,7 +221,7 @@ export function transact(state, action, payload = {}, actorId) {
     const owner = find(next.users, payload.ownerId, '任务负责人');
     const reviewer = find(next.users, payload.reviewerId || project.ownerId, '验收人');
     check(project.memberIds.includes(owner.id), '任务负责人必须是项目组成员');
-    check(project.memberIds.includes(reviewer.id) || reviewer.id === project.ownerId || reviewer.role === 'admin', '验收人必须是项目成员、项目负责人或管理员');
+    check(project.memberIds.includes(reviewer.id) || reviewer.id === project.ownerId || isAdminRole(reviewer.role), '验收人必须是项目成员、项目负责人或管理员');
     check(typeof payload.milestoneId === 'string' && payload.milestoneId.length > 0, '请先申请并获批，再选择任务所属的里程碑');
     const milestone = find(next.milestones, payload.milestoneId, '节点');
     check(milestone.projectId === project.id, '节点不属于该项目');
@@ -239,6 +239,38 @@ export function transact(state, action, payload = {}, actorId) {
     next.tasks.push(task);
     validateSchedule(next, project);
     record(project.id, `创建任务“${task.title}”，由 ${owner.name} 负责`);
+  } else if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(action)) {
+    check(Object.keys(payload).every(key => ['id', 'confirm'].includes(key)), '删除操作的参数无效');
+    check(payload.confirm === true, '请先确认删除');
+    const projectDeletion = action === 'deleteProject', milestoneDeletion = action === 'deleteMilestone';
+    check(projectDeletion ? actor.role === 'superadmin' : isAdminRole(actor.role), projectDeletion ? '仅总管理员可以删除整个项目' : '仅管理员可以删除节点');
+    const target = find(next[projectDeletion ? 'projects' : milestoneDeletion ? 'milestones' : 'tasks'], payload.id, projectDeletion ? '项目' : '节点');
+    const project = projectDeletion ? target : find(next.projects, target.projectId, '项目');
+    requireProjectAccess(actor, project);
+    const removedMilestones = next.milestones.filter(item => projectDeletion ? item.projectId === project.id : milestoneDeletion && item.id === target.id);
+    const milestoneIds = new Set(removedMilestones.map(item => item.id));
+    const removedTasks = next.tasks.filter(item => projectDeletion ? item.projectId === project.id : milestoneDeletion ? item.projectId === project.id && milestoneIds.has(item.milestoneId) : item.id === target.id);
+    const taskIds = new Set(removedTasks.map(item => item.id));
+    const removedExtensions = next.extensions.filter(request => request.projectId === project.id && (projectDeletion || request.status === 'pending' && (request.affectedTasks?.some(item => taskIds.has(item.id)) || request.affectedMilestones?.some(item => milestoneIds.has(item.id)))));
+    const removedRequests = next.milestoneRequests.filter(request => request.projectId === project.id && (projectDeletion || request.status === 'pending' && milestoneIds.has(request.milestoneId)));
+    next.tasks = next.tasks.filter(item => !taskIds.has(item.id));
+    next.milestones = next.milestones.filter(item => !milestoneIds.has(item.id));
+    next.extensions = next.extensions.filter(item => !removedExtensions.includes(item));
+    next.milestoneRequests = next.milestoneRequests.filter(item => !removedRequests.includes(item));
+    const history = projectDeletion ? next.logs.filter(item => item.projectId === project.id) : [];
+    if (projectDeletion) {
+      next.projects = next.projects.filter(item => item.id !== project.id);
+      next.logs = next.logs.filter(item => item.projectId !== project.id);
+    }
+    const pendingCount = [...removedExtensions, ...removedRequests].filter(item => item.status === 'pending').length;
+    const changes = {
+      tasks: { before: structuredClone(removedTasks), after: [] },
+      ...(removedMilestones.length ? { milestones: { before: structuredClone(removedMilestones), after: [] } } : {}),
+      ...(removedExtensions.length ? { extensions: { before: structuredClone(removedExtensions), after: [] } } : {}),
+      ...(removedRequests.length ? { milestoneRequests: { before: structuredClone(removedRequests), after: [] } } : {}),
+      ...(projectDeletion ? { project: { before: structuredClone(project), after: null }, projectLogs: { before: structuredClone(history), after: [] } } : {}),
+    };
+    record(projectDeletion ? null : project.id, `删除${projectDeletion ? '项目' : milestoneDeletion ? '大节点' : '小节点'}“${target.name || target.title}”${projectDeletion ? `（${project.id}）` : ''}${pendingCount ? `，同时撤销 ${pendingCount} 项关联待审批申请` : ''}`, changes);
   } else if (action === 'editTaskContent') {
     contentFields(payload, ['id', 'title', 'description', 'acceptance']);
     const task = find(next.tasks, payload.id, '任务');
@@ -268,7 +300,7 @@ export function transact(state, action, payload = {}, actorId) {
   } else if (action === 'submitTask') {
     const task = find(next.tasks, payload.id, '任务');
     requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
-    check(actor.id === task.ownerId || actor.role === 'admin', '仅任务负责人或管理员可以提交成果');
+    check(actor.id === task.ownerId || isAdminRole(actor.role), '仅任务负责人或管理员可以提交成果');
     check(['todo', 'doing'].includes(task.status), '该任务已提交或已完成');
     task.deliverable = text(payload.deliverable, '成果说明或链接', 4000);
     task.submittedAt = at;
@@ -277,7 +309,7 @@ export function transact(state, action, payload = {}, actorId) {
   } else if (action === 'reviewTask') {
     const task = find(next.tasks, payload.id, '任务');
     requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
-    check(actor.role === 'admin' || actor.id === task.reviewerId, '仅指定验收人或管理员可以验收任务');
+    check(isAdminRole(actor.role) || actor.id === task.reviewerId, '仅指定验收人或管理员可以验收任务');
     check(actor.id !== task.ownerId || actor.id === task.reviewerId, '未被指定为验收人时，不能验收自己负责的任务');
     check(task.status === 'review', '仅待验收任务可以进行验收');
     check(typeof payload.approve === 'boolean', '请选择通过或退回');
@@ -293,7 +325,7 @@ export function transact(state, action, payload = {}, actorId) {
     const milestone = find(next.milestones, payload.id, '节点');
     const project = find(next.projects, milestone.projectId, '项目');
     requireProjectAccess(actor, project);
-    check(actor.role === 'admin', '仅管理员可以直接编辑大节点内容');
+    check(isAdminRole(actor.role), '仅管理员可以直接编辑大节点内容');
     const content = {
       title: text(payload.title, '节点名称', 100),
       description: Object.hasOwn(payload, 'description') ? optionalText(payload.description) : milestone.description,
@@ -343,7 +375,7 @@ export function transact(state, action, payload = {}, actorId) {
     let planChanged = false;
     if (payload.approve) {
       const applicant = find(next.users, request.applicantId, '申请人');
-      check(applicant.role === 'admin' || applicant.id === project.ownerId || project.memberIds.includes(applicant.id), '申请人已无项目访问权限，请驳回后由现有项目成员重新申请');
+      check(isAdminRole(applicant.role) || applicant.id === project.ownerId || project.memberIds.includes(applicant.id), '申请人已无项目访问权限，请驳回后由现有项目成员重新申请');
       check(['create', 'update'].includes(request.kind), '节点申请类型无效');
       const proposed = milestoneProposal(request.proposed, project);
       optionalText(request.reason);
@@ -459,8 +491,9 @@ export function transact(state, action, payload = {}, actorId) {
     extension.comment = comment;
     record(project.id, `${payload.approve ? '批准' : '驳回'}项目延期申请${payload.approve ? `，当前截止日期调整为 ${project.dueDate}，保留原计划 ${project.originalDueDate}` : '，原计划继续生效'}${comment ? `；${comment}` : ''}`);
   } else if (action === 'addUser') {
-    check(actor.role === 'admin', '仅管理员可以添加成员');
+    check(isAdminRole(actor.role), '仅管理员可以添加成员');
     check(ROLES.includes(payload.role), '成员角色无效');
+    check(actor.role === 'superadmin' || payload.role === 'member', '仅总管理员可以添加管理员');
     const user = {
       id: uid('u'), name: text(payload.name, '姓名', 30), title: text(payload.title, '岗位', 60),
       department: text(payload.department, '部门', 60), role: payload.role,
@@ -480,10 +513,10 @@ export function createSeedState() {
   const at = (n, hour = '09') => `${d(n)}T${hour}:00:00+08:00`;
   const users = [
     { id: 'u-admin', name: '周予安', role: 'admin', title: '运营总监', department: '管理中心', color: '#546a98' },
-    { id: 'u-manager', name: '陈亦舟', role: 'manager', title: '项目负责人', department: '项目管理', color: '#94784e' },
+    { id: 'u-manager', name: '陈亦舟', role: 'member', title: '项目负责人', department: '项目管理', color: '#94784e' },
     { id: 'u-engineer', name: '林知远', role: 'member', title: '硬件工程师', department: '产品研发', color: '#4e7b72' },
     { id: 'u-design', name: '许知夏', role: 'member', title: '设计师', department: '品牌设计', color: '#a17169' },
-    { id: 'u-ops', name: '方以宁', role: 'manager', title: '交付负责人', department: '运营交付', color: '#81709d' },
+    { id: 'u-ops', name: '方以宁', role: 'member', title: '交付负责人', department: '运营交付', color: '#81709d' },
     { id: 'u-qa', name: '陆景和', role: 'member', title: '测试工程师', department: '质量管理', color: '#65825c' },
   ];
   // Demo projects explicitly assign an approver; existing saved projects never inherit it.

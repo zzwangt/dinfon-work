@@ -98,7 +98,7 @@ test('new projects optionally include an explicit reviewer and never default app
   const plain = transact(state, 'createProject', payload, 'u-admin').projects.at(-1);
   assert.equal(plain.reviewerId, null);
   assert.deepEqual(plain.memberIds, ['u-manager']);
-  const assigned = transact(state, 'createProject', { ...payload, reviewerId: 'u-qa' }, 'u-manager').projects.at(-1);
+  const assigned = transact(state, 'createProject', { ...payload, reviewerId: 'u-qa' }, 'u-admin').projects.at(-1);
   assert.equal(assigned.reviewerId, 'u-qa');
   assert.deepEqual(assigned.memberIds, ['u-manager', 'u-qa']);
   assert.throws(() => transact(state, 'createProject', { ...payload, reviewerId: 'missing' }, 'u-admin'), /项目验收人不存在/);
@@ -137,7 +137,7 @@ async function fixture(t) {
   const stored = () => { const row = db.sqlite.prepare("SELECT payload,revision FROM workspace WHERE id='main'").get(); return { ...JSON.parse(row.payload), revision: row.revision }; };
   await call('/api/session');
   for (const id of ['u-engineer', 'u-manager', 'u-qa', 'u-ops']) {
-    const result = await call('/api/accounts', 'u-admin', { revision: stored().revision, existingUserId: id, email: identities[id].email, name: identities[id].displayName, role: id === 'u-manager' || id === 'u-ops' ? 'manager' : 'member' });
+    const result = await call('/api/accounts', 'u-admin', { revision: stored().revision, existingUserId: id, email: identities[id].email, name: identities[id].displayName, role: 'member' });
     assert.equal(result.status, 201, JSON.stringify(result.data));
     assert.equal((await call('/api/session', id)).status, 200);
   }

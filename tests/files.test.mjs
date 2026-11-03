@@ -186,6 +186,17 @@ test('SQLite full backup preserves account credentials, project state and exact 
   } finally { restored.close(); }
 });
 
+test('uploads cannot leave orphaned files when their task is deleted immediately before the final write', async t => {
+  const f = await fixture(t), originalPrepare = f.db.prepare;
+  f.db.prepare = function(sql) {
+    if (sql.startsWith('INSERT INTO project_files')) f.edit(workspace => { workspace.state.tasks = workspace.state.tasks.filter(task => task.id !== 't-03'); });
+    return originalPrepare.call(this, sql);
+  };
+  const result = await f.upload({ entityId: 't-03' });
+  assert.equal(result.status, 409);
+  assert.equal(f.db.sqlite.prepare('SELECT count(*) count FROM project_files').get().count, 0);
+});
+
 
 test('milestone file summaries include direct and current child task attachments without changing legacy files', async t => {
   const f = await fixture(t);

@@ -62,7 +62,7 @@ test('unauthenticated and unprovisioned callers cannot bootstrap or read company
   assert.equal(owner.status, 200);
   assert.equal(owner.data.actor.id, 'u-admin');
   assert.equal(owner.data.actor.name, ADMIN.displayName);
-  assert.equal(owner.data.account.role, 'admin');
+  assert.equal(owner.data.account.role, 'superadmin');
   assert.equal(owner.data.state.projects.length, 4);
   assert.equal((await f.call('/api/session', ENGINEER)).data.code, 'ACCOUNT_NOT_PROVISIONED');
   assert.equal(owner.headers.get('Cache-Control'), 'no-store, private');
@@ -211,34 +211,26 @@ test('current admin cannot disable or demote their own account', async (t) => {
   }
   assert.equal(f.stored().revision, owner.data.revision);
   assert.equal(f.stored().accounts[0].status, 'active');
-  assert.equal(f.stored().state.users.find((u) => u.id === 'u-admin').role, 'admin');
+  assert.equal(f.stored().state.users.find((u) => u.id === 'u-admin').role, 'superadmin');
 });
 
-test('hosted administrators can manage and delete peer accounts while preserving business history', async (t) => {
+test('hosted regular administrators cannot modify peers; the super administrator manages them', async (t) => {
   const f=fixture(t);
   await provision(f,ENGINEER,'u-engineer','admin');
   await provision(f,MANAGER,'u-manager','admin');
-  let listed=await f.call('/api/accounts',ENGINEER);
-  assert.ok(listed.data.accounts.every(a=>!('isSuperAdmin' in a)));
+  const listed=await f.call('/api/accounts',ENGINEER);
   const peer=listed.data.accounts.find(a=>a.userId==='u-manager');
   const owner=listed.data.accounts.find(a=>a.userId==='u-admin');
-  const disabled=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:listed.data.revision,status:'disabled'},'PATCH');
-  assert.equal(disabled.status,200);
-  const promoted=await f.call('/api/accounts',ENGINEER,{revision:disabled.data.revision,email:'another-admin@example.com',name:'新管理员',role:'admin'});
-  assert.equal(promoted.status,201);
   const before=f.stored();
-  const removed=await f.call(`/api/accounts/${owner.id}`,ENGINEER,{revision:promoted.data.revision},'DELETE');
-  assert.equal(removed.status,200,JSON.stringify(removed.data));
-  assert.equal(removed.data.accounts.some(a=>a.id===owner.id),false);
-  assert.equal((await f.call('/api/session',ADMIN)).status,403);
+  for(const target of [peer,owner]){
+    assert.equal((await f.call(`/api/accounts/${target.id}`,ENGINEER,{revision:listed.data.revision,status:'disabled'},'PATCH')).status,403);
+    assert.equal((await f.call(`/api/accounts/${target.id}`,ENGINEER,{revision:listed.data.revision},'DELETE')).status,403);
+  }
+  assert.equal((await f.call('/api/accounts',ENGINEER,{revision:listed.data.revision,email:'another-admin@example.com',name:'新管理员',role:'admin'})).status,403);
+  assert.deepEqual(f.stored(),before);
+  const removed=await f.call(`/api/accounts/${peer.id}`,ADMIN,{revision:listed.data.revision},'DELETE');
+  assert.equal(removed.status,200);assert.equal((await f.call('/api/session',MANAGER)).status,403);
   for(const key of ['users','projects','tasks','milestones','extensions','milestoneRequests'])assert.deepEqual(f.stored().state[key],before.state[key]);
-  const currentId=removed.data.account.id;
-  const self=await f.call(`/api/accounts/${currentId}`,ENGINEER,{revision:removed.data.revision},'DELETE');
-  assert.equal(self.data.code,'SELF_LOCKOUT');
-  const stale=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:promoted.data.revision},'DELETE');
-  assert.equal(stale.status,409);
-  const crossOrigin=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:removed.data.revision},'DELETE',{Origin:'https://attacker.example'});
-  assert.equal(crossOrigin.status,403);
 });
 
 test('staff cannot provision accounts; duplicate email and duplicate business-user bindings are rejected', async (t) => {
@@ -254,7 +246,7 @@ test('staff cannot provision accounts; duplicate email and duplicate business-us
 
 test('admin account lists expose useful status without returning authentication subjects', async (t) => {
   const f = fixture(t);
-  await provision(f, MANAGER, 'u-manager', 'manager');
+  await provision(f, MANAGER, 'u-manager', 'member');
   const result = await f.call('/api/accounts');
   assert.equal(result.status, 200);
   assert.equal(result.data.accounts.length, 2);
@@ -379,7 +371,7 @@ test('nonmembers cannot request nodes and forged admin identity cannot approve a
 test('no role can bypass node approval through the former direct-create command', async (t) => {
   const f = fixture(t);
   await provision(f, ENGINEER, 'u-engineer');
-  await provision(f, MANAGER, 'u-manager', 'manager');
+  await provision(f, MANAGER, 'u-manager', 'member');
   const before = f.stored();
   for (const identity of [ADMIN, ENGINEER, MANAGER]) {
     const session = await f.call('/api/session', identity);
@@ -441,7 +433,7 @@ test('existing v1 workspaces receive an empty request list without reset or read
   await provision(f, ENGINEER, 'u-engineer');
   const legacy = f.stored();
   delete legacy.state.milestoneRequests;
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts, accountPolicyVersion: 2 }), 'main');
   const oldSnapshot = f.stored();
   const staff = await f.call('/api/session', ENGINEER);
   const owner = await f.call('/api/session');
@@ -469,7 +461,7 @@ test('legacy blocked tasks normalize on API reads without rewriting storage or e
   own.blocker = '历史原因：等待物料';
   legacy.state.tasks.find((task) => task.id === 't-13').status = 'blocked';
   legacy.state.milestones[0].weight = 999;
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts, accountPolicyVersion: 2 }), 'main');
   const before = f.stored();
   const staff = await f.call('/api/session', ENGINEER);
   const admin = await f.call('/api/session');
@@ -491,7 +483,7 @@ test('legacy blocked tasks submit normally and new blocked writes fail without p
   const task = legacy.state.tasks.find((entry) => entry.id === 't-03');
   task.status = 'blocked';
   task.blocker = '历史原因：等待物料';
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts, accountPolicyVersion: 2 }), 'main');
   const before = f.stored();
   for (const payload of [{ status: 'blocked' }, { blocker: '新原因' }]) {
     const rejected = await f.call('/api/command', ENGINEER, { revision: before.revision, action: 'updateTask', payload: { id: task.id, ...payload } });
@@ -525,7 +517,7 @@ test('legacy weighted node approval keeps audit fields without reactivating weig
   application.before.weight = 40;
   application.proposed.weight = 60;
   legacy.state.milestones.find((node) => node.id === target.id).weight = 90;
-  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts }), 'main');
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ? WHERE id = ?').run(JSON.stringify({ state: legacy.state, accounts: legacy.accounts, accountPolicyVersion: 2 }), 'main');
   const approved = await f.call('/api/command', ADMIN, {
     revision: legacy.revision, action: 'reviewMilestoneRequest', payload: { id: application.id, approve: true, comment: '按调整后的验收范围执行' },
   });
@@ -613,7 +605,7 @@ test('submission timestamps always come from the server clock despite client-pro
 test('API supports an assigned owner-reviewer through delivery and acceptance while preserving scope and state checks', async (t) => {
   const f = fixture(t);
   await provision(f, ENGINEER, 'u-engineer');
-  await provision(f, MANAGER, 'u-manager', 'manager');
+  await provision(f, MANAGER, 'u-manager', 'member');
   const command = (identity, action, payload) => f.call('/api/command', identity, { revision: f.stored().revision, action, payload });
   const node = f.stored().state.milestones.find((item) => item.id === 'm-mower-2');
   const created = await command(ADMIN, 'createTask', {
@@ -697,7 +689,7 @@ test('API persists blank reasons and opinions for node creation/update approval 
 test('API persists blank extension reason and approval opinions without changing pending or rejected deadlines', async (t) => {
   for (const approve of [true, false]) {
     const f = fixture(t);
-    const manager = await provision(f, MANAGER, 'u-manager', 'manager');
+    const manager = await provision(f, MANAGER, 'u-manager', 'member');
     const project = manager.data.state.projects.find(item => item.id === 'p-mower');
     const newDueDate = addDays(project.dueDate, 1);
     const request = await f.call('/api/command', MANAGER, {

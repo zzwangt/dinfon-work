@@ -372,7 +372,7 @@ test('nonmembers cannot request nodes and forged admin identity cannot approve a
   const pending = f.stored();
   const forged = await f.call('/api/command', ENGINEER, { revision: requested.data.revision, action: 'reviewMilestoneRequest', actorId: 'u-admin', payload: { id: requested.data.state.milestoneRequests[0].id, approve: true, comment: '伪造管理账号', actorId: 'u-admin', role: 'admin' } });
   assert.equal(forged.status, 403);
-  assert.equal(forged.data.code, 'ADMIN_REQUIRED');
+  assert.equal(forged.data.code, 'PROJECT_APPROVER_REQUIRED');
   assert.deepEqual(f.stored(), pending);
 });
 
@@ -546,7 +546,7 @@ test('hour-level plans pass through server approval with exact times, scoped per
   const staff = await provision(f, ENGINEER, 'u-engineer');
   const created = await f.call('/api/command', ADMIN, {
     revision: staff.data.revision, action: 'createProject',
-    payload: { name: '小时排期项目', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
+    payload: { name: '小时排期项目', ownerId: 'u-manager', reviewerId: 'u-admin', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
   });
   assert.equal(created.status, 200, JSON.stringify(created.data));
   const project = created.data.state.projects.at(-1);
@@ -564,11 +564,7 @@ test('hour-level plans pass through server approval with exact times, scoped per
   assert.equal(node.dueDate, '2099-10-25T17:00');
   assert.equal(node.originalDueDate, node.dueDate);
   const taskInput = { projectId: project.id, milestoneId: node.id, ownerId: 'u-engineer', reviewerId: 'u-manager', title: '小时任务', dueDate: '2099-10-25T16:00', acceptance: '提交完整成果' };
-  const before = f.stored();
-  const denied = await f.call('/api/command', ENGINEER, { revision: approved.data.revision, action: 'createTask', payload: taskInput });
-  assert.equal(denied.status, 400);
-  assert.deepEqual(f.stored(), before);
-  const taskCreated = await f.call('/api/command', ADMIN, { revision: approved.data.revision, action: 'createTask', payload: taskInput });
+  const taskCreated = await f.call('/api/command', ENGINEER, { revision: approved.data.revision, action: 'createTask', payload: taskInput });
   assert.equal(taskCreated.status, 200, JSON.stringify(taskCreated.data));
   const task = taskCreated.data.state.tasks.at(-1);
   assert.equal(task.dueDate, taskInput.dueDate);

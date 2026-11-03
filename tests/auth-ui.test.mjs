@@ -1,3 +1,4 @@
+import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
 import { hasActiveFileOperations } from '../public/client/files.js';
 import test from 'node:test';
@@ -21,7 +22,7 @@ import { buildWeeklyReport, createWeeklyExport } from '../public/client/weekly-e
 const source = (await readFile(new URL('../public/client/app.js', import.meta.url), 'utf8'))
   .replace(/^import .+;\n/gm, '')
   .replace(/^await loadSession\(\);$/m, '');
-function harness(fetchImpl) {
+function harness(fetchImpl, overrides = {}) {
   const app = { innerHTML: '' }, content = { innerHTML: '' };
   const downloads=[], objectUrls=new Map();
   class DownloadURL extends URL {
@@ -40,7 +41,7 @@ function harness(fetchImpl) {
     addEventListener: (name,fn) => listeners.set(`document:${name}`,fn),
   };
   const context = {
-    ...domain, ...times, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
+    ...domain, ...times, canApproveProject, canApproveRequest, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
     window: { addEventListener:(name,fn)=>listeners.set(`window:${name}`,fn), scrollTo() {} },
     history: { replaceState(_state,_unused,url) { location.hash=url.includes('#')?url.slice(url.indexOf('#')):''; } },
     fetch: fetchImpl, FormData, Response, URL:DownloadURL, Blob, Set, console,
@@ -49,8 +50,9 @@ function harness(fetchImpl) {
     renderMilestoneProgress, renderProgressNote, renderProgressTrack,
     taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport,
     renderProjectFlow, renderProjectPeopleSummary, renderNodeFiles, bindProjectFiles, resetProjectFiles, bindFlowCanvas() {},
+    ...overrides,
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,newTask,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,newProject,newTask,setProjectReviewer,reviewNodeRequest,reviewExtension,tasksPage,milestoneDetail,editMilestoneContent,editTaskContent,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};
 }
 function session(overrides={}) {
@@ -204,6 +206,43 @@ test('polling updates badges even when only read receipts changed and revision d
   const {ui,app}=harness(async()=>Response.json(session({notifications:[]})));
   ui.acceptSession(session({notifications:[notice('n1')]}));ui.render();assert.match(app.innerHTML,/class="unread-count"/);
   await ui.loadSession(true);assert.doesNotMatch(app.innerHTML,/class="unread-count"/);
+});
+
+test('polling renders deferred changes after the file selection closes even at the same revision',async()=>{
+  let selectingFiles=false;
+  const fresh=session({revision:2,notifications:[notice('file-dialog-notice')]});
+  fresh.state.tasks.find(task=>task.id==='t-02').title='文件选择期间更新的任务';
+  const {ui,app,content,location}=harness(async()=>Response.json(fresh),{hasActiveFileOperations:()=>selectingFiles});
+  location.hash='#projects/p-mower';
+  ui.acceptSession(session());ui.render();
+  const previous=content.innerHTML;selectingFiles=true;
+  await ui.loadSession(true);
+  assert.equal(content.innerHTML,previous);
+  assert.doesNotMatch(app.innerHTML,/class="unread-count"/);
+  selectingFiles=false;await ui.loadSession(true);
+  assert.match(app.innerHTML,/class="unread-count"/);
+  assert.match(content.innerHTML,/文件选择期间更新的任务/);
+});
+
+test('project reviewer selection preserves an assigned reviewer outside the member list',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session(),project=data.state.projects.find(item=>item.id==='p-mower');
+  assert.equal(project.reviewerId,'u-admin');assert.ok(!project.memberIds.includes('u-admin'));
+  ui.acceptSession(data);ui.setProjectReviewer(project.id);
+  assert.match(modal.innerHTML,/<option value="u-admin" selected/);
+});
+
+test('project owners can start teammates tasks but cannot submit their deliverables',async()=>{
+  const {ui,modal,listeners}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();data.actor=data.state.users.find(user=>user.id==='u-manager');data.account={...data.account,role:'manager'};
+  const task=data.state.tasks.find(item=>item.id==='t-02');task.status='todo';
+  ui.acceptSession(data);ui.taskDetail(task.id);
+  assert.match(modal.innerHTML,/data-action="start-task"/);
+  task.status='doing';ui.taskDetail(task.id);
+  assert.doesNotMatch(modal.innerHTML,/data-action="submit-task"/);
+  modal.close();
+  await clickUiAction(listeners,'submit-task',task.id);
+  assert.equal(modal.open,false);
 });
 
 test('account refresh retains project context from the same revision snapshot',async()=>{
@@ -640,4 +679,166 @@ test('empty project progress displays a dash across project cards and flow summa
     assert.match(html,/aria-label="任务完成率"[^>]+aria-valuenow="0"/);
     assert.doesNotMatch(html,/NaN|Infinity|milestone-progress-dot/);
   }
+});
+
+
+test('only administrators can open direct milestone content editing and descriptions are escaped',()=>{
+  const data=session(),target=data.state.milestones.find(item=>item.id==='m-mower-2');
+  target.title='阶段 "方案"';target.description='第一行\n</p><img src=x onerror=alert(1)>';
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  ui.acceptSession(data);ui.milestoneDetail(target.id);
+  assert.match(modal.innerHTML,/data-action="edit-milestone-content"/);
+  assert.match(modal.innerHTML,/第一行\n&lt;\/p&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(modal.innerHTML,/<img/);
+  ui.editMilestoneContent(target.id);
+  assert.match(modal.innerHTML,/data-form="editMilestoneContent"/);
+  assert.match(modal.innerHTML,/name="title"[^>]+value="阶段 &quot;方案&quot;"/);
+  assert.match(modal.innerHTML,/<textarea[^>]+name="description"[^>]*>第一行\n&lt;\/p&gt;&lt;img src=x onerror=alert\(1\)&gt;<\/textarea>/);
+  assert.doesNotMatch(modal.innerHTML,/name="(?:dueDate|status)"|<img/);
+  for(const actorId of ['u-engineer','u-manager']){
+    const peer=harness(async()=>{throw new Error('Unexpected request');});
+    const view=session();view.actor=view.state.users.find(user=>user.id===actorId);view.account={...view.account,role:view.actor.role};
+    peer.ui.acceptSession(view);peer.ui.milestoneDetail(target.id);
+    assert.doesNotMatch(peer.modal.innerHTML,/data-action="edit-milestone-content"/);
+    peer.modal.close();const previous=peer.modal.innerHTML;
+    peer.ui.editMilestoneContent(target.id);
+    assert.equal(peer.modal.open,false);
+    assert.equal(peer.modal.innerHTML,previous);
+  }
+});
+
+test('project members may edit a peer task without gaining its start, submit or acceptance actions',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();data.actor=data.state.users.find(user=>user.id==='u-engineer');data.account={...data.account,role:'member'};
+  const target=data.state.tasks.find(item=>item.id==='t-02');
+  assert.notEqual(target.ownerId,data.actor.id);assert.notEqual(target.reviewerId,data.actor.id);
+  ui.acceptSession(data);
+  for(const status of ['todo','doing','review','done']){
+    target.status=status;ui.taskDetail(target.id);
+    assert.match(modal.innerHTML,/data-action="edit-task-content"/);
+    assert.doesNotMatch(modal.innerHTML,/data-action="(?:start-task|submit-task|approve-task|reject-task)"/);
+    ui.editTaskContent(target.id);
+    assert.match(modal.innerHTML,/data-form="editTaskContent"/);
+    assert.doesNotMatch(modal.innerHTML,/name="(?:ownerId|reviewerId|dueDate|status)"/);
+  }
+  modal.close();const previous=modal.innerHTML;
+  ui.editTaskContent('t-13');
+  assert.equal(modal.open,false,'a task in another project cannot open an editor');
+  assert.equal(modal.innerHTML,previous);
+});
+
+test('task content editors lock submitted acceptance criteria and escape text in forms and details',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session(),target=data.state.tasks.find(item=>item.id==='t-03');
+  target.title='任务 "版本"';target.description='工作说明\n</textarea><img src=x onerror=alert(1)>';
+  target.acceptance='保留标准 <img src=y onerror=alert(2)>';
+  ui.acceptSession(data);
+  for(const status of ['todo','doing','review','done']){
+    target.status=status;ui.editTaskContent(target.id);
+    assert.match(modal.innerHTML,/name="title"[^>]+value="任务 &quot;版本&quot;"/);
+    assert.match(modal.innerHTML,/<textarea[^>]+name="description"[^>]*>工作说明\n&lt;\/textarea&gt;&lt;img src=x onerror=alert\(1\)&gt;<\/textarea>/);
+    assert.doesNotMatch(modal.innerHTML,/<img/);
+    if(['todo','doing'].includes(status))assert.match(modal.innerHTML,/<textarea[^>]+name="acceptance"[^>]*required[^>]*>保留标准 &lt;img src=y onerror=alert\(2\)&gt;<\/textarea>/);
+    else{
+      assert.doesNotMatch(modal.innerHTML,/name="acceptance"/);
+      assert.match(modal.innerHTML,/<p class="preserve-space">保留标准 &lt;img src=y onerror=alert\(2\)&gt;<\/p>/);
+      assert.match(modal.innerHTML,/已提交验收的标准保持不变/);
+    }
+    ui.taskDetail(target.id);
+    assert.match(modal.innerHTML,/工作说明\n&lt;\/textarea&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
+    assert.doesNotMatch(modal.innerHTML,/<img/);
+  }
+});
+
+
+async function clickUiAction(listeners,action,id) {
+  const button={dataset:{action,id},type:'button',closest:()=>null};
+  await listeners.get('document:click')({target:{closest:selector=>selector==='[data-action]'?button:null},preventDefault(){}});
+}
+
+test('project owners and assigned employee reviewers can approve both application kinds but not their own requests',async()=>{
+  for(const actorId of ['u-manager','u-engineer']){
+    const {ui,modal,listeners}=harness(async()=>{throw new Error('Unexpected request');});
+    const data=approvalFixture();data.notifications=[];
+    const project=data.state.projects.find(item=>item.id==='p-mower');project.reviewerId='u-engineer';
+    data.actor=data.state.users.find(user=>user.id===actorId);data.account={...data.account,role:data.actor.role};
+    const node=data.state.milestoneRequests[0],extension=data.state.extensions[0];node.applicantId='u-qa';extension.applicantId='u-qa';
+    ui.acceptSession(data);
+    assert.match(ui.approvalsPage(),/data-action="approve-node-request"/);
+    assert.match(ui.approvalsPage(),/data-action="reject-node-request"/);
+    ui.reviewNodeRequest(node.id,true);assert.match(modal.innerHTML,/data-form="approveMilestoneRequest"/);
+    await clickUiAction(listeners,'approval-kind','extensions');
+    assert.match(ui.approvalsPage(),/data-action="approve-extension"/);
+    assert.match(ui.approvalsPage(),/data-action="reject-extension"/);
+    ui.reviewExtension(extension.id,true);assert.match(modal.innerHTML,/data-form="approveExtension"/);
+    node.applicantId=actorId;extension.applicantId=actorId;
+    assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-extension"/);
+    await clickUiAction(listeners,'approval-kind','nodes');
+    assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-node-request"/);
+    modal.close();const previous=modal.innerHTML;
+    for(const approve of [true,false]){ui.reviewNodeRequest(node.id,approve);ui.reviewExtension(extension.id,approve);}
+    assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
+  }
+});
+
+test('an administrator without a project approval role sees records but cannot open their approval actions',async()=>{
+  const {ui,modal,listeners}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=approvalFixture();data.notifications=[];
+  data.state.projects.find(item=>item.id==='p-mower').reviewerId='u-engineer';
+  ui.acceptSession(data);
+  assert.match(ui.approvalsPage(),/待审批的新节点/);
+  assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-node-request"/);
+  await clickUiAction(listeners,'approval-kind','extensions');
+  assert.match(ui.approvalsPage(),/完成交付/);
+  assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-extension"/);
+  const previous=modal.innerHTML;
+  for(const approve of [true,false]){ui.reviewNodeRequest('node-pending',approve);ui.reviewExtension('extension-pending',approve);}
+  await clickUiAction(listeners,'approve-node-request','node-pending');
+  await clickUiAction(listeners,'reject-extension','extension-pending');
+  assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
+});
+
+test('only project owners and administrators can set the independent project reviewer',()=>{
+  for(const actorId of ['u-admin','u-manager','u-engineer','u-qa']){
+    const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+    const data=session(),project=data.state.projects.find(item=>item.id==='p-mower');project.reviewerId='u-engineer';
+    data.actor=data.state.users.find(user=>user.id===actorId);data.account={...data.account,role:data.actor.role};
+    ui.acceptSession(data);const page=ui.projectWorkspace(project),allowed=['u-admin','u-manager'].includes(actorId);
+    if(allowed)assert.match(page,/data-action="set-project-reviewer"/);
+    else assert.doesNotMatch(page,/data-action="set-project-reviewer"/);
+    ui.setProjectReviewer(project.id);
+    assert.equal(modal.open,allowed);
+    if(allowed){
+      assert.match(modal.innerHTML,/data-form="setProjectReviewer"/);
+      const choices=modal.innerHTML.match(/<select[^>]+name="reviewerId"[^>]*>([\s\S]*?)<\/select>/)[1];
+      assert.match(choices,/<option value="u-engineer" selected/);
+      assert.match(choices,/<option value="u-qa"/);
+      assert.doesNotMatch(choices,/<option value="u-ops"/);
+    }
+  }
+});
+
+test('ordinary project members can create tasks for teammates without gaining project management actions',()=>{
+  const {ui,modal,toast}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();data.actor=data.state.users.find(user=>user.id==='u-engineer');data.account={...data.account,role:'member'};
+  const project=data.state.projects.find(item=>item.id==='p-mower');project.reviewerId=null;
+  ui.acceptSession(data);
+  assert.match(ui.tasksPage(),/data-action="new-task"/);
+  const page=ui.projectWorkspace(project);
+  assert.match(page,/data-action="new-task"/);
+  assert.doesNotMatch(page,/data-action="(?:new-project|new-extension|set-project-reviewer|add-project-member)"/);
+  ui.milestoneDetail('m-mower-2');
+  assert.match(modal.innerHTML,/data-action="new-task"/);
+  assert.doesNotMatch(modal.innerHTML,/data-action="(?:complete-milestone|edit-milestone-content)"/);
+  ui.newTask(project.id);
+  assert.match(modal.innerHTML,/data-form="createTask"/);
+  const owners=modal.innerHTML.match(/<select[^>]+name="ownerId"[^>]*>([\s\S]*?)<\/select>/)[1];
+  assert.match(owners,/<option value="u-qa"/);
+  assert.match(owners,/<option value="u-engineer"/);
+  const projects=modal.innerHTML.match(/<select[^>]+name="projectId"[^>]*>([\s\S]*?)<\/select>/)[1];
+  assert.match(projects,/<option value="p-mower"/);assert.match(projects,/<option value="p-pcb"/);
+  assert.doesNotMatch(projects,/<option value="p-site"/);
+  modal.close();const previous=modal.innerHTML;
+  ui.newProject();assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
+  assert.match(toast.textContent,/当前身份不能创建项目/);
 });

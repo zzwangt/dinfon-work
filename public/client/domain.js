@@ -4,6 +4,7 @@
  */
 
 import { datePart, deadlineMs, startMs, validSchedule } from './time.js';
+import { canApproveProject } from './approval-access.js';
 
 const ROLES = ['admin', 'manager', 'member'];
 
@@ -61,6 +62,16 @@ function find(list, id, label) {
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function contentFields(payload, allowed) {
+  check(payload && typeof payload === 'object' && !Array.isArray(payload), '编辑内容格式不正确');
+  check(Object.keys(payload).every(key => allowed.includes(key)), '此操作只能修改节点名称和文字内容，不能修改日期、人员或完成状态');
+}
+
+function contentChanges(before, after) {
+  return Object.fromEntries(Object.keys(after).filter(key => before[key] !== after[key])
+    .map(key => [key, { before: before[key] ?? '', after: after[key] }]));
 }
 
 function manageProject(actor, project) {
@@ -148,6 +159,8 @@ export function normalizeState(state) {
   for (const task of next.tasks) {
     if (task.status === 'blocked') task.status = 'doing';
   }
+  for (const milestone of next.milestones) milestone.description ??= '';
+  for (const project of next.projects) project.reviewerId ??= null;
   return next;
 }
 
@@ -172,28 +185,39 @@ export function transact(state, action, payload = {}, actorId) {
   const next = normalizeState(state);
   const actor = find(next.users, actorId, '操作人员');
   const at = new Date().toISOString();
-  const record = (projectId, message) => next.logs.unshift({ id: uid('log'), at, actorId, projectId: projectId || null, message });
+  const record = (projectId, message, changes) => next.logs.unshift({ id: uid('log'), at, actorId, projectId: projectId || null, message, ...(changes ? { changes } : {}) });
 
   if (action === 'createProject') {
     check(actor.role === 'admin' || actor.role === 'manager', '仅管理员或项目负责人可以创建项目');
     const owner = find(next.users, payload.ownerId, '项目负责人');
     check(owner.role === 'manager' || owner.role === 'admin', '项目负责人需要负责人或管理员角色');
     check(actor.role === 'admin' || owner.id === actor.id, '项目负责人只能创建由自己负责的项目');
-    const memberIds = [...new Set([owner.id, ...(Array.isArray(payload.memberIds) ? payload.memberIds : [])])];
+    const reviewerId = payload.reviewerId == null || payload.reviewerId === '' ? null : find(next.users, payload.reviewerId, '项目验收人').id;
+    const memberIds = [...new Set([owner.id, ...(reviewerId ? [reviewerId] : []), ...(Array.isArray(payload.memberIds) ? payload.memberIds : [])])];
     memberIds.forEach((id) => find(next.users, id, '项目成员'));
     const project = {
       id: uid('p'), code: `DF-${String(next.projects.length + 1).padStart(3, '0')}`,
       name: text(payload.name, '项目名称', 80), description: optionalText(payload.description),
-      category: optionalText(payload.category, 40) || '综合项目', ownerId: owner.id, memberIds,
+      category: optionalText(payload.category, 40) || '综合项目', ownerId: owner.id, reviewerId, memberIds,
       startDate: validSchedule(payload.startDate, '开始日期'), originalDueDate: validSchedule(payload.dueDate, '截止日期'),
       dueDate: payload.dueDate, color: ['#375fbb', '#9b704a', '#66845b', '#8266a8'][next.projects.length % 4],
     };
     validateSchedule(next, project);
     next.projects.push(project);
     record(project.id, `创建项目“${project.name}”，计划于 ${project.dueDate} 完成`);
+  } else if (action === 'setProjectReviewer') {
+    check(Object.keys(payload).every(key => ['id', 'reviewerId'].includes(key)), '此操作只能设置项目验收人');
+    const project = find(next.projects, payload.id, '项目');
+    manageProject(actor, project);
+    const reviewerId = payload.reviewerId == null || payload.reviewerId === '' ? null : find(next.users, payload.reviewerId, '项目验收人').id;
+    check(!reviewerId || reviewerId === project.ownerId || project.memberIds.includes(reviewerId), '项目验收人必须是当前项目成员或负责人');
+    check(project.reviewerId !== reviewerId, '项目验收人没有变化');
+    const changes = contentChanges(project, { reviewerId });
+    project.reviewerId = reviewerId;
+    record(project.id, reviewerId ? `设置项目验收人：${find(next.users, reviewerId, '项目验收人').name}` : '清除项目验收人', changes);
   } else if (action === 'createTask') {
     const project = find(next.projects, payload.projectId, '项目');
-    manageProject(actor, project);
+    requireProjectAccess(actor, project);
     const owner = find(next.users, payload.ownerId, '任务负责人');
     const reviewer = find(next.users, payload.reviewerId || project.ownerId, '验收人');
     check(project.memberIds.includes(owner.id), '任务负责人必须是项目组成员');
@@ -210,10 +234,26 @@ export function transact(state, action, payload = {}, actorId) {
       status: 'todo', priority: payload.priority || 'normal', description: optionalText(payload.description),
       acceptance: text(payload.acceptance, '验收标准'), deliverable: '', submittedAt: null,
       reviewedAt: null, reviewCount: 0, firstReviewPassed: null, reviewComment: '',
+      createdBy: actor.id, createdAt: at,
     };
     next.tasks.push(task);
     validateSchedule(next, project);
     record(project.id, `创建任务“${task.title}”，由 ${owner.name} 负责`);
+  } else if (action === 'editTaskContent') {
+    contentFields(payload, ['id', 'title', 'description', 'acceptance']);
+    const task = find(next.tasks, payload.id, '任务');
+    const project = find(next.projects, task.projectId, '项目');
+    requireProjectAccess(actor, project);
+    const content = {
+      title: text(payload.title, '任务名称', 100),
+      description: Object.hasOwn(payload, 'description') ? optionalText(payload.description) : task.description || '',
+      acceptance: Object.hasOwn(payload, 'acceptance') ? text(payload.acceptance, '验收标准') : task.acceptance,
+    };
+    check(!['review', 'done'].includes(task.status) || content.acceptance === task.acceptance, '已提交验收或已完成任务的验收标准不能修改');
+    const changes = contentChanges(task, content);
+    check(Object.keys(changes).length > 0, '任务内容没有变化，无需保存');
+    Object.assign(task, content);
+    record(project.id, `编辑小节点“${task.title}”的文字内容`, changes);
   } else if (action === 'updateTask') {
     const task = find(next.tasks, payload.id, '任务');
     const project = find(next.projects, task.projectId, '项目');
@@ -248,8 +288,22 @@ export function transact(state, action, payload = {}, actorId) {
     task.reviewComment = comment;
     task.status = payload.approve ? 'done' : 'doing';
     record(task.projectId, `${payload.approve ? '验收通过' : '退回修改'}：“${task.title}”${comment ? `；${comment}` : ''}`);
+  } else if (action === 'editMilestoneContent') {
+    contentFields(payload, ['id', 'title', 'description']);
+    const milestone = find(next.milestones, payload.id, '节点');
+    const project = find(next.projects, milestone.projectId, '项目');
+    requireProjectAccess(actor, project);
+    check(actor.role === 'admin', '仅管理员可以直接编辑大节点内容');
+    const content = {
+      title: text(payload.title, '节点名称', 100),
+      description: Object.hasOwn(payload, 'description') ? optionalText(payload.description) : milestone.description,
+    };
+    const changes = contentChanges(milestone, content);
+    check(Object.keys(changes).length > 0, '节点内容没有变化，无需保存');
+    Object.assign(milestone, content);
+    record(project.id, `编辑大节点“${milestone.title}”的文字内容`, changes);
   } else if (action === 'createMilestone') {
-    throw new Error('节点新增或修改需要先提交申请并由管理员审批');
+    throw new Error('节点新增或修改需要先提交申请并由项目负责人或项目验收人审批');
   } else if (action === 'requestMilestone') {
     const project = find(next.projects, payload.projectId, '项目');
     requireProjectAccess(actor, project);
@@ -278,14 +332,16 @@ export function transact(state, action, payload = {}, actorId) {
     });
     record(project.id, `申请${payload.kind === 'create' ? '新增' : '修改'}节点“${proposed.title}”；待后台审批，当前计划保持生效`);
   } else if (action === 'reviewMilestoneRequest') {
-    check(actor.role === 'admin', '仅后台管理员可以审批节点申请');
     const request = find(next.milestoneRequests, payload.id, '节点申请');
+    const project = find(next.projects, request.projectId, '项目');
+    requireProjectAccess(actor, project);
+    check(canApproveProject(project, actor.id), '仅项目负责人或项目验收人可以审批申请');
+    check(actor.id !== request.applicantId, '不能审批自己提交的申请，请由另一位项目负责人或项目验收人处理');
     check(request.status === 'pending', '该节点申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
     const comment = optionalText(payload.comment);
     let planChanged = false;
     if (payload.approve) {
-      const project = find(next.projects, request.projectId, '项目');
       const applicant = find(next.users, request.applicantId, '申请人');
       check(applicant.role === 'admin' || applicant.id === project.ownerId || project.memberIds.includes(applicant.id), '申请人已无项目访问权限，请驳回后由现有项目成员重新申请');
       check(['create', 'update'].includes(request.kind), '节点申请类型无效');
@@ -308,7 +364,7 @@ export function transact(state, action, payload = {}, actorId) {
         check(request.milestoneId == null && request.before == null, '新增节点申请数据无效');
         validateMilestoneProposal(next, project, proposed, null);
         next.milestones.push({
-          id: uid('m'), projectId: project.id, ...proposed,
+          id: uid('m'), projectId: project.id, ...proposed, description: '',
           originalDueDate: proposed.dueDate, status: 'pending', acceptedAt: null,
         });
         planChanged = true;
@@ -369,13 +425,14 @@ export function transact(state, action, payload = {}, actorId) {
     next.extensions.unshift(extension);
     record(project.id, `申请项目延期：${project.dueDate} → ${newDueDate}；待后台审批，当前计划保持生效`);
   } else if (action === 'reviewExtension') {
-    check(actor.role === 'admin', '仅后台管理员可以审批延期');
     const extension = find(next.extensions, payload.id, '延期申请');
-    check(actor.id !== extension.applicantId, '不能审批自己提交的延期申请，请由其他管理员处理');
+    const project = find(next.projects, extension.projectId, '项目');
+    requireProjectAccess(actor, project);
+    check(canApproveProject(project, actor.id), '仅项目负责人或项目验收人可以审批申请');
+    check(actor.id !== extension.applicantId, '不能审批自己提交的延期申请，请由另一位项目负责人或项目验收人处理');
     check(extension.status === 'pending', '该延期申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
     const comment = optionalText(payload.comment);
-    const project = find(next.projects, extension.projectId, '项目');
     if (payload.approve) {
       check(deadlineMs(project.dueDate) === deadlineMs(extension.originalDueDate), '项目计划已变化，请重新提交延期申请');
       validSchedule(extension.newDueDate, '申请截止日期');
@@ -429,11 +486,12 @@ export function createSeedState() {
     { id: 'u-ops', name: '方以宁', role: 'manager', title: '交付负责人', department: '运营交付', color: '#81709d' },
     { id: 'u-qa', name: '陆景和', role: 'member', title: '测试工程师', department: '质量管理', color: '#65825c' },
   ];
+  // Demo projects explicitly assign an approver; existing saved projects never inherit it.
   const projects = [
-    { id: 'p-mower', code: 'DF-001', name: '智能割草机器人 · 样机验证', description: '完成样机的场景测试与问题闭环，形成可验收的验证报告。此项目与成员均为演示数据。', category: '产品研发', ownerId: 'u-manager', memberIds: ['u-manager', 'u-engineer', 'u-design', 'u-qa'], startDate: d(-25), originalDueDate: d(12), dueDate: d(12), color: '#557658' },
-    { id: 'p-pcb', code: 'DF-002', name: '电子控制板 · 研发交付', description: '完成控制板设计评审、样板联调和交付资料归档。演示项目。', category: '电子研发', ownerId: 'u-manager', memberIds: ['u-manager', 'u-engineer', 'u-qa'], startDate: d(-20), originalDueDate: d(7), dueDate: d(7), color: '#a4804d' },
-    { id: 'p-site', code: 'DF-003', name: '品牌官网 · 内容与体验升级', description: '完善品牌内容、页面设计和响应式体验，完成内部验收。演示项目。', category: '品牌建设', ownerId: 'u-manager', memberIds: ['u-manager', 'u-design', 'u-ops'], startDate: d(-18), originalDueDate: d(5), dueDate: d(5), color: '#677cad' },
-    { id: 'p-delivery', code: 'DF-004', name: '交付流程 · 标准化试运行', description: '明确项目交接标准、责任人与异常处理流程，完成一轮试运行。演示项目。', category: '运营管理', ownerId: 'u-ops', memberIds: ['u-ops', 'u-manager', 'u-qa'], startDate: d(-30), originalDueDate: d(-2), dueDate: d(6), color: '#8a749b' },
+    { id: 'p-mower', code: 'DF-001', name: '智能割草机器人 · 样机验证', description: '完成样机的场景测试与问题闭环，形成可验收的验证报告。此项目与成员均为演示数据。', category: '产品研发', ownerId: 'u-manager', reviewerId: 'u-admin', memberIds: ['u-manager', 'u-engineer', 'u-design', 'u-qa'], startDate: d(-25), originalDueDate: d(12), dueDate: d(12), color: '#557658' },
+    { id: 'p-pcb', code: 'DF-002', name: '电子控制板 · 研发交付', description: '完成控制板设计评审、样板联调和交付资料归档。演示项目。', category: '电子研发', ownerId: 'u-manager', reviewerId: 'u-admin', memberIds: ['u-manager', 'u-engineer', 'u-qa'], startDate: d(-20), originalDueDate: d(7), dueDate: d(7), color: '#a4804d' },
+    { id: 'p-site', code: 'DF-003', name: '品牌官网 · 内容与体验升级', description: '完善品牌内容、页面设计和响应式体验，完成内部验收。演示项目。', category: '品牌建设', ownerId: 'u-manager', reviewerId: 'u-admin', memberIds: ['u-manager', 'u-design', 'u-ops'], startDate: d(-18), originalDueDate: d(5), dueDate: d(5), color: '#677cad' },
+    { id: 'p-delivery', code: 'DF-004', name: '交付流程 · 标准化试运行', description: '明确项目交接标准、责任人与异常处理流程，完成一轮试运行。演示项目。', category: '运营管理', ownerId: 'u-ops', reviewerId: 'u-admin', memberIds: ['u-ops', 'u-manager', 'u-qa'], startDate: d(-30), originalDueDate: d(-2), dueDate: d(6), color: '#8a749b' },
   ];
   const milestones = [
     { id: 'm-mower-1', projectId: 'p-mower', title: '测试方案与准备', due: -10, done: true },
@@ -448,7 +506,7 @@ export function createSeedState() {
     { id: 'm-delivery-1', projectId: 'p-delivery', title: '交接标准确认', due: -15, done: true },
     { id: 'm-delivery-2', projectId: 'p-delivery', title: '流程模板验收', due: -8, done: true },
     { id: 'm-delivery-3', projectId: 'p-delivery', title: '试运行复盘完成', due: 6, original: -2 },
-  ].map(({ due, original, done, ...m }) => ({ ...m, originalDueDate: d(original ?? due), dueDate: d(due), status: done ? 'done' : 'pending', acceptedAt: done ? at(due) : null }));
+  ].map(({ due, original, done, ...m }) => ({ ...m, description: '', originalDueDate: d(original ?? due), dueDate: d(due), status: done ? 'done' : 'pending', acceptedAt: done ? at(due) : null }));
   const seeds = [
     ['t-01', 'p-mower', 'm-mower-1', '整理样机场景测试清单', 'u-qa', -11, 'done', 'normal'],
     ['t-02', 'p-mower', 'm-mower-2', '完成坡地行走连续测试', 'u-qa', 0, 'doing', 'high'],

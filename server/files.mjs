@@ -93,8 +93,19 @@ export async function handleFileApi(request, { db, authorize }) {
       const context = await authorize(), project = projectFor(context, projectId);
       const entityType = url.searchParams.get('entityType'), entityId = url.searchParams.get('entityId');
       if (entityType || entityId) entityFor(context, projectId, entityType, identifier(entityId, '节点'));
-      const query = `SELECT ${columns} FROM project_files WHERE project_id = ?${entityType ? ' AND entity_type = ? AND entity_id = ?' : ''} ORDER BY uploaded_at DESC, id DESC`;
-      const result = await db.prepare(query).bind(projectId, ...(entityType ? [entityType, entityId] : [])).all();
+      const includeTaskFiles = url.searchParams.get('includeTaskFiles') === 'true';
+      if (includeTaskFiles && entityType !== 'milestone') fail(400, 'INVALID_INPUT', '请选择需要汇总文件的大节点');
+      let filter = entityType ? ' AND entity_type = ? AND entity_id = ?' : '';
+      let values = entityType ? [entityType, entityId] : [];
+      if (includeTaskFiles) {
+        const taskIds = context.workspace.state.tasks.filter(task => task.projectId === projectId && task.milestoneId === entityId).map(task => task.id);
+        // Resolve current membership without rewriting existing attachment metadata.
+        // A JSON parameter avoids both interpolated identifiers and SQL variable limits.
+        filter = ' AND ((entity_type = ? AND entity_id = ?) OR (entity_type = ? AND entity_id IN (SELECT value FROM json_each(?))))';
+        values = ['milestone', entityId, 'task', JSON.stringify(taskIds)];
+      }
+      const query = `SELECT ${columns} FROM project_files WHERE project_id = ?${filter} ORDER BY uploaded_at DESC, id DESC`;
+      const result = await db.prepare(query).bind(projectId, ...values).all();
       return json({ files: result.results.map(row => metadata(context, project, row)), maxFileBytes: MAX_FILE_BYTES });
     }
     if (path === '/api/files' && method === 'POST') {

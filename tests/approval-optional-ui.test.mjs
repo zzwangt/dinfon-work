@@ -1,3 +1,4 @@
+import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
 import { hasActiveFileOperations } from '../public/client/files.js';
 import test from 'node:test';
@@ -19,7 +20,7 @@ function harness(state = domain.createSeedState()) {
   const modal = { innerHTML: '', open: false, showModal() { this.open = true; }, addEventListener() {} };
   const toast = { hidden: true, classList: { toggle() {} } };
   const context = {
-    ...domain, ...times, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
+    ...domain, ...times, canApproveProject, canApproveRequest, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
     document: {
       querySelector: selector => ({ '#app': app, '#modal': modal, '#toast': toast }[selector]),
       querySelectorAll: () => [], addEventListener() {},

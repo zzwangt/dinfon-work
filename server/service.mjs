@@ -1,12 +1,13 @@
 import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
+import { canApproveProject } from '../public/client/approval-access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
 import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
 import { handleFileApi } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['admin', 'manager', 'member']);
-const COMMANDS = new Set(['createProject', 'createTask', 'updateTask', 'submitTask', 'reviewTask', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const COMMANDS = new Set(['createProject', 'setProjectReviewer', 'createTask', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
 
 class ApiError extends Error {
@@ -182,13 +183,20 @@ function log(workspace, actorId, message, projectId = null) {
 }
 
 function accessibleCommand(workspace, actor, action, payload) {
-  if (actor.role === 'admin' || action === 'createProject') return;
+  if (action === 'createProject') return;
   const scope = sanitizeStateForActor(workspace.state, actor.id);
   let projectId = payload.projectId;
-  if (['updateTask', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
-  if (action === 'completeMilestone') projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
-  if (action === 'reviewExtension' || action === 'reviewMilestoneRequest') { adminOnly(actor); return; }
+  if (action === 'setProjectReviewer') projectId = payload.id;
+  if (['updateTask', 'editTaskContent', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
+  if (['completeMilestone', 'editMilestoneContent'].includes(action)) projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
+  const approval = action === 'reviewExtension' || action === 'reviewMilestoneRequest';
+  if (approval) {
+    const requests = action === 'reviewExtension' ? workspace.state.extensions : workspace.state.milestoneRequests || [];
+    projectId = requests.find((request) => request.id === payload.id)?.projectId;
+  }
   if (!scope.projects.some((project) => project.id === projectId)) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
+  if (approval && !canApproveProject(scope.projects.find((project) => project.id === projectId), actor.id)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅项目负责人或项目验收人可以审批申请');
+  if (action === 'editMilestoneContent') adminOnly(actor);
 }
 
 function assignAccountProjects(workspace, user, projectIds, actor) {
@@ -198,6 +206,10 @@ function assignAccountProjects(workspace, user, projectIds, actor) {
   requireValue(workspace.state.projects.every((project) => project.ownerId !== user.id || selected.has(project.id)), '项目负责人不能移除自己负责的项目，请先调整项目负责人');
   for (const project of workspace.state.projects) {
     const member = project.memberIds.includes(user.id);
+    if (!selected.has(project.id) && project.reviewerId === user.id) {
+      project.reviewerId = null;
+      log(workspace, actor.id, `移除项目验收人 ${user.name}`, project.id);
+    }
     if (member === selected.has(project.id)) continue;
     project.memberIds = selected.has(project.id) ? [...project.memberIds, user.id] : project.memberIds.filter((id) => id !== user.id);
     log(workspace, actor.id, `将成员 ${user.name} ${selected.has(project.id) ? '加入' : '移出'}项目“${project.name}”；既有任务负责人保持不变`, project.id);

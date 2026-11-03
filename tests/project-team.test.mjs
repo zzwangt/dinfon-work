@@ -68,6 +68,23 @@ test('reviewer-only people appear separately and do not inflate membership summa
   assert.match(summary, /data-action="project-view" data-id="people"/);
 });
 
+test('an explicitly assigned project reviewer appears without task assignments or membership and never duplicates an existing row', () => {
+  const { state, project } = fixture();
+  state.users.push({ id: 'project-reviewer', name: '项目验收戊', department: '管理', title: '管理员' });
+  project.reviewerId = 'project-reviewer';
+  const before = structuredClone({ state, project });
+  const html = renderProjectTeam(state, project);
+  assert.equal([...html.matchAll(/data-team-person="project-reviewer"/g)].length, 1);
+  assert.match(html, /项目验收戊<\/h3><span class="project-team-role">项目验收人<\/span>/);
+  assert.match(html, /3 名项目成员/);
+  assert.match(renderProjectPeopleSummary(state, project), /项目验收人 <strong>项目验收戊<\/strong>/);
+  assert.deepEqual({ state, project }, before);
+  for (const id of ['reviewer', 'worker', 'lead']) {
+    project.reviewerId = id;
+    assert.equal([...renderProjectTeam(state, project).matchAll(new RegExp(`data-team-person="${id}"`, 'g'))].length, 1);
+  }
+});
+
 test('legacy blocked tasks render as in progress without losing ownership or actions', () => {
   const { state, project } = fixture();
   state.tasks[0].status = 'blocked';

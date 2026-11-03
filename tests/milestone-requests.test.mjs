@@ -83,12 +83,13 @@ test('create approval adds the proposed milestone with a preserved initial date 
   assert.equal(projectProgress(approved, 'p-mower'), 25);
 });
 
-test('one administrator can submit then approve their own request in separate transactions', () => {
+test('an administrator cannot approve their own request, which a project owner may approve', () => {
   const state = createSeedState();
   assert.equal(state.users.filter((user) => user.role === 'admin').length, 1);
   const pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
   assert.deepEqual(pending.milestones, state.milestones);
-  assert.equal(review(pending).milestoneRequests[0].status, 'approved');
+  assert.throws(() => review(pending), /不能审批自己/);
+  assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
 });
 
 test('update requests capture the node snapshot and only approval changes editable fields', () => {
@@ -120,9 +121,11 @@ test('rejection keeps new and changed plans untouched and processed requests can
   }
 });
 
-test('node reviews require administrator role, an explicit decision and valid optional explanation', () => {
+test('node reviews require project approval assignment, an explicit decision and valid optional explanation', () => {
   const pending = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
-  for (const actorId of ['u-engineer', 'u-manager', 'u-ops']) assert.throws(() => review(pending, true, actorId), /仅后台管理员/);
+  assert.throws(() => review(pending, true, 'u-engineer'), /仅项目负责人或项目验收人/);
+  assert.throws(() => review(pending, true, 'u-ops'), /无权访问/);
+  assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, comment: '说明' }, 'u-admin'), /请选择批准或驳回/);
   for (const approve of [true, false]) {
     assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve, comment: {} }, 'u-admin'), /文本长度/);
@@ -131,7 +134,7 @@ test('node reviews require administrator role, an explicit decision and valid op
 
 test('the old direct node creation action is closed to every role', () => {
   for (const actorId of ['u-admin', 'u-manager', 'u-engineer', 'u-ops']) {
-    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*管理员审批/);
+    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*项目验收人审批/);
   }
 });
 
@@ -282,6 +285,7 @@ test('an owner without a member entry retains approval eligibility while a demot
   pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
   byId(pending.users, 'u-admin').role = 'member';
   byId(pending.users, 'u-ops').role = 'admin';
+  byId(pending.projects, 'p-mower').reviewerId = 'u-ops';
   assert.throws(() => review(pending, true, 'u-ops'), /申请人已无项目访问权限/);
 });
 

@@ -95,7 +95,7 @@ test('task lifecycle notifies only relevant accounts, deduplicates roles and exc
   assert.equal((await f.session(ENGINEER)).state.tasks.find((task) => task.id === 't-07').status, 'done');
 });
 
-test('node requests and decisions notify admin/applicant and publish approved changes to current project members', async (t) => {
+test('node requests and decisions notify assigned project approvers/applicant and publish approved changes to current project members', async (t) => {
   const f = await fixture(t);
   const project = (await f.session()).state.projects.find((entry) => entry.id === 'p-pcb');
   const requested = await f.command(ENGINEER, 'requestMilestone', { projectId: project.id, kind: 'create', title: '通知验收节点', dueDate: project.dueDate, reason: '申请正文不复制到通知' });
@@ -106,7 +106,7 @@ test('node requests and decisions notify admin/applicant and publish approved ch
   assert.equal(pending[0].category, 'approvals');
   assert.equal(pending[0].entityId, request.id);
   assert.equal(pending[0].target, '#approvals');
-  assert.equal((await f.session(MANAGER)).notifications.length, 0, 'managers cannot approve milestone requests');
+  assert.equal((await f.session(MANAGER)).notifications.length, 1, 'project owners may approve milestone requests');
   assert.equal(JSON.stringify(pending).includes('申请正文'), false);
   await f.clear();
   const approved = await f.command(ADMIN, 'reviewMilestoneRequest', { id: request.id, approve: true, comment: '' });

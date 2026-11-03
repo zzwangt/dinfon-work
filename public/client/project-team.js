@@ -15,7 +15,7 @@ function collect(state = {}, project = {}) {
   const members = new Set(memberIds);
   const collaboratorIds = [...new Set(tasks.map(task => task.ownerId).filter(id => validId(id) && !members.has(id)))];
   const collaborators = new Set(collaboratorIds);
-  const reviewerIds = [...new Set(tasks.map(task => task.reviewerId).filter(id => validId(id) && !members.has(id) && !collaborators.has(id)))];
+  const reviewerIds = [...new Set([project.reviewerId, ...tasks.map(task => task.reviewerId)].filter(id => validId(id) && !members.has(id) && !collaborators.has(id)))];
   const profile = id => {
     const user = users.get(id);
     return { name: textOr(user?.name, '成员资料待补充'), title: textOr(user?.title, '岗位未设置'), department: textOr(user?.department, '部门未设置'), missing: !user };
@@ -53,7 +53,7 @@ function personRow(context, project, id, kind = 'member') {
   const completed = owned.filter(task => task.status === 'done').length;
   const awaitingReview = reviewing.filter(task => task.status === 'review').length;
   const owner = id === project.ownerId;
-  const role = owner ? '项目负责人' : kind === 'reviewer' ? '验收协作' : kind === 'collaborator' ? '任务协作' : '项目成员';
+  const role = owner ? (id===project.reviewerId?'负责人 · 项目验收人':'项目负责人') : id===project.reviewerId ? '项目验收人' : kind === 'reviewer' ? '验收协作' : kind === 'collaborator' ? '任务协作' : '项目成员';
   const initial = person.missing ? '?' : Array.from(person.name).slice(-1).join('');
   const execution = kind !== 'reviewer' ? `<div class="project-team-duty"><div class="project-team-duty-heading"><h3>执行任务 <span>${owned.length}</span></h3>${owned.length ? `<p>已完成 <strong>${completed} / ${owned.length}</strong></p>` : ''}</div>${owned.length ? taskList(owned, '负责的任务') : '<p class="project-team-empty-duty">尚未分配执行任务</p>'}</div>` : '';
   const review = reviewing.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>验收任务 <span>${reviewing.length}</span></h3>${awaitingReview ? `<p>待验收 <strong>${awaitingReview}</strong> 项</p>` : ''}</div>${taskList(reviewing, '负责验收的任务')}</div>` : '';
@@ -66,7 +66,7 @@ export function renderProjectPeopleSummary(state = {}, project = {}, { actions =
   const owner = validId(project.ownerId) ? context.profile(project.ownerId).name : '未指定';
   const otherMembers = context.memberIds.filter(id => id !== project.ownerId);
   const names = otherMembers.map(id => escape(context.profile(id).name)).join('、');
-  return `<div class="project-people-summary">${peopleIcon}<div class="project-people-names"><span>负责人 <strong>${escape(owner)}</strong></span>${otherMembers.length ? `<span>成员 ${names}</span>` : '<span>暂无其他项目成员</span>'}${context.reviewerIds.length ? `<span class="project-people-support">另有 ${context.reviewerIds.length} 名验收协作</span>` : ''}${context.collaboratorIds.length ? `<span class="project-people-support">另有 ${context.collaboratorIds.length} 名任务协作</span>` : ''}</div><button type="button" class="project-people-open" data-action="project-view" data-id="people">查看分工${arrowIcon}</button>${actions}</div>`;
+  return `<div class="project-people-summary">${peopleIcon}<div class="project-people-names"><span>负责人 <strong>${escape(owner)}</strong></span><span>项目验收人 <strong>${escape(validId(project.reviewerId)?context.profile(project.reviewerId).name:'待指定')}</strong></span>${otherMembers.length ? `<span>成员 ${names}</span>` : '<span>暂无其他项目成员</span>'}${context.reviewerIds.length ? `<span class="project-people-support">另有 ${context.reviewerIds.length} 名验收协作</span>` : ''}${context.collaboratorIds.length ? `<span class="project-people-support">另有 ${context.collaboratorIds.length} 名任务协作</span>` : ''}</div><button type="button" class="project-people-open" data-action="project-view" data-id="people">查看分工${arrowIcon}</button>${actions}</div>`;
 }
 
 /** Read-only project membership and concrete responsibilities; actions use app delegation. */

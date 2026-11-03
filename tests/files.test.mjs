@@ -185,3 +185,55 @@ test('SQLite full backup preserves account credentials, project state and exact 
     assert.equal(restored.prepare('SELECT count(*) count FROM auth_sessions').get().count, 5);
   } finally { restored.close(); }
 });
+
+
+test('milestone file summaries include direct and current child task attachments without changing legacy files', async t => {
+  const f = await fixture(t);
+  const directBytes = Uint8Array.from([21, 0, 255, 11]);
+  const childBytes = Uint8Array.from([0, 1, 128, 254, 255]);
+  const direct = await f.upload({ entityType: 'milestone', entityId: 'm-mower-2', name: '阶段交付.docx', content: directBytes });
+  const child = await f.upload({ entityId: 't-03', name: '历史任务附件.bin', content: childBytes });
+  const otherChild = await f.upload({ entityId: 't-02', name: '另一子任务.txt' });
+  const otherMilestone = await f.upload({ entityType: 'milestone', entityId: 'm-mower-3', name: '另一阶段.txt' });
+  const otherTask = await f.upload({ entityId: 't-05', name: '其他阶段任务.txt' });
+  // Even a stale cross-project milestone reference cannot pull in another project's file.
+  f.edit(workspace => { workspace.state.tasks.find(task => task.id === 't-07').milestoneId = 'm-mower-2'; });
+  const otherProject = await f.upload({ projectId: 'p-pcb', entityId: 't-07', name: '其他项目.txt' });
+  for (const result of [direct, child, otherChild, otherMilestone, otherTask, otherProject]) assert.equal(result.status, 201, JSON.stringify(result.data));
+  const base = '/api/files?projectId=p-mower&entityType=milestone&entityId=m-mower-2';
+  const original = await f.call(base);
+  assert.deepEqual(original.data.files, [direct.data.file], 'ordinary milestone lists remain direct-only');
+  const grouped = await f.call(base + '&includeTaskFiles=true');
+  assert.equal(grouped.status, 200);
+  const expected = [direct.data.file, child.data.file, otherChild.data.file].sort((a, b) => a.id.localeCompare(b.id));
+  assert.deepEqual(grouped.data.files.toSorted((a, b) => a.id.localeCompare(b.id)), expected);
+  assert.equal(grouped.data.maxFileBytes, MAX_FILE_BYTES);
+  for (const omitted of [otherMilestone, otherTask, otherProject]) assert.equal(grouped.data.files.some(file => file.id === omitted.data.file.id), false);
+  assert.deepEqual((await f.call(`/api/files/${direct.data.file.id}/download`)).data, directBytes);
+  assert.deepEqual((await f.call(`/api/files/${child.data.file.id}/download`)).data, childBytes);
+  const taskList = await f.call('/api/files?projectId=p-mower&entityType=task&entityId=t-03');
+  assert.deepEqual(taskList.data.files, [child.data.file], 'child metadata and task-specific lists stay intact');
+  const tableBefore = f.db.sqlite.prepare('SELECT id, entity_type, entity_id, name, sha256, content FROM project_files ORDER BY id').all();
+  f.edit(workspace => { workspace.state.tasks.find(task => task.id === 't-03').milestoneId = 'm-mower-3'; });
+  const moved = await f.call(base + '&includeTaskFiles=true');
+  assert.deepEqual(moved.data.files.map(file => file.id).sort(), [direct.data.file.id, otherChild.data.file.id].sort());
+  const destination = await f.call('/api/files?projectId=p-mower&entityType=milestone&entityId=m-mower-3&includeTaskFiles=true');
+  assert.deepEqual(destination.data.files.map(file => file.id).sort(), [otherMilestone.data.file.id, otherTask.data.file.id, child.data.file.id].sort());
+  assert.deepEqual(f.db.sqlite.prepare('SELECT id, entity_type, entity_id, name, sha256, content FROM project_files ORDER BY id').all(), tableBefore, 'grouping must not rewrite existing attachment records or bytes');
+});
+
+test('milestone file summaries verify project scope and a real milestone before resolving children', async t => {
+  const f = await fixture(t);
+  const uploaded = await f.upload({ entityType: 'milestone', entityId: 'm-mower-2' });
+  assert.equal(uploaded.status, 201);
+  const invalid = await f.call('/api/files?projectId=p-mower&entityType=milestone&entityId=m-site-3&includeTaskFiles=true');
+  assert.equal(invalid.status, 404);
+  assert.equal((await f.call('/api/files?projectId=p-site&entityType=milestone&entityId=m-site-3&includeTaskFiles=true')).status, 404);
+  assert.equal((await f.call('/api/files?projectId=p-mower&includeTaskFiles=true')).status, 400);
+  assert.equal((await f.call('/api/files?projectId=p-mower&entityType=task&entityId=t-03&includeTaskFiles=true')).status, 400);
+  const query = new URLSearchParams({ projectId: 'p-mower', entityType: 'milestone', entityId: "m-mower-2' OR 1=1 --", includeTaskFiles: 'true' });
+  assert.equal((await f.call('/api/files?' + query)).status, 404);
+  f.edit(workspace => { workspace.state.tasks = workspace.state.tasks.filter(task => task.milestoneId !== 'm-mower-2'); });
+  const emptyChildren = await f.call('/api/files?projectId=p-mower&entityType=milestone&entityId=m-mower-2&includeTaskFiles=true');
+  assert.deepEqual(emptyChildren.data.files, [uploaded.data.file]);
+});

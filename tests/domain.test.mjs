@@ -87,11 +87,11 @@ test('rejection preserves deadlines and records review reason', () => {
   assert.throws(() => transact(next, 'reviewExtension', { id: 'e-pending', approve: true, comment: '再次处理' }, 'u-admin'), /已处理/);
 });
 
-test('members cannot request project changes and managers cannot approve them', () => {
+test('members cannot request project extensions and applicants cannot approve their own requests', () => {
   const state = seed();
   assert.throws(() => transact(state, 'requestExtension', requestFor(state), 'u-engineer'), /项目负责人/);
   assert.throws(() => transact(state, 'requestExtension', requestFor(state), 'u-ops'), /项目负责人/);
-  assert.throws(() => transact(state, 'reviewExtension', { id: 'e-pending', approve: true, comment: '批准' }, 'u-manager'), /后台管理员/);
+  assert.throws(() => transact(state, 'reviewExtension', { id: 'e-pending', approve: true, comment: '批准' }, 'u-manager'), /不能审批自己/);
   const request = transact(state, 'requestExtension', requestFor(state), 'u-admin');
   assert.throws(() => transact(request, 'reviewExtension', { id: request.extensions[0].id, approve: true, comment: '批准' }, 'u-admin'), /不能审批自己/);
 });

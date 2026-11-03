@@ -1,6 +1,8 @@
 // Events commit in the same workspace CAS as the business change. Read receipts
 // live separately, so opening a notification never conflicts with a task edit.
 // Old workspaces start with an empty event stream; historical logs are not replayed.
+import { canApproveRequest } from '../public/client/approval-access.js';
+
 const schemaReady = new WeakMap();
 
 async function initializeReadReceipts(db) {
@@ -49,14 +51,25 @@ export function appendNotifications(previous, next, actorId, action, payload = {
   if (action === 'createProject') {
     const project = newEntry(previous.state.projects, state.projects);
     if (project) projectNotice(project, `你参与的项目已建立：${project.name}`);
-  } else if (['createTask', 'updateTask', 'submitTask', 'reviewTask'].includes(action)) {
+  } else if (action === 'setProjectReviewer') {
+    const project = state.projects.find((entry) => entry.id === payload.id);
+    if (project) {
+      projectNotice(project, `项目验收人已更新：${project.name}`, project.id, [project.ownerId, project.reviewerId]);
+      for (const [requests, requestAction, label] of [[state.milestoneRequests || [], 'requestMilestone', '节点申请'], [state.extensions, 'requestExtension', '延期申请']]) {
+        for (const request of requests.filter((entry) => entry.projectId === project.id && canApproveRequest(project, entry, project.reviewerId))) {
+          emit([project.reviewerId], { action: requestAction, category: 'approvals', projectId: project.id, entityId: request.id,
+            title: `${label}待审批：${request.proposed?.title || project.name}`, target: '#approvals' });
+        }
+      }
+    }
+  } else if (['createTask', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask'].includes(action)) {
     const task = action === 'createTask' ? newEntry(previous.state.tasks, state.tasks) : state.tasks.find((entry) => entry.id === payload.id);
     if (!task) return next;
     const before = previous.state.tasks.find((entry) => entry.id === task.id);
     if (action === 'updateTask' && before?.status === task.status && before?.description === task.description) return next;
     const project = state.projects.find((entry) => entry.id === task.projectId);
-    const label = action === 'createTask' ? '新增任务' : action === 'submitTask' ? '任务待验收' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
-    emit([task.ownerId, task.reviewerId, project?.ownerId, ...admins], {
+    const label = action === 'createTask' ? '新增任务' : action === 'editTaskContent' ? '任务内容已更新' : action === 'submitTask' ? '任务待验收' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
+    emit(action === 'editTaskContent' ? projectAudience(task.projectId) : [task.ownerId, task.reviewerId, project?.ownerId, ...admins], {
       category: 'tasks', projectId: task.projectId, entityId: task.id,
       title: `${label}：${task.title}`, target: '#tasks',
     });
@@ -70,7 +83,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     const project = state.projects.find((entry) => entry.id === request.projectId);
     const label = milestone ? '节点申请' : '延期申请';
     const subject = milestone ? request.proposed.title : project.name;
-    emit(requesting ? admins : [request.applicantId], {
+    emit(requesting ? [project.ownerId, project.reviewerId] : [request.applicantId], {
       category: 'approvals', projectId: project.id, entityId: request.id,
       title: `${label}${requesting ? '待审批' : request.status === 'approved' ? '已批准' : '已驳回'}：${subject}`,
       target: '#approvals',
@@ -78,10 +91,10 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     if (!requesting && request.status === 'approved') {
       projectNotice(project, `${milestone ? '节点计划已更新' : '项目截止时间已调整'}：${subject}`, request.id);
     }
-  } else if (action === 'completeMilestone') {
+  } else if (action === 'completeMilestone' || action === 'editMilestoneContent') {
     const node = state.milestones.find((entry) => entry.id === payload.id);
     const project = state.projects.find((entry) => entry.id === node?.projectId);
-    if (node && project) projectNotice(project, `大节点已完成：${node.title}`, node.id);
+    if (node && project) projectNotice(project, `${action === 'editMilestoneContent' ? '大节点内容已更新' : '大节点已完成'}：${node.title}`, node.id);
   } else if (action === 'accountMemberships') {
     for (const project of state.projects) {
       const before = previous.state.projects.find((entry) => entry.id === project.id);
@@ -104,8 +117,15 @@ export function appendNotifications(previous, next, actorId, action, payload = {
 
 function visibleNotifications(workspace, account, actor) {
   if (account.status !== 'active') return [];
-  return (workspace.notifications || []).filter((entry) =>
-    entry.accountId === account.id && hasProjectAccess(workspace.state, actor, entry.projectId));
+  return (workspace.notifications || []).filter((entry) => {
+    if (entry.accountId !== account.id || !hasProjectAccess(workspace.state, actor, entry.projectId)) return false;
+    if (entry.action === 'requestMilestone' || entry.action === 'requestExtension') {
+      const project = workspace.state.projects.find((item) => item.id === entry.projectId);
+      const requests = entry.action === 'requestMilestone' ? workspace.state.milestoneRequests || [] : workspace.state.extensions;
+      return canApproveRequest(project, requests.find((item) => item.id === entry.entityId), actor.id);
+    }
+    return true;
+  });
 }
 
 export async function unreadNotifications(db, workspace, account, actor) {

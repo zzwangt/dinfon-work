@@ -17,6 +17,7 @@
   --warning-soft: #fff3e9;
   --danger: #b24f43;
   --danger-soft: #fceeea;
+  --reminder: #c82a35;
   --blue: #486e99;
   --blue-soft: #edf3fa;
   --radius: 11px;
@@ -89,6 +90,13 @@ strong { font-weight: 600; }
 .unread-slot:empty { display: none; }
 .unread-slot { display: inline-flex; vertical-align: middle; margin-inline-start: 7px; flex-shrink: 0; }
 .unread-count { display: inline-flex; align-items: center; justify-content: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 999px; background: #d72d37; color: #fff; font-size: 11px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; text-decoration: none; }
+.pending-task-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; margin-inline-start: 7px; border-radius: 999px; background: var(--reminder); color: #fff; font-size: 12px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; vertical-align: middle; flex-shrink: 0; }
+.pending-task-dot { display: inline-block; width: 8px; height: 8px; margin-inline-start: 7px; border-radius: 50%; background: var(--reminder); vertical-align: middle; flex-shrink: 0; }
+.nav-item > .pending-task-count { margin-inline-start: auto; }
+.mobile-nav .nav-item > .pending-task-count { position: absolute; top: 0; right: 14%; margin: 0; }
+.member-create-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--secondary); }
+.account-security-summary { grid-column: 1 / -1; display: flex; gap: 14px; padding: 12px 14px; border-radius: 10px; background: var(--surface-soft); }
+.super-admin-label { color: var(--accent-dark); font-weight: 650; }
 .nav-item > .unread-slot { margin-inline-start: auto; }
 .notification-trigger { position: relative; flex-shrink: 0; width: 44px; height: 44px; }
 .notification-trigger > .unread-slot { position: absolute; top: -1px; right: -3px; margin: 0; pointer-events: none; }

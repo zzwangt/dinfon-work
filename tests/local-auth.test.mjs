@@ -463,3 +463,231 @@ test('session insertion checks current workspace account status as well as crede
   assert.equal('state' in result.data, false);
   assert.equal(f.db.sqlite.prepare('SELECT count(*) AS count FROM auth_sessions').get().count, 0);
 });
+
+test('account profiles are editable independently of authorization and are returned by account lists', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  const account = await f.add(owner.cookie);
+  const employee = await f.signIn('engineer', TEMP_PASSWORD);
+  const changed = await f.call('/api/auth/password', { currentPassword: TEMP_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: employee.cookie });
+  const current = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  const before = f.stored();
+  const edited = await f.call(`/api/accounts/${account.id}`, { revision: current.data.revision, title: ' 管理员 ', department: ' 人力资源 ' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  const profile = edited.data.accounts.find((entry) => entry.id === account.id);
+  assert.equal(profile.title, '管理员');
+  assert.equal(profile.department, '人力资源');
+  assert.equal(profile.role, 'member');
+  assert.equal(profile.isSuperAdmin, false);
+  assert.deepEqual(f.stored().state.tasks, before.state.tasks);
+  assert.deepEqual(f.stored().state.projects, before.state.projects);
+  const cleared = await f.call(`/api/accounts/${account.id}`, { revision: edited.data.revision, title: '', department: '' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.data.accounts.find((entry) => entry.id === account.id).title, '');
+  assert.equal(cleared.data.accounts.find((entry) => entry.id === account.id).department, '');
+  const stable = f.stored();
+  for (const invalid of [{ title: 12 }, { title: [] }, { title: '字'.repeat(61) }, { department: false }, { department: '字'.repeat(61) }]) {
+    const result = await f.call(`/api/accounts/${account.id}`, { revision: cleared.data.revision, ...invalid }, { cookie: owner.cookie, method: 'PATCH' });
+    assert.equal(result.status, 400);
+    assert.deepEqual(f.stored(), stable);
+  }
+  assert.equal((await f.call('/api/session', null, { cookie: changed.cookie })).status, 200, 'profile-only edits must not terminate another account session');
+  const forbidden = await f.call(`/api/accounts/${account.id}`, { revision: changed.data.revision, title: '管理员', role: 'admin' }, { cookie: changed.cookie, method: 'PATCH' });
+  assert.equal(forbidden.status, 403);
+  assert.equal(changed.data.actor.role, 'member');
+});
+
+test('ordinary administrators cannot disable, demote or reset peer administrators or promote employee accounts', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  assert.equal(owner.data.account.isSuperAdmin, true);
+  assert.equal(owner.data.capabilities.manageAdministrators, true);
+  let current = owner;
+  for (const login of ['admin-one', 'admin-two']) {
+    current = await f.call('/api/accounts', { revision: current.data.revision, login, password: TEMP_PASSWORD, name: login, role: 'admin' }, { cookie: owner.cookie });
+    assert.equal(current.status, 201, JSON.stringify(current.data));
+  }
+  const employee = await f.add(owner.cookie);
+  const temporary = await f.signIn('admin-one', TEMP_PASSWORD);
+  const admin = await f.call('/api/auth/password', { currentPassword: TEMP_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: temporary.cookie });
+  assert.equal(admin.status, 200);
+  assert.equal(admin.data.account.isSuperAdmin, false);
+  assert.equal(admin.data.capabilities.manageAdministrators, false);
+  assert.equal(admin.data.capabilities.manageAccounts, true);
+  const listed = await f.call('/api/accounts', null, { cookie: admin.cookie });
+  const peer = listed.data.accounts.find((entry) => entry.login === 'admin-two');
+  const before = f.stored();
+  const credentials = f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  for (const data of [{ status: 'disabled' }, { active: false }, { role: 'member' }, { role: 'manager', status: 'disabled' }]) {
+    const denied = await f.call(`/api/accounts/${peer.id}`, { revision: listed.data.revision, ...data }, { cookie: admin.cookie, method: 'PATCH' });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.code, 'SUPER_ADMIN_REQUIRED');
+  }
+  const reset = await f.call(`/api/accounts/${peer.id}/password`, { revision: listed.data.revision, password: OWNER_PASSWORD }, { cookie: admin.cookie });
+  assert.equal(reset.status, 403);
+  assert.equal(reset.data.code, 'SUPER_ADMIN_REQUIRED');
+  const promoted = await f.call(`/api/accounts/${employee.id}`, { revision: listed.data.revision, role: 'admin' }, { cookie: admin.cookie, method: 'PATCH' });
+  assert.equal(promoted.status, 403);
+  const created = await f.call('/api/accounts', { revision: listed.data.revision, login: 'forged-admin', password: TEMP_PASSWORD, name: '禁止创建', role: 'admin' }, { cookie: admin.cookie });
+  assert.equal(created.status, 403);
+  const forged = await f.call(`/api/accounts/${admin.data.account.id}`, { revision: listed.data.revision, role: 'admin', isSuperAdmin: true }, { cookie: admin.cookie, method: 'PATCH' });
+  assert.equal(forged.status, 400);
+  assert.deepEqual(f.stored(), before);
+  assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(), credentials);
+  // Ordinary administrators retain employee management and project assignment.
+  const assigned = await f.call(`/api/accounts/${employee.id}`, { revision: listed.data.revision, projectIds: ['p-mower', 'p-pcb', 'p-site'], title: '工程师' }, { cookie: admin.cookie, method: 'PATCH' });
+  assert.equal(assigned.status, 200, JSON.stringify(assigned.data));
+  assert(assigned.data.state.projects.find((entry) => entry.id === 'p-site').memberIds.includes(employee.userId));
+});
+
+test('super administrator can reset and disable ordinary administrators while their own account stays protected', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  const created = await f.call('/api/accounts', { revision: owner.data.revision, login: 'admin-peer', password: TEMP_PASSWORD, name: '管理员', role: 'admin' }, { cookie: owner.cookie });
+  assert.equal(created.status, 201);
+  const target = created.data.accounts.find((entry) => entry.login === 'admin-peer');
+  const temporary = await f.signIn('admin-peer', TEMP_PASSWORD);
+  const peer = await f.call('/api/auth/password', { currentPassword: TEMP_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: temporary.cookie });
+  const before = f.stored();
+  for (const data of [{ status: 'disabled' }, { role: 'member' }]) {
+    const denied = await f.call(`/api/accounts/${owner.data.account.id}`, { revision: peer.data.revision, ...data }, { cookie: peer.cookie, method: 'PATCH' });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.code, 'SUPER_ADMIN_PROTECTED');
+  }
+  const deniedReset = await f.call(`/api/accounts/${owner.data.account.id}/password`, { revision: peer.data.revision, password: TEMP_PASSWORD }, { cookie: peer.cookie });
+  assert.equal(deniedReset.status, 403);
+  assert.equal(deniedReset.data.code, 'SUPER_ADMIN_PROTECTED');
+  assert.deepEqual(f.stored(), before);
+  const current = await f.call('/api/session', null, { cookie: owner.cookie });
+  const reset = await f.call(`/api/accounts/${target.id}/password`, { revision: current.data.revision, password: OWNER_PASSWORD }, { cookie: owner.cookie });
+  assert.equal(reset.status, 200, JSON.stringify(reset.data));
+  assert.equal((await f.call('/api/session', null, { cookie: peer.cookie })).status, 401);
+  const fresh = await f.signIn('admin-peer', OWNER_PASSWORD);
+  assert.equal(fresh.data.mustChangePassword, true);
+  const refreshed = await f.call('/api/session', null, { cookie: owner.cookie });
+  const disabled = await f.call(`/api/accounts/${target.id}`, { revision: refreshed.data.revision, status: 'disabled' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(disabled.status, 200);
+  assert.equal((await f.call('/api/session', null, { cookie: fresh.cookie })).status, 401);
+  const enabled = await f.call(`/api/accounts/${target.id}`, { revision: disabled.data.revision, status: 'active' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(enabled.status, 200);
+  const demoted = await f.call(`/api/accounts/${target.id}`, { revision: enabled.data.revision, role: 'member' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(demoted.status, 200);
+  for (const data of [{ status: 'disabled' }, { role: 'member' }]) {
+    const self = await f.call(`/api/accounts/${owner.data.account.id}`, { revision: demoted.data.revision, ...data }, { cookie: owner.cookie, method: 'PATCH' });
+    assert.equal(self.data.code, 'SELF_LOCKOUT');
+  }
+  const ownPassword = await f.call('/api/auth/password', { currentPassword: OWNER_PASSWORD, newPassword: NEW_PASSWORD }, { cookie: owner.cookie });
+  assert.equal(ownPassword.status, 200);
+  assert.equal(ownPassword.data.account.isSuperAdmin, true);
+  assert.equal(ownPassword.data.capabilities.manageAdministrators, true);
+});
+
+test('legacy accounts deterministically designate the oldest active administrator without resetting business records', async (t) => {
+  const f = await fixture(t);
+  const owner = await f.signIn();
+  const created = await f.call('/api/accounts', { revision: owner.data.revision, login: 'second-admin', password: TEMP_PASSWORD, name: '第二管理员', role: 'admin' }, { cookie: owner.cookie });
+  assert.equal(created.status, 201);
+  const legacy = f.stored();
+  for (const account of legacy.accounts) delete account.isSuperAdmin;
+  legacy.accounts.reverse();
+  f.db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(legacy));
+  const session = await f.call('/api/session', null, { cookie: owner.cookie });
+  assert.equal(session.data.account.isSuperAdmin, true);
+  assert.equal(session.data.capabilities.manageAdministrators, true);
+  assert.deepEqual(f.stored(), legacy, 'reading should not write or reset old data');
+  const listed = await f.call('/api/accounts', null, { cookie: owner.cookie });
+  assert.equal(listed.data.accounts.filter((account) => account.isSuperAdmin).length, 1);
+  assert.equal(listed.data.accounts.find((account) => account.isSuperAdmin).id, owner.data.account.id);
+  const saved = await f.call(`/api/accounts/${owner.data.account.id}`, { revision: listed.data.revision, title: '总管理员' }, { cookie: owner.cookie, method: 'PATCH' });
+  assert.equal(saved.status, 200);
+  assert.equal(f.stored().accounts.find((account) => account.isSuperAdmin).id, owner.data.account.id);
+  assert.deepEqual(f.stored().state.projects, legacy.state.projects);
+  assert.deepEqual(f.stored().state.tasks, legacy.state.tasks);
+  assert.deepEqual(f.stored().state.milestones, legacy.state.milestones);
+});
+
+test('explicit hosted-to-local migration makes the selected first login the sole super administrator', async (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  const identity = { userId: 'hosted-owner', email: 'owner@example.com', displayName: '原管理员' };
+  const env = { DB: db, SITE_ORIGIN: ORIGIN, FIRST_ADMIN_EMAIL: identity.email };
+  const ownerResponse = await handleApi(new Request(`${ORIGIN}/api/session`), env, identity);
+  const owner = await ownerResponse.json();
+  const hostedLegacy = JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
+  for (const account of hostedLegacy.accounts) delete account.isSuperAdmin;
+  db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(hostedLegacy));
+  const fallback = await handleApi(new Request(`${ORIGIN}/api/session`), env, identity);
+  assert.equal(fallback.status, 200, 'legacy hosted data must work before any local credential schema exists');
+  assert.equal((await fallback.json()).account.isSuperAdmin, true);
+  const createdResponse = await handleApi(new Request(`${ORIGIN}/api/accounts`, {
+    method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revision: owner.revision, email: 'new-owner@example.com', name: '迁移负责人', role: 'admin' }),
+  }), env, identity);
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  const target = created.accounts.find((account) => account.email === 'new-owner@example.com');
+  const before = JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
+  await initializeAuthSchema(db);
+  await provisionInitialCredential({ ...env, INITIAL_ADMIN_LOGIN: 'selected-owner', INITIAL_ADMIN_PASSWORD_HASH: INITIAL_HASH }, { accountId: target.id });
+  const after = JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
+  assert.deepEqual(after.accounts.filter((account) => account.isSuperAdmin).map((account) => account.id), [target.id]);
+  assert.deepEqual(after.state.projects, before.state.projects);
+  assert.deepEqual(after.state.tasks, before.state.tasks);
+  const response = await handleHttpApi(new Request(`${ORIGIN}/api/auth/login`, {
+    method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: 'selected-owner', password: OWNER_PASSWORD }),
+  }), env);
+  assert.equal(response.status, 200);
+  const session = await response.json();
+  assert.equal(session.account.isSuperAdmin, true);
+  assert.equal(session.capabilities.manageAdministrators, true);
+});
+
+test('upgrading an older migration chooses the locally credentialed administrator instead of an older hosted-only account', async (t) => {
+  const db = openDatabase(':memory:');
+  t.after(() => db.close());
+  await initializeAuthSchema(db);
+  const identity = { userId: 'hosted-first', email: 'first@example.com', displayName: '早期托管管理员' };
+  const env = { DB: db, SITE_ORIGIN: ORIGIN, FIRST_ADMIN_EMAIL: identity.email };
+  const hosted = async (path, data) => handleApi(new Request(`${ORIGIN}${path}`, {
+    method: data ? 'POST' : 'GET', headers: data ? { Origin: ORIGIN, 'Content-Type': 'application/json' } : {},
+    ...(data ? { body: JSON.stringify(data) } : {}),
+  }), env, identity);
+  const owner = await (await hosted('/api/session')).json();
+  const created = await (await hosted('/api/accounts', { revision: owner.revision, email: 'second@example.com', name: '独立登录管理员', role: 'admin' })).json();
+  const target = created.accounts.find((account) => account.email === 'second@example.com');
+  await provisionInitialCredential({ ...env, INITIAL_ADMIN_LOGIN: 'migrated-second', INITIAL_ADMIN_PASSWORD_HASH: INITIAL_HASH }, { accountId: target.id });
+  const legacy = JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
+  for (const account of legacy.accounts) {
+    delete account.isSuperAdmin;
+    account.createdAt = account.id === owner.account.id ? '2025-01-01T00:00:00.000Z' : '2026-01-01T00:00:00.000Z';
+  }
+  db.sqlite.prepare('UPDATE workspace SET payload = ?').run(JSON.stringify(legacy));
+  assert.equal(db.sqlite.prepare('SELECT account_id FROM auth_credentials WHERE account_id = ?').get(owner.account.id), undefined);
+  const response = await handleHttpApi(new Request(`${ORIGIN}/api/auth/login`, {
+    method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login: 'migrated-second', password: OWNER_PASSWORD }),
+  }), env);
+  assert.equal(response.status, 200);
+  const session = await response.json();
+  assert.equal(session.account.id, target.id);
+  assert.equal(session.account.isSuperAdmin, true);
+  assert.equal(session.capabilities.manageAdministrators, true);
+  const saved = JSON.parse(db.sqlite.prepare('SELECT payload FROM workspace').get().payload);
+  assert.deepEqual(saved.accounts.filter((account) => account.isSuperAdmin).map((account) => account.id), [target.id]);
+  assert.deepEqual(saved.state.projects, legacy.state.projects);
+  assert.deepEqual(saved.state.tasks, legacy.state.tasks);
+  const cookie = response.headers.get('Set-Cookie').split(';')[0];
+  const added = await handleHttpApi(new Request(`${ORIGIN}/api/accounts`, {
+    method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ revision: session.revision, login: 'another-admin', password: TEMP_PASSWORD, name: '新管理员', role: 'admin' }),
+  }), env);
+  assert.equal(added.status, 201, 'the migrated account must retain administrator-management permission');
+  // A subsequently added credential for the older account must not replace an
+  // already explicit designation.
+  db.sqlite.prepare('INSERT INTO auth_credentials (account_id, login, password_hash, must_change, version, updated_at) VALUES (?, ?, ?, 0, 1, ?)')
+    .run(owner.account.id, 'old-hosted-owner', INITIAL_HASH, new Date().toISOString());
+  const unchanged = await handleHttpApi(new Request(`${ORIGIN}/api/session`, { headers: { Cookie: cookie } }), env);
+  assert.equal(unchanged.status, 200);
+  assert.equal((await unchanged.json()).account.isSuperAdmin, true);
+});

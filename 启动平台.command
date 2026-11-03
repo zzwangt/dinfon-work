@@ -10,4 +10,4 @@ if [[ ! -f config/runtime.json ]]; then
   node scripts/setup-local.mjs
 fi
 echo "鼎峰协同 · 独立账号版；按 Control-C 停止。"
-exec node server/standalone.mjs
+exec node server/bootstrap.mjs

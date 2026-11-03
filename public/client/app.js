@@ -1,4 +1,6 @@
 import { renderProjectFlow, bindFlowCanvas } from './flow.js';
+import { renderNodeFiles, bindProjectFiles, resetProjectFiles, hasActiveFileOperations } from './files.js';
+import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from './maintenance.js';
 import { today, addDays, weekRange, projectProgress, progressAgainstPlan, memberStats } from './domain.js';
 import { datePart, deadlineMs, isOverdue, formatDateTime, toDateTimeInput } from './time.js';
 import { renderProgressTrack, renderProgressNote } from './progress.js';
@@ -31,16 +33,17 @@ async function api(path, options = {}) {
   return data;
 }
 function acceptSession(data) {
-  if(accountInfo?.id !== data.account?.id){acknowledgedNotifications.clear();notificationReads.clear();}
+  if(accountInfo?.id !== data.account?.id){acknowledgedNotifications.clear();notificationReads.clear();resetProjectFiles();resetMaintenance();}
   notifications=(data.notifications||[]).filter(item=>!acknowledgedNotifications.has(item.id));
   accountInfo=data.account; actorId=data.actor.id; revision=data.revision;
   if(data.mustChangePassword||data.account?.mustChangePassword){state=null;accountsData=null;notifications=[];passwordChangeScreen();return false;}
   state=data.state; state.milestoneRequests ||= []; return true;
 }
 function clearLocalSession() {
+  resetProjectFiles();resetMaintenance();
   notifications=[];notificationReads.clear();acknowledgedNotifications.clear();
   sessionEpoch++;state=null;actorId='';revision=0;accountInfo=null;accountsData=null;accountsLoading=false;
-  searchTerm='';projectFilter='active';flowProjectId='';projectView='flow';expandedFlowIds.clear();storageIssue='';
+  searchTerm='';projectFilter='active';flowProjectId='';projectView='flow';flowScope='all';expandedFlowIds.clear();storageIssue='';
   modal.close();modal.innerHTML='';clearTimeout(toastTimer);toastEl.hidden=true;
 }
 function authBrand() {return `<div class="auth-brand"><span class="auth-symbol">${icon('grid')}</span><div>鼎峰<small>协同管理平台</small></div></div>`;}
@@ -88,7 +91,7 @@ function changePassword() {
 }
 async function loadSession(silent=false) {
   const epoch=sessionEpoch;
-  try{const data=await api('/api/session');if(epoch!==sessionEpoch)return;const wasReady=!!state,changed=data.revision!==revision,previousNotices=notifications.map(n=>n.id).join(',');if(!acceptSession(data))return;storageIssue='';const noticesChanged=previousNotices!==notifications.map(n=>n.id).join(',');if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks');if(!silent||((changed||noticesChanged||renderedTiming!==timingSignature())&&!modal.open))render();}
+  try{const data=await api('/api/session');if(epoch!==sessionEpoch)return;const wasReady=!!state,changed=data.revision!==revision,previousNotices=notifications.map(n=>n.id).join(',');if(!acceptSession(data))return;storageIssue='';const noticesChanged=previousNotices!==notifications.map(n=>n.id).join(',');if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks');if(!silent||((changed||noticesChanged||renderedTiming!==timingSignature())&&!modal.open&&!maintenanceIsBusy()&&!hasActiveFileOperations()))render();}
   catch(error){if(epoch!==sessionEpoch)return;if(error.status===401)authScreen();else if(error.status===403)authScreen(error.message,true);else if(!state)authScreen(error.message);else if(!silent)toast(error.message,true);}
 }
 const user = id => state?.users.find(u => u.id === id);
@@ -263,6 +266,7 @@ function render() {
   renderContent();
 }
 function renderContent() {
+  resetMaintenance();
   const [page,id] = route();
   if(!canAccessRoute(actor(),page)){document.title='无访问权限 · 鼎峰协同管理';document.querySelector('#content').innerHTML=empty('当前账号没有此页面的访问权限','管理员与员工使用不同工作台。','<a class="button primary" href="#tasks">返回我的任务</a>');return;}
   let html;
@@ -273,8 +277,11 @@ function renderContent() {
   renderedTiming=timingSignature();
   readVisibleNotifications(page,id);
   document.querySelectorAll('[data-project-flow]').forEach(bindFlowCanvas);
+  bindProjectFiles(document, fileContext());
+  if(page==='settings'&&isAdmin())bindMaintenancePanel({root:document,onError:()=>loadSession()});
   document.title = `${searchTerm ? '搜索' : pageTitle(page)} · 鼎峰协同管理`;
 }
+function fileContext() { return {getState:()=>state,getActorId:()=>actorId,notify:toast,onUnauthorized:()=>loadSession()}; }
 function heading(title, subtitle, actions = '') { return `<div class="page-heading"><div><h1>${title}</h1><p class="page-subtitle">${subtitle}</p></div><div class="heading-actions">${actions}</div></div>`; }
 function projectRow(p) {
   const tasks = state.tasks.filter(t => t.projectId === p.id);
@@ -329,7 +336,8 @@ function milestoneDetail(id) {
   const m=milestone(id),p=m&&project(m.projectId);if(!m||!visibleProjects().some(item=>item.id===p.id))return;
   const ts=state.tasks.filter(t=>t.milestoneId===m.id),done=ts.filter(t=>t.status==='done').length;
   const actions=(canManage(p)?`${m.status!=='done'?`<button type="button" class="button secondary" data-action="new-task" data-id="${e(p.id)}" data-milestone-id="${e(m.id)}">添加小任务</button>`:''}${m.status!=='done'&&ts.length&&done===ts.length?button('确认节点达成','complete-milestone',m.id,'primary','check'):''}`:'')+(m.status!=='done'&&!visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?button('申请修改大节点','edit-milestone',m.id,'secondary'):'');
-  showModal('大节点详情',`<div class="task-detail-heading"><h3>${e(m.title)}</h3>${statusPill(m.status==='done'?'done':'doing',m.status==='done'?'已达成':'待达成')}</div><p class="muted">${e(p.name)}</p><div class="task-detail-meta"><div><span>阶段截止</span><strong>${fullDate(m.dueDate)}</strong>${m.dueDate!==m.originalDueDate?`<small>原计划 ${fullDate(m.originalDueDate)}</small>`:''}</div><div><span>已验收任务</span><strong>${done} / ${ts.length}</strong></div>${m.acceptedAt?`<div><span>节点达成时间</span><strong>${fullDate(m.acceptedAt)}</strong></div>`:''}</div>${visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?'<p class="request-pending-note">此节点已有修改申请待审批，当前计划仍然生效。<a class="text-link" href="#approvals">查看申请</a></p>':''}<h4>节点内的任务</h4><div class="task-list">${ts.map(t=>taskRow(t,false)).join('')||'<p class="form-intro">为这个阶段添加具体任务，明确执行人与验收标准。</p>'}</div><p class="field-help">所有关联任务验收通过后，项目负责人可确认并更新大节点状态。</p>`,'','',m.id,actions);
+  showModal('大节点详情',`<div class="task-detail-heading"><h3>${e(m.title)}</h3>${statusPill(m.status==='done'?'done':'doing',m.status==='done'?'已达成':'待达成')}</div><p class="muted">${e(p.name)}</p><div class="task-detail-meta"><div><span>阶段截止</span><strong>${fullDate(m.dueDate)}</strong>${m.dueDate!==m.originalDueDate?`<small>原计划 ${fullDate(m.originalDueDate)}</small>`:''}</div><div><span>已验收任务</span><strong>${done} / ${ts.length}</strong></div>${m.acceptedAt?`<div><span>节点达成时间</span><strong>${fullDate(m.acceptedAt)}</strong></div>`:''}</div>${visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?'<p class="request-pending-note">此节点已有修改申请待审批，当前计划仍然生效。<a class="text-link" href="#approvals">查看申请</a></p>':''}<h4>节点内的任务</h4><div class="task-list">${ts.map(t=>taskRow(t,false)).join('')||'<p class="form-intro">为这个阶段添加具体任务，明确执行人与验收标准。</p>'}</div><p class="field-help">所有关联任务验收通过后，项目负责人可确认并更新大节点状态。</p>${renderNodeFiles(p.id,'milestone',m.id)}`,'','',m.id,actions);
+  bindProjectFiles(modal,fileContext());
 }
 function tasksPage() {
   let tasks=visibleTasks(); const reminders=taskReminderSummary(state,actorId);
@@ -378,7 +386,7 @@ function teamPage() {
 const rate=(pct,n,d)=>`<span class="rate ${pct!==null&&pct>=80?'positive':''}">${pct===null || pct===undefined?'—':`${Math.round(pct)}%`}</span><span class="cell-subtext">${n ?? 0} / ${d ?? 0} 项</span>`;
 function settingsPage() {
   let hasLegacy=false;try{hasLegacy=!!localStorage.getItem(LEGACY_KEY);}catch{}
-  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>独立账号与密码</dd></div><div><dt>数据存储</dt><dd>服务器数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>数据备份</h2><p>导出当前可见的项目、任务、成员和审批记录。备份不包含账号登录信息。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到服务器。可先导出备份，避免覆盖服务器记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部任务验收通过，任务完成率达到 100%；全部大节点确认后，项目标记为已完成。</li><li>新增、修改大节点须提交申请，管理员批准后才生效。</li><li>延期申请与审批人分离，批准后才调整日期。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>在账号管理中设置员工账号、初始密码和参与项目。员工首次登录时设置自己的密码，之后即可使用电脑或手机处理工作。</p><p class="cell-subtext">账号、初始密码和平台网址需由管理员通过公司内部渠道告知员工。忘记密码时由管理员重置。</p></section></div>`;
+  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+renderMaintenancePanel()+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>独立账号与密码</dd></div><div><dt>数据存储</dt><dd>服务器数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>项目数据导出</h2><p>导出项目、任务、成员和审批记录，不包含账号登录信息和上传文件。完整备份请使用上方入口。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到服务器。可先导出备份，避免覆盖服务器记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部任务验收通过，任务完成率达到 100%；全部大节点确认后，项目标记为已完成。</li><li>新增、修改大节点须提交申请，管理员批准后才生效。</li><li>延期申请与审批人分离，批准后才调整日期。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>在账号管理中开通员工账号，再从项目内添加成员。员工首次登录时设置自己的密码，之后即可使用电脑或手机处理工作。</p><p class="cell-subtext">账号、初始密码和平台网址需由管理员通过公司内部渠道告知员工。忘记密码时由管理员重置。</p></section></div>`;
 }
 function myAccountPage() {
   const a=actor(),w=weekRange(currentDay()),s=memberStats(state,a.id,w.start,w.end);
@@ -550,7 +558,8 @@ function taskDetail(id) {
   readEntityNotifications('tasks',id);
   const t=visibleTasks().find(t=>t.id===id);if(!t)return;
   const actions = t.status==='review'&&canReview(t)?`${button('退回修改','reject-task',id,'secondary')}${button('验收通过','approve-task',id,'primary','check')}`:canOperate(t)&&t.status!=='done'&&t.status!=='review'?`${t.status==='todo'?button('开始任务','start-task',id,'primary','arrow'):button('提交成果','submit-task',id,'primary','check')}`:'';
-  showModal('任务详情',`<div class="task-detail-heading"><h3>${e(t.title)}</h3>${statusPill(t.status)}</div><p class="muted">${e(project(t.projectId)?.name)}${t.milestoneId?` · ${e(milestone(t.milestoneId)?.title)}`:''}</p><div class="task-detail-meta"><div><span>主负责人</span>${person(t.ownerId)}</div><div><span>验收人</span>${person(t.reviewerId)}</div><div><span>截止时间</span><strong>${fullDate(t.dueDate)}</strong>${t.dueDate!==t.originalDueDate?`<small>原定 ${fullDate(t.originalDueDate)}</small>`:''}</div></div><div class="detail-text"><h4>任务说明</h4><p>${e(t.description || '暂无补充说明')}</p><h4>交付物与验收标准</h4><p>${e(t.acceptance)}</p>${t.deliverable?`<h4>已提交成果</h4><p class="preserve-space">${e(t.deliverable)}</p><span class="cell-subtext">提交时间：${fullDate(t.submittedAt)}</span>`:''}${t.reviewComment?`<h4>验收意见</h4><p>${e(t.reviewComment)}</p>`:''}${t.reviewedAt?`<span class="cell-subtext">${t.status==='done'?'验收通过时间':'最近审核时间'}：${fullDate(t.reviewedAt)}</span>`:''}</div>`, '', '', id, actions);
+  showModal('任务详情',`<div class="task-detail-heading"><h3>${e(t.title)}</h3>${statusPill(t.status)}</div><p class="muted">${e(project(t.projectId)?.name)}${t.milestoneId?` · ${e(milestone(t.milestoneId)?.title)}`:''}</p><div class="task-detail-meta"><div><span>主负责人</span>${person(t.ownerId)}</div><div><span>验收人</span>${person(t.reviewerId)}</div><div><span>截止时间</span><strong>${fullDate(t.dueDate)}</strong>${t.dueDate!==t.originalDueDate?`<small>原定 ${fullDate(t.originalDueDate)}</small>`:''}</div></div><div class="detail-text"><h4>任务说明</h4><p>${e(t.description || '暂无补充说明')}</p><h4>交付物与验收标准</h4><p>${e(t.acceptance)}</p>${t.deliverable?`<h4>已提交成果</h4><p class="preserve-space">${e(t.deliverable)}</p><span class="cell-subtext">提交时间：${fullDate(t.submittedAt)}</span>`:''}${t.reviewComment?`<h4>验收意见</h4><p>${e(t.reviewComment)}</p>`:''}${t.reviewedAt?`<span class="cell-subtext">${t.status==='done'?'验收通过时间':'最近审核时间'}：${fullDate(t.reviewedAt)}</span>`:''}</div>${renderNodeFiles(t.projectId,'task',t.id)}`, '', '', id, actions);
+  bindProjectFiles(modal,fileContext());
   modal.querySelector('.modal-footer > button[data-action="close-modal"]').textContent='关闭';
 }
 function submitTask(id) {
@@ -600,7 +609,7 @@ document.addEventListener('click',async event=>{
     if(action==='read-all-notifications'){const epoch=sessionEpoch;await markNotificationsRead(notifications.map(item=>item.id));if(epoch===sessionEpoch&&state&&modal.open)notificationCenter();return;}
     if(action==='change-password')return changePassword();
     if(action==='reset-password')return resetPassword(id);
-    if(action==='flow-filter'){flowScope=['all','week','mine'].includes(id)?id:'all';renderContent();document.querySelector(`[data-action="flow-filter"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
+    if(action==='flow-filter'){flowScope=['all','week','mine','files'].includes(id)?id:'all';renderContent();document.querySelector(`[data-action="flow-filter"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
     if(action==='flow-toggle'){const viewport=document.querySelector('.flow-scroll'),pos=viewport&&[viewport.scrollLeft,viewport.scrollTop];expandedFlowIds.has(id)?expandedFlowIds.delete(id):expandedFlowIds.add(id);renderContent();const next=document.querySelector('.flow-scroll');if(next&&pos){next.scrollLeft=pos[0];next.scrollTop=pos[1];}document.querySelector(`[data-action="flow-toggle"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
     if(action==='new-account')return newAccount(id);
     if(action==='edit-account')return editAccount(id);

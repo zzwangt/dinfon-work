@@ -10,7 +10,9 @@ services:
       PORT: 3000
       TRUST_PROXY: "true"
     volumes:
+      - ../:/app
       - ../config:/app/config:ro
+      - ../backups:/app/backups
       - ../data:/app/data
     expose:
       - "3000"

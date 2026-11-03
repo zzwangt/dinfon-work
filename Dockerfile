@@ -8,4 +8,4 @@ COPY package.json ./package.json
 RUN mkdir -p /app/config /app/data && chown -R node:node /app
 USER node
 EXPOSE 3000
-CMD ["node", "server/standalone.mjs"]
+CMD ["node", "server/bootstrap.mjs"]

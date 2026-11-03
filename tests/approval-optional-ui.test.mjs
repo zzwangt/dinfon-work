@@ -1,3 +1,5 @@
+import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
+import { hasActiveFileOperations } from '../public/client/files.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -5,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import * as domain from '../public/client/domain.js';
 import * as times from '../public/client/time.js';
 import * as notifications from '../public/client/notifications.js';
+import { resetProjectFiles } from '../public/client/files.js';
 import { requestComparison, renderMilestoneRequestCard } from '../public/client/milestone-requests.js';
 
 const source = (await readFile(new URL('../public/client/app.js', import.meta.url), 'utf8'))
@@ -16,7 +19,7 @@ function harness(state = domain.createSeedState()) {
   const modal = { innerHTML: '', open: false, showModal() { this.open = true; }, addEventListener() {} };
   const toast = { hidden: true, classList: { toggle() {} } };
   const context = {
-    ...domain, ...times, ...notifications, requestComparison,
+    ...domain, ...times, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
     document: {
       querySelector: selector => ({ '#app': app, '#modal': modal, '#toast': toast }[selector]),
       querySelectorAll: () => [], addEventListener() {},

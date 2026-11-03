@@ -2,6 +2,7 @@ import { createSeedState, normalizeState, transact } from '../public/client/doma
 import { sanitizeStateForActor } from '../public/client/access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
 import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
+import { handleFileApi } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['admin', 'manager', 'member']);
@@ -444,7 +445,8 @@ async function localSession(db, workspace, credential) {
     // No projects, employee directory, tasks, or business history are disclosed.
     return { actor: { id: actor.id, name: actor.name, role: actor.role }, account: accountView, mustChangePassword, capabilities: {}, revision: workspace.revision };
   }
-  return { ...await session(db, workspace, identity), account: accountView, mustChangePassword: false };
+  const snapshot = await session(db, workspace, identity);
+  return { ...snapshot, capabilities: { ...snapshot.capabilities, files: true }, account: accountView, mustChangePassword: false };
 }
 
 async function localAccountList(db, workspace) {
@@ -551,6 +553,30 @@ export async function handleHttpApi(request, env) {
       return response;
     }
     if (credential.must_change) fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码，再进入工作平台');
+    if (path === '/api/maintenance' || path.startsWith('/api/maintenance/')) {
+      adminOnly(actor);
+      if (!env.MAINTENANCE) fail(503, 'MAINTENANCE_UNAVAILABLE', '当前服务尚未启用备份与升级，请使用新版启动入口');
+      return await env.MAINTENANCE.handle(request, { actor, account, authorize: async () => {
+        const currentCredential = await readSession(db, request, env);
+        if (!currentCredential) fail(401, 'AUTH_REQUIRED', '登录已失效，请重新登录');
+        if (currentCredential.must_change) fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码，再进入工作平台');
+        const currentWorkspace = await readWorkspace(db);
+        if (!currentWorkspace) fail(503, 'SETUP_REQUIRED', '平台尚未初始化，请联系管理员');
+        const current = lookupAccount(currentWorkspace, identity);
+        adminOnly(current.actor);
+        return current;
+      } });
+    }
+    if (path === '/api/files' || path.startsWith('/api/files/')) {
+      return await handleFileApi(request, { db, authorize: async () => {
+        const currentCredential = await readSession(db, request, env);
+        if (!currentCredential) fail(401, 'AUTH_REQUIRED', '登录已失效，请重新登录');
+        if (currentCredential.must_change) fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码，再进入工作平台');
+        const currentWorkspace = await readWorkspace(db);
+        if (!currentWorkspace) fail(503, 'SETUP_REQUIRED', '平台尚未初始化，请联系管理员');
+        return { workspace: currentWorkspace, credential: currentCredential, ...lookupAccount(currentWorkspace, identity) };
+      } });
+    }
     if (path === '/api/accounts' && method === 'GET') {
       adminOnly(actor);
       const snapshot = await localSession(db, workspace, credential);
@@ -642,6 +668,7 @@ export async function handleHttpApi(request, env) {
     if (!response.ok) return response;
     const result = await response.json();
     if (result.account) result.account = { ...result.account, login: credential.login, mustChangePassword: false };
+    if (result.capabilities) result.capabilities.files = true;
     return json({ ...result, mustChangePassword: false }, response.status);
   } catch (error) { return httpError(error); }
 }

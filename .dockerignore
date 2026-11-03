@@ -12,3 +12,5 @@ dist
 .sites-runtime
 *.zip
 *.tar.gz
+backups
+outputs

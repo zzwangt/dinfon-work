@@ -9,7 +9,7 @@
     "install:ci": "node scripts/install-ci.mjs",
     "dev": "node --watch server/standalone.mjs",
     "build": "node scripts/run-framework.mjs build",
-    "start": "node server/standalone.mjs",
+    "start": "node server/bootstrap.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "test": "node --test tests/*.test.mjs",

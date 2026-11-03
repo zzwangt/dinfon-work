@@ -35,6 +35,7 @@ try {
   const passwordHash = await hashPassword(password); password = ''; confirmation = '';
   await mkdir(resolve(root, 'config'), { recursive: true, mode: 0o700 });
   await mkdir(resolve(root, 'data'), { recursive: true, mode: 0o700 });
+  await mkdir(resolve(root, 'backups'), { recursive: true, mode: 0o700 });
   // Keep paths portable between the setup directory and the Docker image.
   configuration.DB_PATH = './data/dinfon.sqlite';
   configuration.INITIAL_ADMIN_PASSWORD_HASH = passwordHash;

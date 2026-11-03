@@ -12,10 +12,10 @@ import { hashPassword } from '../server/auth.mjs';
 const ORIGIN = 'http://127.0.0.1:3000';
 const PASSWORD = 'test-only-runtime-admin-pass';
 let passwordHash;
-async function fixture(t) {
+async function fixture(t, options = {}) {
   passwordHash ||= await hashPassword(PASSWORD);
   const folder = await mkdtemp(join(tmpdir(), 'dinfon-runtime-'));
-  const config = { SITE_ORIGIN: ORIGIN, DB_PATH: join(folder, 'state.sqlite'), PORT: 0, INITIAL_ADMIN_LOGIN: 'admin', INITIAL_ADMIN_PASSWORD_HASH: passwordHash };
+  const config = { SITE_ORIGIN: ORIGIN, DB_PATH: join(folder, 'state.sqlite'), BACKUP_DIR: join(folder, 'backups'), MAINTENANCE_AUTOSTART: false, PORT: 0, INITIAL_ADMIN_LOGIN: 'admin', INITIAL_ADMIN_PASSWORD_HASH: passwordHash, ...options };
   const app = await createAppServer(config);
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}`;
@@ -100,4 +100,32 @@ test('runtime never serves secrets/source files or accepts a forged Host', async
     req.on('error', reject); req.end();
   });
   assert.equal(response, 400);
+});
+
+
+test('real HTTP multipart upload above the JSON body limit preserves node attachment bytes', async t => {
+  const { fetchApp } = await fixture(t, { SEED_DEMO_DATA: true });
+  const login = await fetchApp('/api/auth/login', { method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'application/json' }, body: JSON.stringify({ login: 'admin', password: PASSWORD }) });
+  assert.equal(login.status, 200);
+  const Cookie = login.headers.get('Set-Cookie').split(';')[0];
+  const contents = Uint8Array.from({ length: 160 * 1024 }, (_, index) => index % 251);
+  const form = new FormData();
+  form.set('projectId', 'p-mower'); form.set('entityType', 'task'); form.set('entityId', 't-03');
+  form.set('file', new Blob([contents], { type: 'application/octet-stream' }), '交付数据.bin');
+  const encoded = new Request(ORIGIN + '/api/files', { method: 'POST', body: form });
+  const payload = Buffer.from(await encoded.arrayBuffer());
+  assert.ok(payload.length > 65536);
+  const uploaded = await fetchApp('/api/files', { method: 'POST', headers: { Cookie, Origin: ORIGIN, 'Content-Type': encoded.headers.get('Content-Type'), 'Content-Length': String(payload.length) }, body: payload });
+  const result = await uploaded.json();
+  assert.equal(uploaded.status, 201, JSON.stringify(result));
+  assert.equal(result.file.size, contents.length);
+  assert.equal(result.file.name, '交付数据.bin');
+  const listing = await fetchApp('/api/files?projectId=p-mower&entityType=task&entityId=t-03', { headers: { Cookie } });
+  assert.deepEqual((await listing.json()).files.map(file => file.id), [result.file.id]);
+  const downloaded = await fetchApp(`/api/files/${result.file.id}/download`, { headers: { Cookie } });
+  assert.equal(downloaded.status, 200);
+  assert.match(downloaded.headers.get('Content-Disposition'), /^attachment;/);
+  assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()), contents);
+  const oversizedJson = await fetchApp('/api/command', { method: 'POST', headers: { Cookie, Origin: ORIGIN, 'Content-Type': 'application/json' }, body: JSON.stringify({ excessive: 'x'.repeat(65536) }) });
+  assert.equal(oversizedJson.status, 413, 'larger uploads must not relax ordinary JSON request limits');
 });

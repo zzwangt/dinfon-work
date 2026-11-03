@@ -1,3 +1,5 @@
+import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
+import { hasActiveFileOperations } from '../public/client/files.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -7,6 +9,7 @@ import * as times from '../public/client/time.js';
 import { canAccessRoute, sanitizeStateForActor } from '../public/client/access.js';
 import { renderMilestoneProgress } from '../public/client/milestone-progress.js';
 import { renderProjectFlow } from '../public/client/flow.js';
+import { renderNodeFiles, bindProjectFiles, resetProjectFiles } from '../public/client/files.js';
 import * as noticeUI from '../public/client/notifications.js';
 import { renderProjectPeopleSummary } from '../public/client/project-team.js';
 import { renderProgressNote, renderProgressTrack } from '../public/client/progress.js';
@@ -37,7 +40,7 @@ function harness(fetchImpl) {
     addEventListener: (name,fn) => listeners.set(`document:${name}`,fn),
   };
   const context = {
-    ...domain, ...times, ...noticeUI, canAccessRoute, document, location,
+    ...domain, ...times, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
     window: { addEventListener:(name,fn)=>listeners.set(`window:${name}`,fn), scrollTo() {} },
     history: { replaceState(_state,_unused,url) { location.hash=url.includes('#')?url.slice(url.indexOf('#')):''; } },
     fetch: fetchImpl, FormData, Response, URL:DownloadURL, Blob, Set, console,
@@ -45,7 +48,7 @@ function harness(fetchImpl) {
     renderInstallCard:()=>'<aside>手机桌面版</aside>', initPWA() {},
     renderMilestoneProgress, renderProgressNote, renderProgressTrack,
     taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport,
-    renderProjectFlow, renderProjectPeopleSummary, bindFlowCanvas() {},
+    renderProjectFlow, renderProjectPeopleSummary, renderNodeFiles, bindProjectFiles, resetProjectFiles, bindFlowCanvas() {},
   };
   const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,newTask,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};

@@ -20,6 +20,7 @@ for (const file of ['setup-local.mjs', 'terminal-input.mjs', 'manage-admin.mjs',
 const sourcePackage = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
 const scripts = Object.fromEntries(['start', 'dev', 'setup', 'test', 'check', 'backup', 'admin:recover', 'admin:migrate'].map(key => [key, sourcePackage.scripts[key]]));
 await writeFile(resolve(destination, 'package.json'), JSON.stringify({ name: 'dinfon-independent', version: '1.0.0', private: true, type: 'module', engines: { node: '>=24' }, scripts }, null, 2) + '\n');
+await writeFile(resolve(destination, 'RELEASE.json'), JSON.stringify({ app: 'dinfon-work', format: 1, buildId: stamp, version: sourcePackage.version, createdAt: new Date().toISOString(), minimumNode: 24 }, null, 2) + '\n');
 await writeFile(resolve(destination, '.gitignore'), 'config/runtime.json\nconfig/deploy.env\ndata/\nbackups/\nnode_modules/\n');
 const hashes = [];
 async function inventory(directory) {

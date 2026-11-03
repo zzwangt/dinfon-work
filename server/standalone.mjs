@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
 import { openDatabase } from './sqlite.mjs';
 import { initializeAuthSchema } from './auth.mjs';
+import { MAX_FILE_REQUEST_BYTES } from './files.mjs';
+import { createMaintenanceManager } from './maintenance.mjs';
 import { handleHttpApi, initializeLocalWorkspace } from './service.mjs';
 
 export const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,6 +31,7 @@ export function validateConfiguration(input) {
   if (!Number.isInteger(config.PORT) || config.PORT < 0 || config.PORT > 65535) throw new Error('PORT 配置无效。');
   config.TRUST_PROXY = config.TRUST_PROXY === true || config.TRUST_PROXY === 'true';
   config.DB_PATH = config.DB_PATH === ':memory:' ? ':memory:' : resolve(PROJECT_ROOT, config.DB_PATH);
+  config.BACKUP_DIR = resolve(PROJECT_ROOT, config.BACKUP_DIR || 'backups');
   return config;
 }
 export async function loadConfiguration() {
@@ -36,21 +39,25 @@ export async function loadConfiguration() {
   let fromFile = {};
   try { fromFile = JSON.parse(await readFile(filename, 'utf8')); }
   catch (error) { if (error.code !== 'ENOENT') throw new Error('无法读取运行配置，请检查 config/runtime.json。'); }
-  const overrides = Object.fromEntries(['SITE_ORIGIN', 'HOST', 'PORT', 'DB_PATH', 'INITIAL_ADMIN_LOGIN', 'INITIAL_ADMIN_PASSWORD_HASH', 'INITIAL_ADMIN_NAME', 'TRUST_PROXY', 'SEED_DEMO_DATA'].filter(key => process.env[key] != null).map(key => [key, process.env[key]]));
+  const overrides = Object.fromEntries(['SITE_ORIGIN', 'HOST', 'PORT', 'DB_PATH', 'BACKUP_DIR', 'INITIAL_ADMIN_LOGIN', 'INITIAL_ADMIN_PASSWORD_HASH', 'INITIAL_ADMIN_NAME', 'TRUST_PROXY', 'SEED_DEMO_DATA'].filter(key => process.env[key] != null).map(key => [key, process.env[key]]));
   return validateConfiguration({ ...fromFile, ...overrides });
 }
 export async function createAppServer(input) {
   const config = validateConfiguration(input);
   const DB = openDatabase(config.DB_PATH);
   const env = { ...config, DB };
+  let maintenance;
   try {
     await initializeAuthSchema(DB);
     const initialization = await initializeLocalWorkspace(env);
     if (initialization.requiresMigration) throw new Error('检测到旧版数据库。请按 DEPLOYMENT.md 显式迁移管理员账号，现有数据未修改。');
+    maintenance = await createMaintenanceManager({ DB, config, root: PROJECT_ROOT, autoStart: config.MAINTENANCE_AUTOSTART !== false });
+    env.MAINTENANCE = maintenance;
   }
   catch (error) { DB.close(); throw error; }
   const publicPath = await realpath(PUBLIC_ROOT);
   const server = createServer(async (incoming, outgoing) => {
+    let tracked = false;
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) outgoing.setHeader(name, value);
     if (config.SITE_ORIGIN.startsWith('https:')) outgoing.setHeader('Strict-Transport-Security', 'max-age=31536000');
     const finish = (status, message) => { outgoing.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }); outgoing.end(message); };
@@ -64,8 +71,14 @@ export async function createAppServer(input) {
       const expectedHost = new URL(config.SITE_ORIGIN).host;
       if (incoming.headers.host?.toLowerCase() !== expectedHost.toLowerCase()) return finish(421, '请使用已配置的平台网址访问');
       if (url.pathname.startsWith('/api/')) {
+        if (url.pathname !== '/api/maintenance' && !url.pathname.startsWith('/api/maintenance/')) {
+          if (!maintenance.beginRequest()) return finish(503, '系统正在升级，请稍后重试');
+          tracked = true;
+        }
+        const bodyLimit = method === 'POST' && url.pathname === '/api/files' ? MAX_FILE_REQUEST_BYTES
+          : method === 'POST' && url.pathname === '/api/maintenance/upgrade/prepare' ? 50 * 1024 * 1024 + 65536 : 65536;
         const chunks = []; let bytes = 0;
-        for await (const chunk of incoming) { bytes += chunk.length; if (bytes > 65536) return finish(413, '提交内容过长'); chunks.push(chunk); }
+        for await (const chunk of incoming) { bytes += chunk.length; if (bytes > bodyLimit) return finish(413, '提交内容过长'); chunks.push(chunk); }
         const headers = new Headers();
         for (const [name, value] of Object.entries(incoming.headers)) {
           if (value != null && !/^(?:oai-|cf-|x-forwarded-|x-real-ip|forwarded)/i.test(name)) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
@@ -99,18 +112,22 @@ export async function createAppServer(input) {
       outgoing.statusCode = 200;
       outgoing.end(method === 'HEAD' ? undefined : contents);
     } catch { if (!outgoing.headersSent) finish(500, '服务暂时不可用'); else outgoing.end(); }
+    finally { if (tracked) maintenance.endRequest(); }
   });
-  server.requestTimeout = 15000;
+  server.requestTimeout = 120000;
   server.headersTimeout = 10000;
   server.keepAliveTimeout = 5000;
-  server.on('close', () => DB.close());
-  return { server, config, DB };
+  server.on('close', () => { Promise.resolve(maintenance.close()).finally(() => DB.close()); });
+  return { server, config, DB, maintenance };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const { server, config } = await createAppServer(await loadConfiguration());
     server.on('error', () => { console.error('无法启动服务，请检查端口是否被占用。'); process.exitCode = 1; });
-    server.listen(config.PORT, config.HOST, () => console.log(`鼎峰协同已启动：${config.SITE_ORIGIN}`));
+    server.listen(config.PORT, config.HOST, () => {
+      console.log(`鼎峰协同已启动：${config.SITE_ORIGIN}`);
+      process.send?.({ type: 'dinfon:ready' });
+    });
     const stop = () => { server.close(); server.closeIdleConnections(); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
   } catch (error) { console.error(error.message); process.exitCode = 1; }

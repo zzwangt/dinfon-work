@@ -197,8 +197,7 @@ export function transact(state, action, payload = {}, actorId) {
     const owner = find(next.users, payload.ownerId, '任务负责人');
     const reviewer = find(next.users, payload.reviewerId || project.ownerId, '验收人');
     check(project.memberIds.includes(owner.id), '任务负责人必须是项目组成员');
-    check(project.memberIds.includes(reviewer.id) || reviewer.role === 'admin', '验收人必须是项目成员或管理员');
-    check(owner.id !== reviewer.id, '任务负责人不能验收自己的任务');
+    check(project.memberIds.includes(reviewer.id) || reviewer.id === project.ownerId || reviewer.role === 'admin', '验收人必须是项目成员、项目负责人或管理员');
     check(typeof payload.milestoneId === 'string' && payload.milestoneId.length > 0, '请先申请并获批，再选择任务所属的里程碑');
     const milestone = find(next.milestones, payload.milestoneId, '节点');
     check(milestone.projectId === project.id, '节点不属于该项目');
@@ -239,7 +238,7 @@ export function transact(state, action, payload = {}, actorId) {
     const task = find(next.tasks, payload.id, '任务');
     requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
     check(actor.role === 'admin' || actor.id === task.reviewerId, '仅指定验收人或管理员可以验收任务');
-    check(actor.id !== task.ownerId, '不能验收自己负责的任务');
+    check(actor.id !== task.ownerId || actor.id === task.reviewerId, '未被指定为验收人时，不能验收自己负责的任务');
     check(task.status === 'review', '仅待验收任务可以进行验收');
     check(typeof payload.approve === 'boolean', '请选择通过或退回');
     const comment = payload.approve ? optionalText(payload.comment) : text(payload.comment, '退回原因');

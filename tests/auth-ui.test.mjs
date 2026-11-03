@@ -26,7 +26,7 @@ function harness(fetchImpl) {
     static revokeObjectURL(id) { objectUrls.delete(id); }
   }
   const toast = { hidden: true, textContent: '', classList: { toggle() {} } };
-  const modal = { innerHTML: '', open: false, close() { this.open=false; }, showModal() { this.open=true; }, querySelector() { return null; }, addEventListener() {} };
+  const modal = { innerHTML: '', open: false, close() { this.open=false; }, showModal() { this.open=true; }, querySelector(selector) { return selector==='.modal-footer > button[data-action="close-modal"]'?{textContent:''}:null; }, addEventListener() {} };
   const location = { hash: '#tasks', pathname: '/', search: '' }, listeners = new Map();
   const document = {
     title: '', hidden: false,
@@ -47,7 +47,7 @@ function harness(fetchImpl) {
     taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport,
     renderProjectFlow, renderProjectPeopleSummary, bindFlowCanvas() {},
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,newTask,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};
 }
 function session(overrides={}) {
@@ -66,6 +66,83 @@ function form() {
 function deferred() {let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve};}
 
 const notice=(id,category='tasks',entityId='qa-task',projectId='p-mower')=>({id,category,entityId,projectId,title:'新的任务动态',createdAt:'2026-10-26T08:00:00.000Z',target:'#tasks'});
+
+test('new tasks allow the main owner as reviewer and default to the project owner',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session(),project=data.state.projects.find(item=>item.id==='p-mower');
+  project.memberIds=project.memberIds.filter(id=>id!==project.ownerId);
+  ui.acceptSession(data);ui.newTask(project.id);
+  const ownerOptions=modal.innerHTML.match(/<select[^>]+name="ownerId"[^>]*>([\s\S]*?)<\/select>/)[1];
+  const reviewerOptions=modal.innerHTML.match(/<select[^>]+name="reviewerId"[^>]*>([\s\S]*?)<\/select>/)[1];
+  const selectedOwner=ownerOptions.match(/<option value="([^"]+)" selected/)[1];
+  assert.match(reviewerOptions,new RegExp(`<option value="${selectedOwner}"`));
+  assert.match(reviewerOptions,new RegExp(`<option value="${project.ownerId}" selected`));
+  for(const id of [...project.memberIds,'u-admin'])assert.match(reviewerOptions,new RegExp(`<option value="${id}"`));
+  assert.doesNotMatch(reviewerOptions,/<option value="u-ops"/);
+});
+
+test('changing the task owner preserves the selected reviewer, including the same person',()=>{
+  const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
+  ui.acceptSession(session());
+  const taskForm={dataset:{form:'createTask'},elements:{projectId:{value:'p-mower'},ownerId:{value:'u-manager'},reviewerId:{value:'u-engineer',innerHTML:'existing reviewer options'}}};
+  for(const ownerId of ['u-engineer','u-manager']){
+    taskForm.elements.ownerId.value=ownerId;
+    listeners.get('document:change')({target:{name:'ownerId',value:ownerId,dataset:{},hasAttribute:()=>false,closest:()=>taskForm}});
+    assert.equal(taskForm.elements.reviewerId.value,'u-engineer');
+    assert.equal(taskForm.elements.reviewerId.innerHTML,'existing reviewer options');
+  }
+});
+
+test('switching task projects rebuilds reviewer choices and selects the new project owner',()=>{
+  const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session(),project=data.state.projects.find(item=>item.id==='p-delivery');
+  project.memberIds=project.memberIds.filter(id=>id!==project.ownerId);
+  ui.acceptSession(data);
+  const taskForm={dataset:{form:'createTask'},elements:{projectId:{value:project.id},milestoneId:{innerHTML:''},ownerId:{value:'u-engineer',innerHTML:''},reviewerId:{value:'u-engineer',innerHTML:''},dueDate:{value:''}}};
+  listeners.get('document:change')({target:{name:'projectId',value:project.id,dataset:{},hasAttribute:()=>false,closest:()=>taskForm}});
+  assert.match(taskForm.elements.reviewerId.innerHTML,new RegExp(`<option value="${project.ownerId}" selected`));
+  for(const id of [...project.memberIds,'u-admin'])assert.match(taskForm.elements.reviewerId.innerHTML,new RegExp(`<option value="${id}"`));
+  assert.doesNotMatch(taskForm.elements.reviewerId.innerHTML,/<option value="u-engineer"/);
+  assert.match(taskForm.elements.ownerId.innerHTML,new RegExp(`<option value="${project.ownerId}"`));
+});
+
+test('a submitted task shows acceptance and return actions to its explicitly assigned owner-reviewer',()=>{
+  for(const actorId of ['u-engineer','u-admin']){
+    const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+    const data=session();data.actor=data.state.users.find(user=>user.id===actorId);
+    data.account={...data.account,id:`account-${actorId}`,role:data.actor.role};
+    const target=data.state.tasks[0];Object.assign(target,{ownerId:actorId,reviewerId:actorId,status:'review'});
+    ui.acceptSession(data);ui.taskDetail(target.id);
+    assert.match(modal.innerHTML,/data-action="approve-task"/);
+    assert.match(modal.innerHTML,/data-action="reject-task"/);
+    assert.match(ui.taskRow(target),/>验收<\/button>/);
+  }
+});
+
+test('task owners assigned another reviewer cannot self-review, even as administrators',()=>{
+  for(const actorId of ['u-engineer','u-admin']){
+    const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+    const data=session();data.actor=data.state.users.find(user=>user.id===actorId);
+    data.account={...data.account,id:`account-${actorId}`,role:data.actor.role};
+    const target=data.state.tasks[0];Object.assign(target,{ownerId:actorId,reviewerId:'u-manager',status:'review'});
+    ui.acceptSession(data);ui.taskDetail(target.id);
+    assert.doesNotMatch(modal.innerHTML,/data-action="(?:approve-task|reject-task)"/);
+    assert.doesNotMatch(ui.taskRow(target),/>验收<\/button>/);
+  }
+});
+
+test('self-review still requires submission and disappears once the task is accepted',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session();data.actor=data.state.users.find(user=>user.id==='u-engineer');
+  const target=data.state.tasks[0];Object.assign(target,{ownerId:data.actor.id,reviewerId:data.actor.id});
+  ui.acceptSession(data);
+  for(const status of ['todo','doing','done']){
+    target.status=status;ui.taskDetail(target.id);
+    assert.doesNotMatch(modal.innerHTML,/data-action="(?:approve-task|reject-task)"/);
+    if(status==='todo')assert.match(modal.innerHTML,/data-action="start-task"/);
+    if(status==='doing')assert.match(modal.innerHTML,/data-action="submit-task"/);
+  }
+});
 
 test('task navigation shows persistent work counts while messages retain their unread badges',()=>{
   const {ui,app,modal}=harness(async()=>{throw new Error('Unexpected request');});

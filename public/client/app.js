@@ -106,7 +106,7 @@ const visibleMilestones = () => state.milestones.filter(m => visibleProjects().s
 const visibleExtensions = () => state.extensions.filter(x => visibleProjects().some(p => p.id === x.projectId));
 const visibleNodeRequests = () => (state.milestoneRequests||[]).filter(x => visibleProjects().some(p => p.id === x.projectId));
 const overdue = t => t.status !== 'done' && isOverdue(t.dueDate);
-const canReview = t => t.ownerId !== actorId && (isAdmin() || t.reviewerId === actorId);
+const canReview = t => (isAdmin() || t.reviewerId === actorId) && (t.ownerId !== actorId || t.reviewerId === actorId);
 const canOperate = t => t.ownerId === actorId || isAdmin() || project(t.projectId)?.ownerId === actorId;
 function range() {
   const d = shift(currentDay(), weekOffset * 7);
@@ -532,7 +532,7 @@ function newTask(projectId, selectedMilestoneId) {
   const ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done');
   if(!ms.length){showModal('先规划项目里程碑',`<p class="form-intro">${e(p.name)}</p><p>任务需要关联一个尚未完成的里程碑，确保所有交付都计入项目计划。请先申请新增大节点，待管理员批准后再创建任务。</p>`,'','',p.id,button('申请新增大节点','new-milestone',p.id,'primary','plus'));return;}
   const members=state.users.filter(u=>p.memberIds.includes(u.id)||u.id===p.ownerId), owner=members[0]?.id||actorId;
-  showModal('新建任务',`<p class="form-intro">任务需要明确交付标准，由负责人提交、验收人确认。</p><div class="form-grid">${selectField('所属项目','projectId',projectOptions(p.id))}${selectField('所属里程碑','milestoneId',ms.map(m=>`<option value="${e(m.id)}">${e(m.title)}</option>`).join(''))}<div class="field full">${field('任务名称','title','','text','required maxlength="100" placeholder="例如：完成外观设计 V1"')}</div>${selectField('主负责人','ownerId',userOptions(owner,members))}${selectField('验收人','reviewerId',userOptions(p.ownerId===owner?state.users.find(u=>u.role==='admin'&&u.id!==owner)?.id:p.ownerId,state.users.filter(u=>u.id!==owner&&(p.memberIds.includes(u.id)||u.role==='admin'))))}${scheduleField('交付截止时间','dueDate',scheduleInput(ms[0].dueDate),`required min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(ms[0].dueDate))}"`)}${selectField('优先级','priority','<option value="normal">普通</option><option value="high">高</option><option value="low">低</option>')}${textarea('任务说明','description','说明工作范围和注意事项。',false)}${textarea('交付物与验收标准','acceptance','例如：提交三视图、尺寸及材料说明，负责人确认后通过。')}</div>${scheduleHelp}`,'创建任务','createTask');
+  showModal('新建任务',`<p class="form-intro">任务需要明确交付标准，由负责人提交、验收人确认。</p><div class="form-grid">${selectField('所属项目','projectId',projectOptions(p.id))}${selectField('所属里程碑','milestoneId',ms.map(m=>`<option value="${e(m.id)}">${e(m.title)}</option>`).join(''))}<div class="field full">${field('任务名称','title','','text','required maxlength="100" placeholder="例如：完成外观设计 V1"')}</div>${selectField('主负责人','ownerId',userOptions(owner,members))}${selectField('验收人','reviewerId',userOptions(p.ownerId,state.users.filter(u=>p.memberIds.includes(u.id)||u.id===p.ownerId||u.role==='admin')))}${scheduleField('交付截止时间','dueDate',scheduleInput(ms[0].dueDate),`required min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(ms[0].dueDate))}"`)}${selectField('优先级','priority','<option value="normal">普通</option><option value="high">高</option><option value="low">低</option>')}${textarea('任务说明','description','说明工作范围和注意事项。',false)}${textarea('交付物与验收标准','acceptance','例如：提交三视图、尺寸及材料说明，负责人确认后通过。')}</div>${scheduleHelp}`,'创建任务','createTask');
 }
 function newMilestone(projectId, milestoneId) {
   const p=visibleProjects().find(p=>p.id===projectId),m=milestoneId&&milestone(milestoneId);if(!p)return;
@@ -672,10 +672,9 @@ document.addEventListener('change',event=>{
     if(!ms.length){newTask(p.id);return;}
     form.elements.milestoneId.innerHTML=ms.map(m=>`<option value="${e(m.id)}">${e(m.title)}</option>`).join('');
     form.elements.ownerId.innerHTML=userOptions('',state.users.filter(u=>p.memberIds.includes(u.id)||u.id===p.ownerId));
-    form.elements.reviewerId.innerHTML=userOptions(p.ownerId,state.users.filter(u=>u.id!==form.elements.ownerId.value&&(p.memberIds.includes(u.id)||u.role==='admin')));
+    form.elements.reviewerId.innerHTML=userOptions(p.ownerId,state.users.filter(u=>p.memberIds.includes(u.id)||u.id===p.ownerId||u.role==='admin'));
     taskScheduleBounds(form,p,ms[0]);return;
   }
-  if(form.dataset.form==='createTask'&&el.name==='ownerId'){form.elements.reviewerId.innerHTML=userOptions(project(form.elements.projectId.value)?.ownerId,state.users.filter(u=>u.id!==el.value&&(project(form.elements.projectId.value)?.memberIds.includes(u.id)||u.role==='admin')));return;}
   if(form.dataset.form==='createTask'&&el.name==='milestoneId'){const p=project(form.elements.projectId.value),m=milestone(el.value);if(m)taskScheduleBounds(form,p,m);}
 });
 document.addEventListener('input',event=>{if(event.target.id==='global-search'){searchTerm=event.target.value;renderContent();}});

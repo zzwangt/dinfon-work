@@ -88,16 +88,40 @@ test('project owner access does not require duplicate membership, but review ass
   assert.equal(summary.count, 1);
 });
 
-test('administrators see all project pending counts and all eligible reviews, excluding self-review', () => {
+test('administrators see eligible reviews including explicitly assigned self-review, but not their work assigned to another reviewer', () => {
   const state = fixture();
   state.tasks.push({ id: 'admin-task', projectId: 'outside', ownerId: 'admin', reviewerId: 'admin', status: 'review' });
+  state.tasks.push({ id: 'admin-peer-review', projectId: 'outside', ownerId: 'admin', reviewerId: 'outsider', status: 'review' });
   const summary = taskReminderSummary(state, 'admin');
-  assert.deepEqual(summary.projectCounts, { shared: 5, outside: 2, empty: 0 });
-  assert.deepEqual(summary.ownedTaskIds, ['admin-task']);
-  assert.deepEqual(summary.reviewTaskIds, ['submitted', 'peer-review', 'external']);
-  assert.equal(summary.count, 4);
-  assert.equal(summary.reviewTaskIds.includes('admin-task'), false);
+  assert.deepEqual(summary.projectCounts, { shared: 5, outside: 3, empty: 0 });
+  assert.deepEqual(summary.ownedTaskIds, ['admin-task', 'admin-peer-review']);
+  assert.deepEqual(summary.reviewTaskIds, ['submitted', 'peer-review', 'external', 'admin-task']);
+  assert.equal(summary.count, 5);
+  assert.equal(summary.reviewTaskIds.includes('admin-peer-review'), false);
   assert.equal(summary.pendingTaskIds.includes('orphan'), false);
+});
+
+test('one self-reviewed task remains one reminder through submission and clears after acceptance', () => {
+  const state = fixture();
+  const task = { id: 'self-task', projectId: 'shared', ownerId: 'worker', reviewerId: 'worker', status: 'todo' };
+  state.tasks = [task];
+  for (const status of ['todo', 'doing', 'review', 'doing', 'review']) {
+    task.status = status;
+    const summary = taskReminderSummary(state, 'worker');
+    assert.equal(summary.count, 1, status);
+    assert.equal(summary.ownedCount, 1, status);
+    assert.equal(summary.reviewCount, status === 'review' ? 1 : 0, status);
+    assert.deepEqual(summary.taskIds, ['self-task']);
+    assert.deepEqual(summary.reviewTaskIds, status === 'review' ? ['self-task'] : []);
+    assert.equal(summary.projectCounts.shared, 1);
+  }
+  task.status = 'done';
+  const accepted = taskReminderSummary(state, 'worker');
+  assert.equal(accepted.count, 0);
+  assert.equal(accepted.ownedCount, 0);
+  assert.equal(accepted.reviewCount, 0);
+  assert.equal(accepted.projectCounts.shared, 0);
+  assert.deepEqual(accepted.taskIds, []);
 });
 
 test('missing and invalid accounts receive no reminders or project identifiers', () => {

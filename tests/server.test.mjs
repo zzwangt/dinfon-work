@@ -614,6 +614,55 @@ test('submission timestamps always come from the server clock despite client-pro
   assert.ok(Date.parse(task.submittedAt) <= Date.now());
 });
 
+test('API supports an assigned owner-reviewer through delivery and acceptance while preserving scope and state checks', async (t) => {
+  const f = fixture(t);
+  await provision(f, ENGINEER, 'u-engineer');
+  await provision(f, MANAGER, 'u-manager', 'manager');
+  const command = (identity, action, payload) => f.call('/api/command', identity, { revision: f.stored().revision, action, payload });
+  const node = f.stored().state.milestones.find((item) => item.id === 'm-mower-2');
+  const created = await command(ADMIN, 'createTask', {
+    projectId: node.projectId, milestoneId: node.id, title: '本人交付并验收', ownerId: 'u-engineer',
+    reviewerId: 'u-engineer', dueDate: node.dueDate, acceptance: '提交可复核的测试报告',
+  });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  const taskId = created.data.state.tasks.at(-1).id;
+  const task = () => f.stored().state.tasks.find((item) => item.id === taskId);
+  const premature = await command(ENGINEER, 'reviewTask', { id: taskId, approve: true });
+  assert.equal(premature.status, 400);
+  assert.match(premature.data.error, /仅待验收任务/);
+  assert.equal(task().status, 'todo');
+  const started = await command(ENGINEER, 'updateTask', { id: taskId, status: 'doing' });
+  assert.equal(started.status, 200, JSON.stringify(started.data));
+  assert.equal(task().status, 'doing');
+  const submitted = await command(ENGINEER, 'submitTask', { id: taskId, deliverable: '测试报告 V1' });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.data));
+  assert.equal(task().status, 'review');
+  assert.ok(!submitted.data.state.projects.some((project) => project.id === 'p-site'));
+  const beforeDenied = f.stored();
+  const wrongReviewer = await command(MANAGER, 'reviewTask', { id: taskId, approve: true });
+  assert.equal(wrongReviewer.status, 400);
+  assert.match(wrongReviewer.data.error, /指定验收人/);
+  const outsideScope = await command(ENGINEER, 'reviewTask', { id: 't-13', approve: true });
+  assert.equal(outsideScope.status, 404);
+  const blankReturn = await command(ENGINEER, 'reviewTask', { id: taskId, approve: false });
+  assert.equal(blankReturn.status, 400);
+  assert.match(blankReturn.data.error, /退回原因/);
+  assert.deepEqual(f.stored(), beforeDenied);
+  const returned = await command(ENGINEER, 'reviewTask', { id: taskId, approve: false, comment: '补齐复测数据' });
+  assert.equal(returned.status, 200, JSON.stringify(returned.data));
+  assert.equal(task().status, 'doing');
+  const resubmitted = await command(ENGINEER, 'submitTask', { id: taskId, deliverable: '测试报告 V2，附复测数据' });
+  assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.data));
+  const approved = await command(ENGINEER, 'reviewTask', { id: taskId, approve: true });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(task().status, 'done');
+  assert.equal(task().ownerId, task().reviewerId);
+  assert.equal(task().reviewCount, 2);
+  assert.equal(task().firstReviewPassed, false);
+  assert.ok(task().submittedAt && task().reviewedAt);
+  assert.equal(approved.data.actor.role, 'member');
+});
+
 test('API persists blank reasons and opinions for node creation/update approval and rejection', async (t) => {
   for (const kind of ['create', 'update']) for (const approve of [true, false]) {
     const f = fixture(t);

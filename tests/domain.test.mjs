@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addDays, createSeedState, memberStats, normalizeState, projectProgress, today, transact, weekRange,
+  addDays, createSeedState, memberStats, normalizeState, progressAgainstPlan, projectProgress, today, transact, weekRange,
 } from '../public/client/domain.js';
 
 const byId = (list, id) => list.find((item) => item.id === id);
@@ -240,7 +240,7 @@ test('submission and review preserve first-review result across rejection and re
   assert.throws(() => transact(state, 'updateTask', { id: 't-07', status: 'doing' }, 'u-admin'), /已验收任务/);
 });
 
-test('even an administrator cannot review their own task', () => {
+test('an administrator who owns a task cannot override its different assigned reviewer', () => {
   const state = seed();
   byId(state.tasks, 't-04').ownerId = 'u-admin';
   assert.throws(() => transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-admin'), /不能验收自己/);
@@ -310,19 +310,92 @@ test('create-project validates date ordering, owner role and member permissions'
   assert.throws(() => transact(state, 'createProject', { ...input, dueDate: addDays(today(), -1) }, 'u-admin'), /不能早于开始/);
 });
 
-test('create-task enforces membership, reviewer separation, acceptance and schedule', () => {
+test('create-task enforces membership, assigned reviewer, acceptance and schedule', () => {
   const state = seed();
   const input = { projectId: 'p-mower', milestoneId: 'm-mower-2', title: '新测试项', ownerId: 'u-qa', reviewerId: 'u-manager', dueDate: today(), acceptance: '提供完整测试记录' };
   const next = transact(state, 'createTask', input, 'u-manager');
   assert.equal(next.tasks.at(-1).status, 'todo');
   assert.equal(Object.hasOwn(next.tasks.at(-1), 'blocker'), false);
-  assert.throws(() => transact(state, 'createTask', { ...input, reviewerId: 'u-qa' }, 'u-manager'), /不能验收自己/);
+  assert.throws(() => transact(state, 'createTask', { ...input, reviewerId: 'u-ops' }, 'u-manager'), /验收人必须是项目成员/);
   assert.throws(() => transact(state, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-manager'), /必须是项目组成员/);
   assert.throws(() => transact(state, 'createTask', { ...input, acceptance: '' }, 'u-manager'), /验收标准/);
   assert.throws(() => transact(state, 'createTask', { ...input, milestoneId: '' }, 'u-manager'), /选择任务所属的里程碑/);
   assert.throws(() => transact(state, 'createTask', { ...input, milestoneId: undefined }, 'u-manager'), /选择任务所属的里程碑/);
   assert.throws(() => transact(state, 'createTask', { ...input, dueDate: addDays(today(), 4) }, 'u-manager'), /不能晚于所属节点/);
   assert.throws(() => transact(state, 'createTask', { ...input, milestoneId: 'm-mower-1' }, 'u-manager'), /已验收节点/);
+});
+
+test('an explicitly assigned owner-reviewer can start, submit and accept a task without bypassing delivery', () => {
+  for (const userId of ['u-qa', 'u-admin']) {
+    let state = seed();
+    const project = byId(state.projects, 'p-mower');
+    if (!project.memberIds.includes(userId)) project.memberIds.push(userId);
+    state = transact(state, 'createTask', {
+      projectId: project.id, milestoneId: 'm-mower-2', title: '本人负责与验收',
+      ownerId: userId, reviewerId: userId, dueDate: today(), acceptance: '提供完整测试记录',
+    }, 'u-admin');
+    const taskId = state.tasks.at(-1).id;
+    const progress = (current) => progressAgainstPlan(current.tasks.filter((task) => task.projectId === project.id)).actual;
+    const beforeProgress = progress(state);
+    const review = { id: taskId, approve: true };
+    assert.throws(() => transact(state, 'reviewTask', review, userId), /仅待验收任务/);
+    assert.throws(() => transact(state, 'updateTask', { id: taskId, status: 'done' }, userId), /必须提交成果并通过验收/);
+    state = transact(state, 'updateTask', { id: taskId, status: 'doing' }, userId);
+    assert.equal(progress(state), beforeProgress);
+    assert.throws(() => transact(state, 'reviewTask', review, userId), /仅待验收任务/);
+    state = transact(state, 'submitTask', { id: taskId, deliverable: '测试报告 V1' }, userId);
+    assert.equal(byId(state.tasks, taskId).status, 'review');
+    assert.equal(progress(state), beforeProgress);
+    assert.throws(() => transact(state, 'reviewTask', review, 'u-engineer'), /指定验收人/);
+    state = transact(state, 'reviewTask', review, userId);
+    const task = byId(state.tasks, taskId);
+    assert.equal(task.status, 'done');
+    assert.equal(task.ownerId, task.reviewerId);
+    assert.equal(task.firstReviewPassed, true);
+    assert.equal(task.reviewCount, 1);
+    assert.ok(task.submittedAt && task.reviewedAt);
+    assert.ok(progress(state) > beforeProgress);
+    assert.notEqual(byId(state.milestones, 'm-mower-2').status, 'done');
+    assert.throws(() => transact(state, 'reviewTask', review, userId), /仅待验收任务/);
+  }
+});
+
+test('an assigned owner-reviewer must give a return reason and resubmit before accepting', () => {
+  let state = seed();
+  byId(state.tasks, 't-03').reviewerId = 'u-engineer';
+  state = transact(state, 'submitTask', { id: 't-03', deliverable: '初次检查记录' }, 'u-engineer');
+  const before = structuredClone(state);
+  assert.throws(() => transact(state, 'reviewTask', { id: 't-03', approve: false, comment: '  ' }, 'u-engineer'), /退回原因/);
+  assert.deepEqual(state, before);
+  state = transact(state, 'reviewTask', { id: 't-03', approve: false, comment: '补充复测记录' }, 'u-engineer');
+  assert.equal(byId(state.tasks, 't-03').status, 'doing');
+  assert.throws(() => transact(state, 'reviewTask', { id: 't-03', approve: true }, 'u-engineer'), /仅待验收任务/);
+  state = transact(state, 'submitTask', { id: 't-03', deliverable: '复测记录已补齐' }, 'u-engineer');
+  state = transact(state, 'reviewTask', { id: 't-03', approve: true }, 'u-engineer');
+  const task = byId(state.tasks, 't-03');
+  assert.equal(task.status, 'done');
+  assert.equal(task.reviewCount, 2);
+  assert.equal(task.firstReviewPassed, false);
+});
+
+test('self-review still requires current project access', () => {
+  const state = seed();
+  const task = byId(state.tasks, 't-04');
+  task.reviewerId = task.ownerId;
+  const project = byId(state.projects, task.projectId);
+  project.memberIds = project.memberIds.filter((id) => id !== task.ownerId);
+  assert.throws(() => transact(state, 'reviewTask', { id: task.id, approve: true }, task.ownerId), /无权访问该项目/);
+});
+
+test('new tasks may assign the project owner as reviewer when legacy membership omits them', () => {
+  const state = seed();
+  const project = byId(state.projects, 'p-mower');
+  project.memberIds = project.memberIds.filter((id) => id !== project.ownerId);
+  const next = transact(state, 'createTask', {
+    projectId: project.id, milestoneId: 'm-mower-2', title: '负责人验收', ownerId: 'u-qa',
+    reviewerId: project.ownerId, dueDate: today(), acceptance: '提供完整测试记录',
+  }, project.ownerId);
+  assert.equal(next.tasks.at(-1).reviewerId, project.ownerId);
 });
 
 test('only administrators can add valid team members', () => {

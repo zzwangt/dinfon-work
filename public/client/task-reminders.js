@@ -10,8 +10,9 @@ export function taskReminderSummary(state, actorId) {
   const projectIds = new Set(visibleProjects.map(project => project.id));
   const pending = (state?.tasks || []).filter(task => projectIds.has(task.projectId) && task.status !== 'done');
   const owned = pending.filter(task => task.ownerId === actorId);
-  const review = pending.filter(task => task.status === 'review' && task.ownerId !== actorId &&
-    (actor.role === 'admin' || task.reviewerId === actorId));
+  const review = pending.filter(task => task.status === 'review' &&
+    (actor.role === 'admin' || task.reviewerId === actorId) &&
+    (task.ownerId !== actorId || task.reviewerId === actorId));
   const ownedTaskIds = owned.map(task => task.id);
   const reviewTaskIds = review.map(task => task.id);
   const taskIds = [...new Set([...ownedTaskIds, ...reviewTaskIds])];

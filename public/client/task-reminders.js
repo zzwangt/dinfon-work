@@ -29,3 +29,25 @@ export function taskReminderSummary(state, actorId) {
     projectCounts,
   };
 }
+
+/** Pending applications remain reminders until approved or rejected. */
+export function approvalReminderSummary(state, actorId) {
+  const actor = state?.users?.find(user => user.id === actorId);
+  const validActor = actorId && ['admin', 'manager', 'member'].includes(actor?.role);
+  const visibleProjects = validActor ? (state.projects || []).filter(project =>
+    actor.role === 'admin' || project.ownerId === actorId || project.memberIds?.includes(actorId)) : [];
+  const projectIds = new Set(visibleProjects.map(project => project.id));
+  // Match the approval page and the shared access policy: employees can see
+  // applications in their current projects, including their own submissions.
+  const pendingIds = items => (items || []).filter(item =>
+    projectIds.has(item.projectId) && item.status === 'pending').map(item => item.id);
+  const nodeIds = pendingIds(state?.milestoneRequests);
+  const extensionIds = pendingIds(state?.extensions);
+  return {
+    count: nodeIds.length + extensionIds.length,
+    nodeCount: nodeIds.length,
+    extensionCount: extensionIds.length,
+    nodeIds,
+    extensionIds,
+  };
+}

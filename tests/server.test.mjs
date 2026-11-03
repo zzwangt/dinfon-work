@@ -214,29 +214,31 @@ test('current admin cannot disable or demote their own account', async (t) => {
   assert.equal(f.stored().state.users.find((u) => u.id === 'u-admin').role, 'admin');
 });
 
-test('hosted account adapter enforces super administrator protection and ordinary administrator boundaries', async (t) => {
-  const f = fixture(t);
-  const ordinary = await provision(f, ENGINEER, 'u-engineer', 'admin');
-  assert.equal(ordinary.data.account.isSuperAdmin, false);
-  await provision(f, MANAGER, 'u-manager', 'admin');
-  const listed = await f.call('/api/accounts', ENGINEER);
-  const peer = listed.data.accounts.find((account) => account.userId === 'u-manager');
-  const owner = listed.data.accounts.find((account) => account.isSuperAdmin);
-  assert.equal(owner.userId, 'u-admin');
-  const before = f.stored();
-  for (const change of [{ role: 'member' }, { status: 'disabled' }]) {
-    const denied = await f.call(`/api/accounts/${peer.id}`, ENGINEER, { revision: listed.data.revision, ...change }, 'PATCH');
-    assert.equal(denied.status, 403);
-    assert.equal(denied.data.code, 'SUPER_ADMIN_REQUIRED');
-    const protectedOwner = await f.call(`/api/accounts/${owner.id}`, ENGINEER, { revision: listed.data.revision, ...change }, 'PATCH');
-    assert.equal(protectedOwner.data.code, 'SUPER_ADMIN_PROTECTED');
-  }
-  const forbidden = await f.call('/api/accounts', ENGINEER, { revision: listed.data.revision, email: 'new-admin@example.com', name: '不允许', role: 'admin' });
-  assert.equal(forbidden.status, 403);
-  assert.deepEqual(f.stored(), before);
-  const changed = await f.call(`/api/accounts/${peer.id}`, ADMIN, { revision: listed.data.revision, role: 'member' }, 'PATCH');
-  assert.equal(changed.status, 200);
-  assert.equal(changed.data.accounts.find((account) => account.id === peer.id).role, 'member');
+test('hosted administrators can manage and delete peer accounts while preserving business history', async (t) => {
+  const f=fixture(t);
+  await provision(f,ENGINEER,'u-engineer','admin');
+  await provision(f,MANAGER,'u-manager','admin');
+  let listed=await f.call('/api/accounts',ENGINEER);
+  assert.ok(listed.data.accounts.every(a=>!('isSuperAdmin' in a)));
+  const peer=listed.data.accounts.find(a=>a.userId==='u-manager');
+  const owner=listed.data.accounts.find(a=>a.userId==='u-admin');
+  const disabled=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:listed.data.revision,status:'disabled'},'PATCH');
+  assert.equal(disabled.status,200);
+  const promoted=await f.call('/api/accounts',ENGINEER,{revision:disabled.data.revision,email:'another-admin@example.com',name:'新管理员',role:'admin'});
+  assert.equal(promoted.status,201);
+  const before=f.stored();
+  const removed=await f.call(`/api/accounts/${owner.id}`,ENGINEER,{revision:promoted.data.revision},'DELETE');
+  assert.equal(removed.status,200,JSON.stringify(removed.data));
+  assert.equal(removed.data.accounts.some(a=>a.id===owner.id),false);
+  assert.equal((await f.call('/api/session',ADMIN)).status,403);
+  for(const key of ['users','projects','tasks','milestones','extensions','milestoneRequests'])assert.deepEqual(f.stored().state[key],before.state[key]);
+  const currentId=removed.data.account.id;
+  const self=await f.call(`/api/accounts/${currentId}`,ENGINEER,{revision:removed.data.revision},'DELETE');
+  assert.equal(self.data.code,'SELF_LOCKOUT');
+  const stale=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:promoted.data.revision},'DELETE');
+  assert.equal(stale.status,409);
+  const crossOrigin=await f.call(`/api/accounts/${peer.id}`,ENGINEER,{revision:removed.data.revision},'DELETE',{Origin:'https://attacker.example'});
+  assert.equal(crossOrigin.status,403);
 });
 
 test('staff cannot provision accounts; duplicate email and duplicate business-user bindings are rejected', async (t) => {

@@ -9,7 +9,7 @@ import { renderMilestoneRequestCard, requestComparison } from './milestone-reque
 import { renderProjectTeam, renderProjectPeopleSummary } from './project-team.js';
 import { renderInstallCard, initPWA } from './pwa.js';
 import { notificationCount, unreadBadge, renderNotificationList } from './notifications.js';
-import { taskReminderSummary } from './task-reminders.js';
+import { taskReminderSummary, approvalReminderSummary } from './task-reminders.js';
 import { buildWeeklyReport, createWeeklyExport } from './weekly-export.js';
 
 const LEGACY_KEY = 'dinfon.management.v1';
@@ -97,9 +97,8 @@ const project = id => state.projects.find(p => p.id === id);
 const task = id => state.tasks.find(t => t.id === id);
 const milestone = id => state.milestones.find(m => m.id === id);
 const isAdmin = () => actor()?.role === 'admin';
-const isSuperAdmin = () => isAdmin() && accountInfo?.isSuperAdmin === true;
-const accountRoleLabel = account => account?.isSuperAdmin ? '总管理员' : roleLabel(account?.role);
-const canManageAccountSecurity = account => isSuperAdmin() && !account.isSuperAdmin || isAdmin() && account.role !== 'admin';
+const accountRoleLabel = account => roleLabel(account?.role);
+const canManageAccountSecurity = () => isAdmin();
 const canManage = p => isAdmin() || p?.ownerId === actorId;
 const visibleProjects = () => state.projects.filter(p => isAdmin() || p.ownerId === actorId || p.memberIds.includes(actorId));
 const visibleTasks = () => state.tasks.filter(t => visibleProjects().some(p => p.id === t.projectId));
@@ -171,12 +170,17 @@ function toast(message, error = false) {
 function unreadSlot(filter={}) {
   return `<span class="unread-slot" data-unread-category="${e(filter.category||'')}" data-unread-entity="${e(filter.entityId||'')}" data-unread-project="${e(filter.projectId||'')}">${unreadBadge(notificationCount(notifications,filter))}</span>`;
 }
-function pendingBadge(count, label='未完成任务') {
-  return count > 0 ? `<span class="pending-task-count" title="${count} 项${e(label)}，验收完成后消除" aria-label="${count} 项${e(label)}">${count>99?'99+':count}</span>` : '';
+function pendingBadge(count, label='未完成任务', resolution='验收完成后消除') {
+  return count > 0 ? `<span class="pending-task-count" title="${count} 项${e(label)}，${e(resolution)}" aria-label="${count} 项${e(label)}">${count>99?'99+':count}</span>` : '';
 }
 function taskReminder(id) {return taskReminderSummary(state,actorId).pendingTaskIds.includes(id)?'<span class="pending-task-dot" title="未完成，验收后消除" aria-label="任务未完成"></span>':'';}
 function projectReminder(id) {return pendingBadge(taskReminderSummary(state,actorId).projectCounts[id]||0);}
-const navigationUnread = id => id==='tasks' ? pendingBadge(taskReminderSummary(state,actorId).count,'待处理任务') : ['overview','approvals'].includes(id) ? unreadSlot({category:id==='overview'?'projects':id}) : '';
+function approvalReminder(item) {
+  return item.status==='pending'?'<span class="pending-approval-dot" title="待审批，处理完成后消除" aria-label="申请待审批"></span>':'';
+}
+const approvalBadge = count => pendingBadge(count,'待审批申请','处理完成后消除');
+const navigationUnread = id => id==='tasks' ? pendingBadge(taskReminderSummary(state,actorId).count,'待处理任务') : id==='approvals' ? approvalBadge(approvalReminderSummary(state,actorId).count) : id==='overview' ? unreadSlot({category:'projects'}) : '';
+
 function refreshUnreadBadges() {
   document.querySelectorAll('.unread-slot').forEach(slot=>{
     const filter={category:slot.dataset.unreadCategory,entityId:slot.dataset.unreadEntity,projectId:slot.dataset.unreadProject};
@@ -351,16 +355,16 @@ function nodeApprovalBanner(p) {
 }
 function projectNodeRequests(p) {
   const list=visibleNodeRequests().filter(x=>x.projectId===p.id).slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
-  return `<section class="project-node-requests"><div class="section-heading"><div><h2>大节点申请</h2><p class="panel-subtitle">新增与修改均由管理员批准后生效，审批记录持续保留。</p></div>${button('申请新增大节点','new-milestone',p.id,'secondary','plus')}</div><div class="approval-list">${list.map(x=>renderMilestoneRequestCard(state,x,{admin:isAdmin(),unreadMarkup:unreadSlot({category:'approvals',entityId:x.id})})).join('')||empty('还没有大节点申请','新增节点可在此提交；修改节点请点击流程图中的大节点，再选择“申请修改大节点”。')}</div></section>`;
+  return `<section class="project-node-requests"><div class="section-heading"><div><h2>大节点申请</h2><p class="panel-subtitle">新增与修改均由管理员批准后生效，审批记录持续保留。</p></div>${button('申请新增大节点','new-milestone',p.id,'secondary','plus')}</div><div class="approval-list">${list.map(x=>renderMilestoneRequestCard(state,x,{admin:isAdmin(),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})})).join('')||empty('还没有大节点申请','新增节点可在此提交；修改节点请点击流程图中的大节点，再选择“申请修改大节点”。')}</div></section>`;
 }
 function approvalsPage() {
   const nodes=visibleNodeRequests(),extensions=visibleExtensions(),all=approvalKind==='nodes'?nodes:extensions;
   const list=all.filter(x=>approvalFilter==='all'||x.status===approvalFilter).slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
-  return heading(isAdmin()?'审批中心':'申请记录','提交申请、查看处理意见，批准后计划才会更新。',approvalKind==='extensions'&&visibleProjects().some(canManage)?button('申请项目延期','new-extension','','primary','plus'):'')+`<div class="approval-kind-tabs" aria-label="申请类型">${[['nodes','大节点申请',nodes],['extensions','项目延期',extensions]].map(([id,label,items])=>`<button class="filter-tab ${approvalKind===id?'active':''}" aria-pressed="${approvalKind===id}" data-action="approval-kind" data-id="${id}">${label} · ${items.filter(x=>x.status==='pending').length} 待审批</button>`).join('')}</div><div class="filters"><div class="filter-tabs">${[['pending',`待审批 ${all.filter(x=>x.status==='pending').length}`],['approved','已批准'],['rejected','已驳回'],['all','全部申请']].map(([id,label])=>`<button class="filter-tab ${approvalFilter===id?'active':''}" data-action="approval-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${list.length} 条记录</span></div><div class="approval-list">${list.map(x=>approvalKind==='nodes'?renderMilestoneRequestCard(state,x,{admin:isAdmin(),unreadMarkup:unreadSlot({category:'approvals',entityId:x.id})}):approvalCard(x)).join('')||empty('当前没有此类申请',approvalKind==='nodes'?'在项目流程中申请新增大节点，或点击已有大节点申请修改。':'项目负责人可以从项目详情提交延期申请。')}</div>`;
+  return heading(isAdmin()?'审批中心':'申请记录','提交申请、查看处理意见，批准后计划才会更新。',approvalKind==='extensions'&&visibleProjects().some(canManage)?button('申请项目延期','new-extension','','primary','plus'):'')+`<div class="approval-kind-tabs" aria-label="申请类型">${[['nodes','大节点申请',nodes],['extensions','项目延期',extensions]].map(([id,label,items])=>`<button class="filter-tab ${approvalKind===id?'active':''}" aria-pressed="${approvalKind===id}" data-action="approval-kind" data-id="${id}">${label}${approvalBadge(items.filter(x=>x.status==='pending').length)}</button>`).join('')}</div><div class="filters"><div class="filter-tabs">${[['pending',`待审批${approvalBadge(all.filter(x=>x.status==='pending').length)}`],['approved','已批准'],['rejected','已驳回'],['all','全部申请']].map(([id,label])=>`<button class="filter-tab ${approvalFilter===id?'active':''}" data-action="approval-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${list.length} 条记录</span></div><div class="approval-list">${list.map(x=>approvalKind==='nodes'?renderMilestoneRequestCard(state,x,{admin:isAdmin(),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})}):approvalCard(x)).join('')||empty('当前没有此类申请',approvalKind==='nodes'?'在项目流程中申请新增大节点，或点击已有大节点申请修改。':'项目负责人可以从项目详情提交延期申请。')}</div>`;
 }
 function approvalCard(x) {
   const p=project(x.projectId), duration=durationLabel(x.originalDueDate,x.newDueDate);
-  return `<article class="approval-card"><div class="approval-head"><div>${projectMark(p||{})}<div><a href="#projects/${e(x.projectId)}" class="approval-project">${e(p?.name || '项目')}</a>${unreadSlot({category:'approvals',entityId:x.id})}<p class="cell-subtext">${e(user(x.applicantId)?.name)} 提交于 ${fullDate(x.createdAt)}</p></div></div>${statusPill(x.status)}</div><div class="approval-body"><div class="date-change"><div class="date-box"><span>申请时截止时间</span><strong>${fullDate(x.originalDueDate)}</strong></div>${icon('arrow')}<div class="date-box"><span>申请调整至</span><strong>${fullDate(x.newDueDate)}</strong></div><span class="tag">延期 ${duration}</span></div>${typeof x.reason==='string'&&x.reason.trim()?`<div class="approval-reason"><span>延期原因</span><p>${e(x.reason)}</p></div>`:''}<div class="approval-plan"><div><span>后续安排</span><p>${e(x.plan)}</p></div><div><span>影响范围</span><p>${e(x.impact || '未补充')}</p></div></div>${x.affectedMilestones?.length || x.affectedTasks?.length?`<div class="affected-summary"><strong>同步调整 ${x.affectedMilestones?.length || 0} 个节点、${x.affectedTasks?.length || 0} 项任务</strong>${[...(x.affectedMilestones||[]).map(a=>({title:milestone(a.id)?.title,date:a.newDueDate})),...(x.affectedTasks||[]).map(a=>({title:task(a.id)?.title,date:a.newDueDate}))].map(a=>`<span>${e(a.title)} → ${fullDate(a.date)}</span>`).join('')}</div>`:''}${x.comment?`<div class="approval-comment"><strong>${e(user(x.reviewerId)?.name)} 的审批意见</strong><p>${e(x.comment)}</p></div>`:''}</div><div class="approval-footer"><span class="muted">${x.status==='pending'?'等待管理人员审批':`${e(user(x.reviewerId)?.name || '管理员')} · ${fullDate(x.reviewedAt)}`}</span><div class="approval-buttons">${x.status==='pending'&&isAdmin()&&x.applicantId!==actorId?`${button('驳回申请','reject-extension',x.id,'secondary')}${button('批准延期','approve-extension',x.id,'primary','check')}`:x.status==='pending'&&x.applicantId===actorId?'<span class="cell-subtext">申请人不能审批自己的申请</span>':''}</div></div></article>`;
+  return `<article class="approval-card"><div class="approval-head"><div>${projectMark(p||{})}<div><a href="#projects/${e(x.projectId)}" class="approval-project">${e(p?.name || '项目')}</a>${approvalReminder(x)}${unreadSlot({category:'approvals',entityId:x.id})}<p class="cell-subtext">${e(user(x.applicantId)?.name)} 提交于 ${fullDate(x.createdAt)}</p></div></div>${statusPill(x.status)}</div><div class="approval-body"><div class="date-change"><div class="date-box"><span>申请时截止时间</span><strong>${fullDate(x.originalDueDate)}</strong></div>${icon('arrow')}<div class="date-box"><span>申请调整至</span><strong>${fullDate(x.newDueDate)}</strong></div><span class="tag">延期 ${duration}</span></div>${typeof x.reason==='string'&&x.reason.trim()?`<div class="approval-reason"><span>延期原因</span><p>${e(x.reason)}</p></div>`:''}<div class="approval-plan"><div><span>后续安排</span><p>${e(x.plan)}</p></div><div><span>影响范围</span><p>${e(x.impact || '未补充')}</p></div></div>${x.affectedMilestones?.length || x.affectedTasks?.length?`<div class="affected-summary"><strong>同步调整 ${x.affectedMilestones?.length || 0} 个节点、${x.affectedTasks?.length || 0} 项任务</strong>${[...(x.affectedMilestones||[]).map(a=>({title:milestone(a.id)?.title,date:a.newDueDate})),...(x.affectedTasks||[]).map(a=>({title:task(a.id)?.title,date:a.newDueDate}))].map(a=>`<span>${e(a.title)} → ${fullDate(a.date)}</span>`).join('')}</div>`:''}${x.comment?`<div class="approval-comment"><strong>${e(user(x.reviewerId)?.name)} 的审批意见</strong><p>${e(x.comment)}</p></div>`:''}</div><div class="approval-footer"><span class="muted">${x.status==='pending'?'等待管理人员审批':`${e(user(x.reviewerId)?.name || '管理员')} · ${fullDate(x.reviewedAt)}`}</span><div class="approval-buttons">${x.status==='pending'&&isAdmin()&&x.applicantId!==actorId?`${button('驳回申请','reject-extension',x.id,'secondary')}${button('批准延期','approve-extension',x.id,'primary','check')}`:x.status==='pending'&&x.applicantId===actorId?'<span class="cell-subtext">申请人不能审批自己的申请</span>':''}</div></div></article>`;
 }
 function teamPage() {
   const r=range(), ids=new Set(visibleProjects().flatMap(p=>[p.ownerId,...p.memberIds]));
@@ -394,27 +398,18 @@ async function loadAccounts({throwOnError=false}={}) {
 }
 function accountRowActions(a) {
   const own=a.userId===actorId;
-  return `<div class="account-row-actions">${button('管理','edit-account',a.id,'small secondary')}${own?button('修改密码','change-password','','small ghost'):canManageAccountSecurity(a)?button('重置密码','reset-password',a.id,'small ghost'):''}</div>${own?'<span class="cell-subtext">当前账号</span>':a.isSuperAdmin?'<span class="cell-subtext">总管理员受保护</span>':a.role==='admin'&&!isSuperAdmin()?'<span class="cell-subtext">安全设置由总管理员管理</span>':''}`;
+  return `<div class="account-row-actions">${button('管理','edit-account',a.id,'small secondary')}${own?button('修改密码','change-password','','small ghost'):button('重置密码','reset-password',a.id,'small ghost')+button('删除账号','delete-account',a.id,'small danger')}</div>${own?'<span class="cell-subtext">当前账号</span>':''}`;
 }
 function accountsPage() {
   if(!accountsData){if(!accountsLoading)queueMicrotask(loadAccounts);return heading('账号管理','管理团队账号与项目权限。')+'<div class="panel session-loading" role="status">正在加载账号…</div>';}
-  const list=accountsData.accounts,active=list.filter(x=>x.status==='active'),unlinked=state.users.filter(u=>!list.some(x=>x.userId===u.id));
-  const rows=list.map(a=>`<tr><td><strong>${e(a.name)}</strong><span class="cell-subtext">${e(a.login||a.email||'—')}</span></td><td>${e(a.title||'未设置')}<span class="cell-subtext">${e(a.department||'')}</span></td><td><span class="${a.isSuperAdmin?'super-admin-label':''}">${accountRoleLabel(a)}</span><span class="cell-subtext">${a.role==='admin'?'全部项目':'参与项目'}</span></td><td>${statusPill(a.status==='active'?'done':'todo',a.status==='active'?'已启用':'已停用')}</td><td>${a.mustChangePassword?'待设置新密码':a.lastLoginAt?'正常使用':'等待首次登录'}<span class="cell-subtext">${a.lastLoginAt?`最近登录 ${fullDate(a.lastLoginAt)}`:'尚无登录记录'}</span></td><td>${accountRowActions(a)}</td></tr>`).join('');
-  return heading('账号管理','职位与账号权限独立设置。',button('开通账号','new-account','','primary','plus'))+`<div class="account-summary"><span><strong>${active.length}</strong> 已启用账号</span><span><strong>${list.filter(x=>x.isSuperAdmin).length}</strong> 总管理员</span><span><strong>${list.filter(x=>x.role==='admin'&&!x.isSuperAdmin).length}</strong> 管理员</span><span><strong>${unlinked.length}</strong> 位成员待开通</span><button class="text-link" data-action="refresh-accounts">刷新列表</button></div><div class="account-access-note">${icon('users')}<div><strong>${isSuperAdmin()?'总管理员工作台':'管理员工作台'}</strong><p>${isSuperAdmin()?'你可以管理管理员与员工账号。':'管理员之间不能互相停用、重置密码或更改权限。'} 员工仅查看参与项目。</p></div></div><section class="panel"><div class="table-wrap"><table class="data-table account-table"><thead><tr><th>姓名 / 登录账号</th><th>职位 / 部门</th><th>账号权限</th><th>账号状态</th><th>登录情况</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div></section>${unlinked.length?`<section class="panel unlinked-members"><div class="panel-header"><div><h2>尚未开通账号的项目成员</h2><p class="panel-subtitle">开通时关联已有成员，可保留任务归属。</p></div></div><div class="unlinked-member-list">${unlinked.map(u=>`<span>${avatar(u.id)}${e(u.name)}<small>${e(u.title||roleLabel(u.role))}</small></span>`).join('')}</div></section>`:''}`;
+  const list=accountsData.accounts,active=list.filter(x=>x.status==='active');
+  const rows=list.map(a=>`<tr><td><strong>${e(a.name)}</strong><span class="cell-subtext">${e(a.login||a.email||'—')}</span></td><td>${e(a.title||'未设置')}<span class="cell-subtext">${e(a.department||'')}</span></td><td>${accountRoleLabel(a)}<span class="cell-subtext">${a.role==='admin'?'全部项目':'参与项目'}</span></td><td>${statusPill(a.status==='active'?'done':'todo',a.status==='active'?'已启用':'已停用')}</td><td>${a.mustChangePassword?'待设置新密码':a.lastLoginAt?'正常使用':'等待首次登录'}<span class="cell-subtext">${a.lastLoginAt?`最近登录 ${fullDate(a.lastLoginAt)}`:'尚无登录记录'}</span></td><td>${accountRowActions(a)}</td></tr>`).join('');
+  return heading('账号管理','职位与账号权限独立设置。',button('开通账号','new-account','','primary','plus'))+`<div class="account-summary"><span><strong>${active.length}</strong> 已启用账号</span><span><strong>${list.filter(x=>x.role==='admin').length}</strong> 管理员</span><button class="text-link" data-action="refresh-accounts">刷新列表</button></div><div class="account-access-note">${icon('users')}<div><strong>管理员工作台</strong><p>管理员可管理其他账号。员工仅查看参与项目。</p></div></div><section class="panel"><div class="table-wrap"><table class="data-table account-table"><thead><tr><th>姓名 / 登录账号</th><th>职位 / 部门</th><th>账号权限</th><th>账号状态</th><th>登录情况</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
-function accountRoleOptions(selected='member') {return [['member','员工'],['manager','项目负责人'],...(isSuperAdmin()||selected==='admin'?[['admin','管理员']]:[])].map(([id,label])=>`<option value="${id}" ${selected===id?'selected':''}>${label}</option>`).join('');}
+function accountRoleOptions(selected='member') {return [['member','员工'],['manager','项目负责人'],['admin','管理员']].map(([id,label])=>`<option value="${id}" ${selected===id?'selected':''}>${label}</option>`).join('');}
 function jobTitleField(value='') {
   const titles=['工程师','管理员','销售','采购','人力'];
   return `${field('职位','title',value,'text','list="job-title-options" maxlength="60" placeholder="选择或填写职位"')}<datalist id="job-title-options">${titles.map(title=>`<option value="${title}"></option>`).join('')}</datalist>`;
-}
-function accountProjectNotice(role) {
-  return role==='admin'?'管理员可查看全部项目；这里记录参与关系，不限制管理员权限。':'员工只可访问参与或负责的项目。移出项目会撤销该员工的访问权限，已有任务负责人不会自动更换。';
-}
-function accountProjectFields(userId='',role='member',selectedProjectId='') {
-  return `<fieldset class="account-projects field full"><legend>参与项目</legend><p class="field-help" id="account-project-help">${accountProjectNotice(role)}</p><div class="account-project-list">${state.projects.map(p=>{const owned=p.ownerId===userId,selected=owned||p.memberIds.includes(userId)||p.id===selectedProjectId;return `<label class="account-project-choice"><input type="checkbox" name="projectIds" value="${e(p.id)}" ${selected?'checked':''} ${owned||p.id===selectedProjectId?'disabled':''}><span><strong>${e(p.name)}</strong><small>${e(p.code||'项目')}${owned?' · 项目负责人，保留访问权限':p.id===selectedProjectId?' · 当前项目':''}</small></span></label>`;}).join('')||'<p class="field-help">暂无项目，可以先开通账号，再新建项目并选择成员。</p>'}</div></fieldset>`;
-}
-function selectedAccountProjects(data,userId='') {
-  return [...new Set([...data.getAll('projectIds'),...state.projects.filter(p=>p.ownerId===userId).map(p=>p.id)])];
 }
 function availableProjectAccounts(p) {
   return (accountsData?.accounts||[]).filter(a=>a.status==='active'&&a.userId!==p.ownerId&&!p.memberIds.includes(a.userId));
@@ -459,19 +454,17 @@ async function saveProjectMember(form,payload,projectId) {
 }
 function newAccount(projectId='') {
   if(!isAdmin())return;
-  const linked=new Set((accountsData?.accounts||[]).map(a=>a.userId));
-  showModal(projectId?'开通新成员':'开通独立账号',`<p class="form-intro">${projectId?`开通后加入 ${e(project(projectId)?.name)}。 `:''}首次登录需设置新密码。</p><div class="form-grid">${field('登录账号','login','','text','required minlength="3" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9._@\\-]{3,64}" aria-describedby="account-login-help"')}${field('初始密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号权限','role',accountRoleOptions())}${selectField('关联项目成员','existingUserId','<option value="new">创建新成员</option>'+state.users.filter(u=>!linked.has(u.id)).map(u=>`<option value="${e(u.id)}">${e(u.name)} · ${roleLabel(u.role)}</option>`).join(''))}${jobTitleField()}${field('部门','department','','text','maxlength="60"')}<div class="field full" id="account-project-memberships">${accountProjectFields('','member',projectId)}</div></div><p id="account-login-help" class="field-help">账号支持 3–64 个英文字母、数字、点、下划线、短横线或 @，可使用手机号或邮箱。密码需为 12–128 个字符。</p><p class="field-help">关联已有成员将保留其任务和项目归属。请将账号和初始密码通过公司内部渠道告知员工。管理员可以访问全部公司数据，请谨慎分配。</p>`,projectId?'开通并加入项目':'开通账号','create-account',projectId);
+  showModal(projectId?'开通新成员':'开通独立账号',`<p class="form-intro">${projectId?`开通后加入 ${e(project(projectId)?.name)}。 `:''}首次登录需设置新密码。</p><div class="form-grid">${field('登录账号','login','','text','required minlength="3" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9._@\\-]{3,64}" aria-describedby="account-login-help"')}${field('初始密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号权限','role',accountRoleOptions())}${jobTitleField()}${field('部门','department','','text','maxlength="60"')}</div><p id="account-login-help" class="field-help">账号支持 3–64 个英文字母、数字、点、下划线、短横线或 @。密码需为 12–128 个字符。</p>` ,projectId?'开通并加入项目':'开通账号','create-account',projectId);
 }
 function editAccount(id) {
   const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
   const own=a.userId===actorId,security=canManageAccountSecurity(a)&&!own;
   const securityFields=security?`${selectField('账号权限','role',accountRoleOptions(a.role))}${selectField('账号状态','status',`<option value="active" ${a.status==='active'?'selected':''}>启用</option><option value="disabled" ${a.status==='disabled'?'selected':''}>停用</option>`)}`:`<div class="account-security-summary"><span>${accountRoleLabel(a)}</span><span>${a.status==='active'?'已启用':'已停用'}</span></div>`;
-  showModal('管理账号',`<p class="form-intro"><strong>${e(a.name)}</strong><br>${e(a.login||a.email||'—')}</p><div class="form-grid">${jobTitleField(a.title||'')}${field('部门','department',a.department||'','text','maxlength="60"')}${securityFields}</div><div id="account-project-memberships">${accountProjectFields(a.userId,a.role)}</div><p class="field-help">${security?'停用后立即退出登录，保留项目与任务记录。':own?'当前账号的密码可在“我的账号”中修改。':a.isSuperAdmin?'总管理员的权限与密码受保护。':'此管理员的权限、停用和密码重置由总管理员管理。'} 职位不改变账号权限。</p>`,'保存账号设置','edit-account',id);
+  showModal('管理账号',`<p class="form-intro"><strong>${e(a.name)}</strong><br>${e(a.login||a.email||'—')}</p><div class="form-grid">${jobTitleField(a.title||'')}${field('部门','department',a.department||'','text','maxlength="60"')}${securityFields}</div><p class="field-help">${security?'停用后立即退出登录，保留项目与任务记录。':'当前账号的密码可在“我的账号”中修改，不能停用或降级自己。'} 职位不改变账号权限。</p>`,'保存账号设置','edit-account',id);
 }
 function resetPassword(id) {
   const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
   if(a.userId===actorId)return changePassword();
-  if(!canManageAccountSecurity(a))throw new Error('只有总管理员可以重置管理员密码；总管理员使用自己的改密入口。');
   showModal('重置账号密码',`<p class="form-intro">为 <strong>${e(a.name)}</strong>（${e(a.login||a.email)}）设置临时密码。保存后该账号将退出其他设备，下次登录需重新设置密码。</p>${field('临时密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('再次输入临时密码','confirmPassword','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}<p class="field-help">使用 12–128 个字符，请通过公司内部渠道单独告知本人。</p>`,'重置密码','reset-password',id);
 }
 async function savePasswordReset(payload,id) {
@@ -481,13 +474,37 @@ async function savePasswordReset(payload,id) {
   catch(error){if(error.status===409)await loadAccounts();if(error.status===401||error.status===403)await loadSession(true);throw error;}
   finally{saving=false;submit.disabled=false;}
 }
+function deleteAccount(id) {
+  const a=accountsData?.accounts.find(x=>x.id===id);if(!a||!isAdmin())return;
+  if(a.userId===actorId)throw new Error('不能删除当前登录账号。');
+  showModal('删除账号',`<p class="form-intro">确认删除 <strong>${e(a.name)}</strong>（${e(a.login||a.email)}）？</p><p>删除后无法登录，所有设备会退出。项目、任务和审批记录保留，原有工作不会自动转交。</p>`,'确认删除','delete-account',id);
+}
+async function saveAccountDeletion(id) {
+  const a=accountsData?.accounts.find(x=>x.id===id);
+  if(!isAdmin())throw new Error('仅管理员可以删除账号。');
+  if(!a)throw new Error('账号已不存在，请刷新列表。');
+  if(a.userId===actorId)throw new Error('不能删除当前登录账号。');
+  if(saving)return;
+  saving=true;const epoch=sessionEpoch,submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
+  try {
+    const data=await api(`/api/accounts/${encodeURIComponent(id)}`,{method:'DELETE',body:JSON.stringify({revision:accountsData?.revision??revision})});
+    if(epoch!==sessionEpoch||!acceptSession(data))return;
+    accountsData={...data,users:state.users};modal.close();modal.innerHTML='';render();toast('账号已删除，工作记录已保留。');
+  } catch(error) {
+    if(epoch!==sessionEpoch)return;
+    if(error.status===409)await loadAccounts();
+    if(error.status===401||error.status===403)await loadSession(true);
+    throw error;
+  } finally {saving=false;if(submit)submit.disabled=false;}
+}
 async function saveAccount(action,payload,id) {
   if(saving)return;saving=true;const epoch=sessionEpoch,submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
   try{
-    if(!payload.existingUserId||payload.existingUserId==='new')delete payload.existingUserId;
+    delete payload.existingUserId;delete payload.projectIds;
+    if(action==='create-account'&&id){if(!project(id))throw new Error('项目已不存在，请返回项目中心后重试。');payload.projectIds=[id];}
     const data=await api(action==='create-account'?'/api/accounts':`/api/accounts/${encodeURIComponent(id)}`,{method:action==='create-account'?'POST':'PATCH',body:JSON.stringify({...payload,revision:accountsData?.revision??revision})});
     if(epoch!==sessionEpoch)return;acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();modal.innerHTML='';render();toast(action==='create-account'?'账号已开通；请向员工告知账号、初始密码和平台网址。':'账号设置已保存。');
-  }catch(error){if(error.status===409){const refreshed=await loadAccounts(),memberships=modal.querySelector('#account-project-memberships');if(refreshed&&memberships){const userId=action==='create-account'?payload.existingUserId:refreshed.accounts.find(a=>a.id===id)?.userId;memberships.innerHTML=accountProjectFields(userId,payload.role,action==='create-account'?id:'');error.message+=' 项目归属已刷新，请核对后重新保存。';}}throw error;}finally{saving=false;if(submit)submit.disabled=false;}
+  }catch(error){if(error.status===409){const refreshed=await loadAccounts();if(refreshed)error.message+=' 账号信息已刷新，请核对后重试。';}throw error;}finally{saving=false;if(submit)submit.disabled=false;}
 }
 function searchPage() {
   const q=searchTerm.trim().toLowerCase(), ps=visibleProjects().filter(p=>`${p.name} ${p.description} ${p.code}`.toLowerCase().includes(q)),ts=visibleTasks().filter(t=>`${t.title} ${t.description} ${user(t.ownerId)?.name}`.toLowerCase().includes(q));
@@ -587,6 +604,7 @@ document.addEventListener('click',async event=>{
     if(action==='flow-toggle'){const viewport=document.querySelector('.flow-scroll'),pos=viewport&&[viewport.scrollLeft,viewport.scrollTop];expandedFlowIds.has(id)?expandedFlowIds.delete(id):expandedFlowIds.add(id);renderContent();const next=document.querySelector('.flow-scroll');if(next&&pos){next.scrollLeft=pos[0];next.scrollTop=pos[1];}document.querySelector(`[data-action="flow-toggle"][data-id="${CSS.escape(id)}"]`)?.focus({preventScroll:true});return;}
     if(action==='new-account')return newAccount(id);
     if(action==='edit-account')return editAccount(id);
+    if(action==='delete-account')return deleteAccount(id);
     if(action==='add-project-member')return await addProjectMember(id);
     if(action==='export-legacy'){const old=localStorage.getItem(LEGACY_KEY);if(old)exportFile('鼎峰旧版浏览器备份.json',old,'application/json;charset=utf-8');return;}
     if(action==='close-modal'){modal.close();return;}
@@ -626,9 +644,9 @@ document.addEventListener('submit',async event=>{
     if(action==='login'||action==='change-password')return await submitAuth(form,payload,action);
     if(!state)return;
     if(action==='reset-password')return await savePasswordReset(payload,id);
+    if(action==='delete-account')return await saveAccountDeletion(id);
     if(action==='add-project-member')return await saveProjectMember(form,payload,id);
-    if(action==='create-account'&&id&&!data.getAll('projectIds').includes(id))data.append('projectIds',id);
-    if(action==='create-account'||action==='edit-account'){const userId=action==='create-account'?payload.existingUserId:accountsData?.accounts.find(a=>a.id===id)?.userId;payload.projectIds=selectedAccountProjects(data,userId);return await saveAccount(action,payload,id);}
+    if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
     if(action==='createProject'){payload.memberIds=data.getAll('memberIds');return await commit(action,payload,'项目已创建，可以开始添加里程碑与任务。');}
     if(action==='createTask'){return await commit(action,payload,'任务已创建并分配。');}
     if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id},'申请已提交，管理员批准后才生效。');}
@@ -648,8 +666,6 @@ document.addEventListener('change',event=>{
   if(el.hasAttribute('data-preserve-all-day')){const input=el.closest('form').elements.dueDate;input.disabled=el.checked;input.required=!el.checked;return;}
   if(el.dataset.reschedule){const input=modal.querySelector(`[data-reschedule-date="${CSS.escape(el.dataset.reschedule)}"]`);if(input){input.disabled=!el.checked;input.required=el.checked;}return;}
   const form=el.closest('form');if(!form)return;
-  if(form.dataset.form==='create-account'&&el.name==='existingUserId'){const u=user(el.value);if(u){form.elements.name.value=u.name;form.elements.role.value=u.role==='admin'&&!isSuperAdmin()?'member':u.role;form.elements.title.value=u.title||'';form.elements.department.value=u.department||'';}form.querySelector('#account-project-memberships').innerHTML=accountProjectFields(u?.id||'',form.elements.role.value,form.dataset.id);return;}
-  if(['create-account','edit-account'].includes(form.dataset.form)&&el.name==='role'){form.querySelector('#account-project-help').textContent=accountProjectNotice(el.value);return;}
   if(el.name==='projectId'&&form.dataset.form==='requestExtension'){document.querySelector('#extension-dates').innerHTML=extensionFields(el.value);return;}
   if(form.dataset.form==='createTask'&&el.name==='projectId'){
     const p=project(el.value),ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done');

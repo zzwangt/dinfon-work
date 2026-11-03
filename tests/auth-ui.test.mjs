@@ -10,7 +10,8 @@ import { renderProjectFlow } from '../public/client/flow.js';
 import * as noticeUI from '../public/client/notifications.js';
 import { renderProjectPeopleSummary } from '../public/client/project-team.js';
 import { renderProgressNote, renderProgressTrack } from '../public/client/progress.js';
-import { taskReminderSummary } from '../public/client/task-reminders.js';
+import { taskReminderSummary, approvalReminderSummary } from '../public/client/task-reminders.js';
+import { renderMilestoneRequestCard, requestComparison } from '../public/client/milestone-requests.js';
 import { buildWeeklyReport, createWeeklyExport } from '../public/client/weekly-export.js';
 
 // Exercise the browser controller with controlled network timing. No credentials are real.
@@ -43,10 +44,10 @@ function harness(fetchImpl) {
     setInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, queueMicrotask,
     renderInstallCard:()=>'<aside>手机桌面版</aside>', initPWA() {},
     renderMilestoneProgress, renderProgressNote, renderProgressTrack,
-    taskReminderSummary, buildWeeklyReport, createWeeklyExport,
+    taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport,
     renderProjectFlow, renderProjectPeopleSummary, bindFlowCanvas() {},
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,accountProjectFields,selectedAccountProjects,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,saveAccount,projectRow,projectWorkspace,taskRow,weeklyPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,resetPassword,deleteAccount,saveAccountDeletion,saveAccount,projectRow,projectWorkspace,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};
 }
 function session(overrides={}) {
@@ -74,7 +75,7 @@ test('task navigation shows persistent work counts while messages retain their u
   ui.acceptSession(data);ui.render();
   assert.match(app.innerHTML,/<a href="#tasks"[^>]*>[\s\S]*?<span class="pending-task-count"/);
   assert.match(app.innerHTML,/class="notification-trigger[^>]*>[\s\S]*?class="unread-count"[^>]*>2<\/span>/);
-  assert.match(app.innerHTML,/data-unread-category="approvals"[^>]*><span class="unread-count"[^>]*>1<\/span>/);
+  assert.doesNotMatch(app.innerHTML.match(/<a href="#approvals"[^>]*>[\s\S]*?<\/a>/)?.[0]||'',/data-unread-category/);
   assert.match(ui.taskRow(target),new RegExp(`data-unread-entity="${target.id}"[^>]*><span class="unread-count"`));
   ui.notificationCenter();assert.match(modal.innerHTML,/&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(modal.innerHTML,/<img/);
@@ -125,12 +126,12 @@ test('polling updates badges even when only read receipts changed and revision d
   await ui.loadSession(true);assert.doesNotMatch(app.innerHTML,/class="unread-count"/);
 });
 
-test('account refresh supplies project options from the same revision snapshot',async()=>{
+test('account refresh retains project context from the same revision snapshot',async()=>{
   const fresh=session({revision:8});fresh.accounts=[];
   fresh.state.projects.push({...fresh.state.projects[0],id:'p-fresh',name:'另一管理员刚建立的项目',memberIds:[]});
   const {ui}=harness(async()=>Response.json(fresh));ui.acceptSession(session());
   await ui.loadAccounts();assert.ok(ui.getState().projects.some(p=>p.id==='p-fresh'));
-  assert.match(ui.accountProjectFields(),/另一管理员刚建立的项目/);
+  assert.equal(ui.getState().projects.find(p=>p.id==='p-fresh').name,'另一管理员刚建立的项目');
 });
 
 test('adding a member keeps their other memberships and sends the account snapshot revision',async()=>{
@@ -152,60 +153,92 @@ test('adding a member keeps their other memberships and sends the account snapsh
   assert.equal(input.button.disabled,false);assert.equal(input.attributes.has('aria-busy'),false);
 });
 
-function accountsSession(isSuperAdmin=false) {
+function accountsSession() {
   const data=session();
-  data.account={...data.account,userId:'u-admin',isSuperAdmin};
+  data.account={...data.account,userId:'u-admin'};
   data.state.users.push({id:'u-peer-admin',name:'其他管理员',role:'admin',title:'采购',department:'供应链'});
   data.accounts=[
     {...data.account,name:data.actor.name,status:'active',title:'运营总监'},
-    {id:'a-peer-admin',userId:'u-peer-admin',name:'其他管理员',login:'peer.admin',role:'admin',isSuperAdmin:false,status:'active',title:'采购',department:'供应链'},
-    {id:'a-engineer',userId:'u-engineer',name:'工程师',login:'engineer',role:'member',isSuperAdmin:false,status:'active',title:'工程师'},
+    {id:'a-peer-admin',userId:'u-peer-admin',name:'其他管理员',login:'peer.admin',role:'admin',status:'active',title:'采购',department:'供应链'},
+    {id:'a-engineer',userId:'u-engineer',name:'工程师',login:'engineer',role:'member',status:'active',title:'工程师'},
   ];
-  if(!isSuperAdmin){
-    data.state.users.push({id:'u-super-admin',name:'总管理员',role:'admin'});
-    data.accounts.push({id:'a-super-admin',userId:'u-super-admin',name:'总管理员',login:'owner',role:'admin',isSuperAdmin:true,status:'active'});
-  }
   return data;
 }
 
-test('ordinary administrators can manage employees but cannot reset or edit administrator security',async()=>{
+test('administrators can manage peer administrators and employees without a super-administrator distinction',async()=>{
+  const data=accountsSession();let requests=0;
+  // A stale designation from a pre-upgrade response must not change the UI.
+  data.accounts.find(item=>item.id==='a-peer-admin').isSuperAdmin=true;
+  const {ui,modal}=harness(async()=>{requests++;return Response.json(data);});
+  ui.acceptSession(data);await ui.loadAccounts();
+  for(const id of ['a-peer-admin','a-engineer']){
+    const account=data.accounts.find(item=>item.id===id);
+    assert.match(ui.accountRowActions(account),/data-action="reset-password"/);
+    assert.match(ui.accountRowActions(account),/data-action="delete-account"/);
+    ui.editAccount(id);
+    assert.match(modal.innerHTML,/<select[^>]+name="role"/);
+    assert.match(modal.innerHTML,/<select[^>]+name="status"/);
+    assert.match(modal.innerHTML,/<option value="admin"/);
+    ui.resetPassword(id);assert.match(modal.innerHTML,/data-form="reset-password"/);
+  }
+  ui.newAccount();assert.match(modal.innerHTML,/<option value="admin"/);
+  assert.doesNotMatch(ui.accountsPage(),/总管理员|super-admin-label/);
+  assert.equal(requests,1,'opening management forms must not submit mutations');
+});
+
+test('the current administrator retains self-password change but cannot disable, demote or delete themselves',async()=>{
   const data=accountsSession();let requests=0;
   const {ui,modal}=harness(async()=>{requests++;return Response.json(data);});
   ui.acceptSession(data);await ui.loadAccounts();
-  for(const id of ['a-peer-admin','a-super-admin']){
-    const account=data.accounts.find(item=>item.id===id);
-    assert.doesNotMatch(ui.accountRowActions(account),/data-action="reset-password"/);
-    ui.editAccount(id);
-    assert.doesNotMatch(modal.innerHTML,/<select[^>]+name="(?:role|status)"/);
-    assert.match(modal.innerHTML,/<input[^>]+name="title"/);
-    assert.throws(()=>ui.resetPassword(id),/总管理员/);
-  }
-  const employee=data.accounts.find(item=>item.id==='a-engineer');
-  assert.match(ui.accountRowActions(employee),/data-action="reset-password"/);
-  ui.editAccount(employee.id);
-  assert.match(modal.innerHTML,/<select[^>]+name="status"/);
-  assert.doesNotMatch(modal.innerHTML,/<option value="admin"/);
-  ui.newAccount();assert.doesNotMatch(modal.innerHTML,/<option value="admin"/);
-  assert.equal(requests,1,'opening security forms must not submit mutations');
-});
-
-test('the super administrator can manage peer administrators while their own security remains protected',async()=>{
-  const data=accountsSession(true);
-  const {ui,modal}=harness(async()=>Response.json(data));
-  ui.acceptSession(data);await ui.loadAccounts();
-  const peer=data.accounts.find(item=>item.id==='a-peer-admin');
-  assert.match(ui.accountRowActions(peer),/data-action="reset-password"/);
-  ui.editAccount(peer.id);
-  assert.match(modal.innerHTML,/<select[^>]+name="role"/);
-  assert.match(modal.innerHTML,/<select[^>]+name="status"/);
-  ui.resetPassword(peer.id);assert.match(modal.innerHTML,/data-form="reset-password"/);
-  ui.newAccount();assert.match(modal.innerHTML,/<option value="admin"/);
   const own=data.accounts.find(item=>item.id==='a-admin');
   assert.match(ui.accountRowActions(own),/data-action="change-password"/);
-  assert.doesNotMatch(ui.accountRowActions(own),/data-action="reset-password"/);
+  assert.doesNotMatch(ui.accountRowActions(own),/data-action="(?:reset-password|delete-account)"/);
   ui.editAccount(own.id);assert.doesNotMatch(modal.innerHTML,/<select[^>]+name="(?:role|status)"/);
   ui.resetPassword(own.id);assert.match(modal.innerHTML,/data-form="change-password"/);
-  assert.match(ui.accountsPage(),/总管理员/);
+  assert.throws(()=>ui.deleteAccount(own.id),/当前|自己|本人/);
+  await assert.rejects(ui.saveAccountDeletion(own.id),/当前|自己|本人/);
+  assert.equal(requests,1,'self-deletion must fail before sending any mutation');
+});
+
+test('deleting another account requires confirmation and sends DELETE with the current account revision',async()=>{
+  const data=accountsSession();data.revision=14;
+  const after=structuredClone(data);after.revision=15;after.accounts=after.accounts.filter(item=>item.id!=='a-peer-admin');
+  let sent;const requests=[];
+  const {ui,modal,toast}=harness(async(path,options)=>{
+    requests.push({path,method:options?.method||'GET'});
+    if(options?.method==='DELETE'){sent={path,body:JSON.parse(options.body)};return Response.json(after);}
+    return Response.json(data);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();ui.deleteAccount('a-peer-admin');
+  assert.equal(modal.open,true);
+  assert.match(modal.innerHTML,/data-form="delete-account" data-id="a-peer-admin"/);
+  assert.match(modal.innerHTML,/其他管理员/);
+  assert.match(modal.innerHTML,/peer.admin/);
+  assert.match(modal.innerHTML,/保留/);
+  assert.equal(requests.filter(request=>request.method==='DELETE').length,0,'opening confirmation cannot delete');
+  await ui.saveAccountDeletion('a-peer-admin');
+  assert.deepEqual(sent,{path:'/api/accounts/a-peer-admin',body:{revision:14}});
+  assert.equal(modal.open,false);
+  assert.doesNotMatch(ui.accountsPage(),/peer\.admin/);
+  assert.deepEqual(ui.getState().projects,data.state.projects);
+  assert.deepEqual(ui.getState().tasks,data.state.tasks);
+  assert.ok(ui.getState().users.some(user=>user.id==='u-peer-admin'),'business identity survives account deletion');
+  assert.match(toast.textContent,/删除/);
+});
+
+test('failed account deletion preserves the account list, business data and confirmation for retry',async()=>{
+  const data=accountsSession();let deletes=0;
+  const {ui,modal}=harness(async(_path,options)=>{
+    if(options?.method==='DELETE'){deletes++;return Response.json({error:'删除暂未完成，请重试。'},{status:503});}
+    return Response.json(data);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();ui.deleteAccount('a-engineer');
+  await assert.rejects(ui.saveAccountDeletion('a-engineer'),/删除暂未完成/);
+  assert.equal(deletes,1);
+  assert.equal(modal.open,true);
+  assert.match(ui.accountsPage(),/engineer/);
+  assert.deepEqual(ui.getState().projects,data.state.projects);
+  assert.deepEqual(ui.getState().tasks,data.state.tasks);
 });
 
 test('job title choices remain independent from account roles when changed and saved',async()=>{
@@ -225,12 +258,13 @@ test('job title choices remain independent from account roles when changed and s
   assert.equal(sent.body.role,'member');assert.equal(sent.body.title,'管理员');assert.equal(sent.body.department,'行政');
 });
 
-test('opening a new member from a project preselects that project',()=>{
+test('opening a new member from a project retains context without membership controls',()=>{
   const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
   ui.acceptSession(session());ui.newAccount('p-mower');
   assert.match(modal.innerHTML,/开通新成员/);
   assert.match(modal.innerHTML,/data-form="create-account" data-id="p-mower"/);
-  assert.match(modal.innerHTML,/<input[^>]+name="projectIds"[^>]+value="p-mower"[^>]* checked/);
+  assert.doesNotMatch(modal.innerHTML,/name="(?:projectIds|existingUserId)"|关联项目成员|<legend>参与项目/);
+  assert.match(modal.innerHTML,/开通后加入/);
   assert.match(modal.innerHTML,/开通并加入项目/);
 });
 
@@ -239,7 +273,7 @@ test('reading messages leaves persistent task badges visible through submission 
   data.account={id:'a-engineer',login:'engineer',role:'member',mustChangePassword:false};
   data.state=sanitizeStateForActor(data.state,data.actor.id);
   const task=data.state.tasks.find(item=>item.ownerId===data.actor.id);
-  data.state.tasks=[task];task.status='todo';
+  data.state.tasks=[task];task.status='todo';data.state.extensions=[];data.state.milestoneRequests=[];
   data.notifications=[notice('new-task','tasks',task.id,task.projectId)];
   const {ui,app}=harness(async()=>Response.json({notifications:[]}));
   ui.acceptSession(data);ui.render();
@@ -397,32 +431,97 @@ test('an incorrect current password keeps the restricted session available for c
 });
 
 
-test('account project choices reflect existing participation and lock project owner access',()=>{
-  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
-  ui.acceptSession(session());
-  const selections=(html)=>[...html.matchAll(/<input[^>]+name="projectIds"[^>]+>/g)].map(([input])=>({id:input.match(/value="([^"']+)"/)[1],checked:/ checked/.test(input),disabled:/ disabled/.test(input)}));
-  assert.deepEqual(selections(ui.accountProjectFields()).filter(item=>item.checked),[]);
-  assert.deepEqual(selections(ui.accountProjectFields('u-engineer')).filter(item=>item.checked).map(item=>item.id),['p-mower','p-pcb']);
-  const ownerChoices=selections(ui.accountProjectFields('u-manager'));
-  assert.deepEqual(ownerChoices.filter(item=>item.disabled).map(item=>item.id),['p-mower','p-pcb','p-site']);
-  assert.ok(ownerChoices.filter(item=>item.disabled).every(item=>item.checked));
-  assert.equal(ownerChoices.find(item=>item.id==='p-delivery').disabled,false);
-  ui.newAccount();
-  assert.equal(modal.open,true);
-  assert.match(modal.innerHTML,/参与项目/);
-  assert.match(modal.innerHTML,/已有任务负责人不会自动更换/);
-  const adminChoices=ui.accountProjectFields('u-manager','admin');
-  assert.match(adminChoices,/不限制管理员权限/);
-  assert.deepEqual(selections(adminChoices),ownerChoices);
+test('account creation and editing omit legacy member association and project selection sections',async()=>{
+  const data=accountsSession();
+  const {ui,modal}=harness(async()=>Response.json(data));
+  ui.acceptSession(data);await ui.loadAccounts();
+  for(const open of [()=>ui.newAccount(),()=>ui.newAccount('p-mower'),()=>ui.editAccount('a-engineer')]){
+    open();assert.equal(modal.open,true);
+    assert.doesNotMatch(modal.innerHTML,/关联项目成员|<legend>参与项目|name="(?:projectIds|existingUserId)"|id="account-project-memberships"/);
+    assert.match(modal.innerHTML,/name="title"/);
+  }
 });
 
-test('project submission includes locked owned projects and deduplicates checked choices',()=>{
-  const {ui}=harness(async()=>{throw new Error('Unexpected request');});
-  ui.acceptSession(session());
-  const choices=new FormData();choices.append('projectIds','p-delivery');choices.append('projectIds','p-delivery');
-  assert.deepEqual(Array.from(ui.selectedAccountProjects(choices,'u-manager')),['p-delivery','p-mower','p-pcb','p-site']);
-  assert.deepEqual(Array.from(ui.selectedAccountProjects(new FormData(),'u-manager')),['p-mower','p-pcb','p-site']);
-  assert.deepEqual(Array.from(ui.selectedAccountProjects(new FormData(),'u-engineer')),[]);
+test('saving account profile omits project updates and preserves all current memberships',async()=>{
+  const data=accountsSession();let sent;
+  const before=data.state.projects.filter(p=>p.memberIds.includes('u-engineer')||p.ownerId==='u-engineer').map(p=>p.id);
+  const {ui}=harness(async(path,options)=>{
+    if(options?.method==='PATCH'){
+      sent={path,body:JSON.parse(options.body)};
+      assert.equal(Object.hasOwn(sent.body,'projectIds'),false,'editing a profile must not send an empty membership list');
+      assert.equal(Object.hasOwn(sent.body,'existingUserId'),false);
+    }
+    return Response.json(data);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();
+  await ui.saveAccount('edit-account',{title:'销售',department:'业务部',role:'member',status:'active'},'a-engineer');
+  assert.equal(sent.path,'/api/accounts/a-engineer');
+  assert.deepEqual(ui.getState().projects.filter(p=>p.memberIds.includes('u-engineer')||p.ownerId==='u-engineer').map(p=>p.id),before);
+});
+
+test('project-based account creation sends only its current project while global creation assigns no projects',async()=>{
+  const data=accountsSession(),sent=[];
+  const {ui}=harness(async(path,options)=>{
+    if(options?.method==='POST')sent.push({path,body:JSON.parse(options.body)});
+    return Response.json(data);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();
+  const fields={login:'new.worker',password:'test-only-password',name:'新员工',role:'member',title:'工程师'};
+  await ui.saveAccount('create-account',{...fields},'p-mower');
+  assert.equal(sent[0].path,'/api/accounts');
+  assert.deepEqual(sent[0].body.projectIds,['p-mower']);
+  assert.equal(Object.hasOwn(sent[0].body,'existingUserId'),false);
+  await ui.saveAccount('create-account',{...fields,login:'other.worker'},'');
+  assert.equal(Object.hasOwn(sent[1].body,'projectIds'),false);
+  assert.equal(Object.hasOwn(sent[1].body,'existingUserId'),false);
+});
+
+function approvalFixture() {
+  const data=session();data.state.tasks=[];
+  data.state.milestoneRequests=[{id:'node-pending',kind:'create',projectId:'p-mower',applicantId:'u-engineer',status:'pending',createdAt:'2026-11-03T08:00:00.000Z',proposed:{title:'待审批的新节点',dueDate:'2026-11-06T18:00:00+08:00'},reason:''}];
+  data.state.extensions=[{id:'extension-pending',projectId:'p-mower',applicantId:'u-manager',status:'pending',createdAt:'2026-11-03T08:01:00.000Z',originalDueDate:'2026-11-06T18:00:00+08:00',newDueDate:'2026-11-08T18:00:00+08:00',plan:'完成交付',impact:'顺延两天',reason:''}];
+  data.notifications=[notice('node-notice','approvals','node-pending'),notice('extension-notice','approvals','extension-pending')];
+  return data;
+}
+const approvalNav = app => app.innerHTML.match(/<a href="#approvals"[^>]*>[\s\S]*?<\/a>/)?.[0]||'';
+
+test('approval navigation remains red after all messages are read and a fresh session is loaded',async()=>{
+  const data=approvalFixture();
+  const {ui,app}=harness(async(path)=>Response.json(path==='/api/notifications/read'?{notifications:[]}:{...data,notifications:[]}));
+  ui.acceptSession(data);ui.render();
+  assert.match(approvalNav(app),/class="pending-task-count"[^>]*>2<\/span>/);
+  await ui.markNotificationsRead(data.notifications.map(n=>n.id));ui.render();
+  assert.equal(ui.getNotifications().length,0);
+  assert.match(approvalNav(app),/class="pending-task-count"[^>]*>2<\/span>/);
+  await ui.loadSession();
+  assert.match(approvalNav(app),/class="pending-task-count"[^>]*>2<\/span>/);
+  const reopened=harness(async()=>Response.json({...data,notifications:[]}));
+  reopened.ui.acceptSession({...data,notifications:[]});reopened.ui.render();
+  assert.match(approvalNav(reopened.app),/class="pending-task-count"[^>]*>2<\/span>/);
+});
+
+test('pending approvals have persistent type and record reminders until approved or rejected',async()=>{
+  const data=approvalFixture();data.notifications=[];
+  const {ui,app,listeners}=harness(async()=>Response.json({notifications:[]}));
+  ui.acceptSession(data);ui.render();
+  const click=async(action,id)=>{
+    const button={dataset:{action,id},type:'button',closest:()=>null};
+    await listeners.get('document:click')({target:{closest:selector=>selector==='[data-action]'?button:null},preventDefault(){}});
+  };
+  let page=ui.approvalsPage();
+  for(const id of ['nodes','extensions']){
+    const tab=page.match(new RegExp(`<button[^>]+data-action="approval-kind" data-id="${id}"[^>]*>[\\s\\S]*?<\\/button>`))?.[0]||'';
+    assert.match(tab,/class="pending-task-count"[^>]*>1<\/span>/);
+  }
+  assert.match(page.match(/<article[\s\S]*?<\/article>/)?.[0]||'',/class="pending-approval-dot"/);
+  await click('approval-kind','extensions');page=ui.approvalsPage();
+  assert.match(page.match(/<article[\s\S]*?<\/article>/)?.[0]||'',/class="pending-approval-dot"/);
+  data.state.milestoneRequests[0].status='approved';ui.render();
+  assert.match(approvalNav(app),/class="pending-task-count"[^>]*>1<\/span>/);
+  data.state.extensions[0].status='rejected';ui.render();
+  assert.doesNotMatch(approvalNav(app),/pending-task-count/);
+  await click('approval-filter','all');
+  assert.doesNotMatch(ui.approvalsPage().match(/<article[\s\S]*?<\/article>/)?.[0]||'',/class="pending-approval-dot"/);
 });
 
 test('project cards and flow summaries agree as tasks finish before milestone confirmation',()=>{

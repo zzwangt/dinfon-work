@@ -103,8 +103,7 @@ test('node upload sends multipart association, preserves bytes, and refreshes it
   t.mock.method(globalThis,'fetch',async(path,options)=>{calls.push({path,options});return Response.json(options.method==='POST'?{file:f.file}:{files:[],maxFileBytes:20*1024*1024});});
   bindProjectFiles(view.root,view.context);await tick();
   const input=view.element('[data-file-input]');input.files=[new File(['known-content'],'hello.txt',{type:'text/plain'})];input.dispatch('change');await tick();
-  assert.ok(b.dialog);assert.equal(calls.filter(call=>call.options.method==='POST').length,0);
-  b.choose(f.task.milestoneId);await tick();await tick();
+  assert.equal(b.dialog,undefined);await tick();
   const upload=calls.find(call=>call.options.method==='POST');assert.ok(upload);
   assert.ok(upload.options.body instanceof FormData);assert.equal(upload.options.headers,undefined,'browser sets multipart boundary');
   assert.equal(upload.options.body.get('entityId'),f.task.id);assert.equal(upload.options.body.get('entityType'),'task');assert.equal(upload.options.body.get('projectId'),f.project.id);
@@ -120,7 +119,7 @@ test('oversize files are rejected before upload and failed requests show server 
   bindProjectFiles(view.root,view.context);await tick();
   const input=view.element('[data-file-input]');input.files=[new File(['big'],'too-big.txt')];input.dispatch('change');await tick();
   assert.match(view.element('[data-file-status]').textContent,/超过/);assert.equal(calls.length,1);
-  input.files=[new File(['a'],'valid.txt')];input.dispatch('change');await tick();b.choose(f.task.milestoneId);await tick();await tick();
+  input.files=[new File(['a'],'valid.txt')];input.dispatch('change');await tick();assert.equal(b.dialog,undefined);await tick();
   assert.match(view.element('[data-file-status]').textContent,/文件无法保存/);
 });
 
@@ -142,7 +141,7 @@ test('direct node file drops stop canvas navigation and post the target associat
   bindProjectFiles(root,{getState:()=>f.state,getActorId:()=> 'u-engineer'});
   let prevented=false,stopped=false;
   node.dispatch('drop',node,{dataTransfer:{types:['Files'],files:[new File(['drop'],'drop.txt')]},preventDefault(){prevented=true;},stopPropagation(){stopped=true;}});await tick();await tick();
-  assert.ok(prevented&&stopped);assert.equal(calls.length,0);assert.ok(b.dialog);b.choose(f.task.milestoneId);await tick();await tick();assert.equal(calls.length,1);assert.equal(calls[0].options.body.get('entityId'),f.task.id);
+  assert.ok(prevented&&stopped);assert.equal(b.dialog,undefined);assert.equal(calls.length,1);assert.equal(calls[0].options.body.get('entityId'),f.task.id);
 });
 
 
@@ -154,7 +153,7 @@ test('active file uploads suspend polling renders until their requests and refre
   bindProjectFiles(view.root,view.context);await tick();
   const input=view.element('[data-file-input]');input.files=[new File(['content'],'pending.txt')];input.dispatch('change');
   assert.equal(hasActiveFileOperations(),true);
-  b.choose(f.task.milestoneId);await tick();
+  assert.equal(b.dialog,undefined);await tick();
   completeUpload(Response.json({file:f.file}));await tick();await tick();
   assert.equal(hasActiveFileOperations(),false);
 });
@@ -173,14 +172,15 @@ test('project uploads require an explicit major-node choice, allow cancellation,
   const posted=calls.find(call=>call.options.method==='POST');assert.equal(posted.options.body.get('entityType'),'milestone');assert.equal(posted.options.body.get('entityId'),f.task.milestoneId);
 });
 
-test('task uploads can select another major node explicitly without misfiling under the original task',async t=>{
+test('major-node details upload directly to that milestone without a chooser',async t=>{
   resetProjectFiles();t.after(resetProjectFiles);
   const b=browser(t),f=fixture(),view=mounted(f,{node:true}),calls=[];
-  t.mock.method(globalThis,'fetch',async(path,options)=>{calls.push({path,options});return Response.json(options.method==='POST'?{file:f.file}:{files:[]});});
+  Object.assign(view.host.dataset,{entityType:'milestone',entityId:f.task.milestoneId});
+  t.mock.method(globalThis,'fetch',async(path,options)=>{calls.push(options);return Response.json(options.method==='POST'?{file:f.file}:{files:[]});});
   bindProjectFiles(view.root,view.context);await tick();
-  const input=view.element('[data-file-input]');input.files=[new File(['a'],'move.txt')];input.dispatch('change');await tick();
-  const other=f.state.milestones.find(node=>node.projectId===f.project.id&&node.id!==f.task.milestoneId);b.choose(other.id);await tick();await tick();
-  const post=calls.find(call=>call.options.method==='POST');assert.equal(post.options.body.get('entityType'),'milestone');assert.equal(post.options.body.get('entityId'),other.id);
+  const input=view.element('[data-file-input]');input.files=[new File(['a'],'stage.txt')];input.dispatch('change');await tick();
+  assert.equal(b.dialog,undefined);
+  const post=calls.find(call=>call.method==='POST');assert.equal(post.body.get('entityType'),'milestone');assert.equal(post.body.get('entityId'),f.task.milestoneId);
 });
 
 test('major-node groups include direct files and child-task files, retain orphans, and exclude other projects',()=>{
@@ -215,4 +215,38 @@ test('logout, removed project access and navigation cancel a pending choice with
   f.project.memberIds=f.project.memberIds.filter(id=>id!=='u-engineer');b.choose(f.task.milestoneId);await tick();assert.equal(b.dialog,undefined);assert.equal(calls.length,1);
   f.project.memberIds.push('u-engineer');input.dispatch('change');await tick();b.events.get('hashchange')();await tick();assert.equal(b.dialog,undefined);assert.equal(calls.length,1);
   input.dispatch('change');await tick();view.changeIdentity();await tick();assert.equal(b.dialog,undefined);assert.equal(hasActiveFileOperations(),false);assert.equal(calls.length,1);
+});
+
+test('dropping on either card refreshes its count and the parent count without choosing a destination',async t=>{
+  resetProjectFiles(); t.after(resetProjectFiles);
+  const chooser=browser(t),f=fixture(),flow=new Element({projectId:f.project.id}),counts=new Map();
+  const target=(type,id)=>{
+    const node=new Element({fileProject:f.project.id,fileType:type,fileId:id});
+    node.elements={'[data-file-badge]':new Element(),'[data-file-number]':new Element()};
+    return node;
+  };
+  const stage=target('milestone',f.task.milestoneId),task=target('task',f.task.id);
+  flow.querySelectorAll=()=>[stage,task];
+  const root=new Element();
+  root.querySelectorAll=selector=>selector==='[data-file-flow]'?[flow]:selector==='[data-node-file-drop]'?[stage,task]:[];
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if (options.method==='POST'){
+      const type=options.body.get('entityType'),id=options.body.get('entityId');
+      const key=type+':'+id;
+      counts.set(key,{type,id,total:(counts.get(key)?.total || 0)+1});
+      return Response.json({file:f.file});
+    }
+    assert.match(url,/summary=counts/);
+    return Response.json({counts:[...counts.values()]});
+  });
+  bindProjectFiles(root,{getState:()=>f.state,getActorId:()=> 'u-engineer'});await tick();
+  assert.equal(stage.querySelector('[data-file-badge]').hidden,true);
+  for (const node of [stage,task]){
+    node.dispatch('drop',node,{dataTransfer:{types:['Files'],files:[new File(['sample'],'报告.txt')]}});
+    await tick();await tick();
+  }
+  assert.equal(chooser.dialog,undefined);
+  assert.equal(stage.querySelector('[data-file-number]').textContent,'2');
+  assert.equal(task.querySelector('[data-file-number]').textContent,'1');
+  assert.equal(stage.querySelector('[data-file-badge]').hidden,false);
 });

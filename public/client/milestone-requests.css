@@ -18,3 +18,20 @@
 .node-change-table td,.node-request-card .approval-footer>.muted{font-variant-numeric:tabular-nums}
 .node-request-card .approval-footer>.muted{overflow-wrap:anywhere;min-width:0}
 @media(max-width:600px){.node-request-meta{flex-direction:column;gap:2px}.node-request-card .approval-head>div{min-width:0}.node-request-card .approval-footer{flex-wrap:wrap}.node-request-card .approval-footer>.muted{flex-basis:100%}.node-change-table th,.node-change-table td{overflow-wrap:normal;word-break:normal}.node-change-table td{overflow-wrap:anywhere}}
+
+dialog.modal:has(.plan-editor) {width: min(780px, calc(100vw - 24px));}
+.plan-editor {margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px;}
+.plan-toolbar,.plan-controls {display:flex; justify-content:space-between; align-items:center; gap:10px;}
+.plan-toolbar {margin-bottom:14px;}
+.plan-editor fieldset {min-width:0; margin:14px 0; padding:14px; border:1px solid var(--line); border-radius:12px;}
+.plan-editor [data-plan-stage] {background:#f6f8fb; border-left:3px solid #3974ba;}
+.plan-editor [data-plan-task] {margin-left:12px; background:white;}
+.plan-editor legend {padding:0 6px; font-size:13px; font-weight:650;}
+.plan-editor .field > span {display:block; margin-bottom:5px; font-size:13px;}
+.plan-editor .form-grid {margin-bottom:12px;}
+.plan-preview {font-size:14px; overflow-wrap:anywhere;}
+.plan-preview section {margin:14px 0; padding:12px; border-left:3px solid #7a9abb; background:#f6f8fb;}
+.plan-preview p {margin:4px 0; white-space:pre-wrap;}
+.plan-preview ol {padding-left:22px;}
+.plan-preview li {margin:8px 0;}
+@media(max-width:600px){.plan-editor .form-grid{grid-template-columns:1fr;}.plan-editor fieldset{padding:10px;}.plan-editor [data-plan-task]{margin-left:4px;}}

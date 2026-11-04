@@ -1,4 +1,4 @@
-import { canReviewTask } from './approval-access.js';
+import { canReviewTask, canViewProjectPlan } from './approval-access.js';
 import { isAdminRole, normalizeRole } from './roles.js';
 /**
  * Persistent work reminders are derived from the current business state, never
@@ -45,7 +45,7 @@ export function approvalReminderSummary(state, actorId) {
   const nodeIds = pendingIds(state?.milestoneRequests);
   const extensionIds = pendingIds(state?.extensions);
   return {
-    count: nodeIds.length + extensionIds.length,
+    count: nodeIds.length + extensionIds.length + (validActor ? (state.projectPlans || []).filter(plan => plan.status === 'pending' && canViewProjectPlan(plan, actor)).length : 0),
     nodeCount: nodeIds.length,
     extensionCount: extensionIds.length,
     nodeIds,

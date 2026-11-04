@@ -13,6 +13,10 @@ export function canApproveRequest(project, request, actor) {
     && canApproveProject(project, actor) && (request.applicantId !== idOf(actor) || isSuperAdminRole(actor?.role)));
 }
 
+export function canViewProjectPlan(plan, actor) {
+  return Boolean(actor?.id && (isSuperAdminRole(actor.role) || plan.applicantId === actor.id || plan.project.ownerId === actor.id));
+}
+
 export function canReviewTask(task, actor) {
   if (!task || !actor?.id) return false;
   return isSuperAdminRole(actor.role) || (task.reviewerId === actor.id && task.ownerId !== actor.id);

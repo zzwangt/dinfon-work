@@ -17,7 +17,7 @@ test('administrator receives all business records but never login/account metada
     assert.deepEqual(result[collection], state[collection] ?? []);
   }
   assert.deepEqual(ids(result.users), ids(state.users));
-  assert.deepEqual(Object.keys(result).sort(), ['version', 'users', 'projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'logs'].sort());
+  assert.deepEqual(Object.keys(result).sort(), ['version', 'users', 'projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'projectPlans', 'logs'].sort());
   assert.equal(result.users[0].email, undefined);
   assert.equal(result.users[0].passwordHash, undefined);
   assert.equal(result.users[0].login, undefined);

@@ -11,7 +11,7 @@ const uploadIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const fileIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 14h8M8 17h5"/></svg>';
 export const formatFileSize = size => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
 const projectMilestones = (state, projectId) => (state?.milestones || []).filter(node => node.projectId === projectId);
-const picker = () => `<button type="button" class="button secondary" data-file-pick>${uploadIcon}选择文件</button><input type="file" multiple class="sr-only" tabindex="-1" data-file-input aria-label="选择要上传的文件"><p class="file-upload-hint">选择文件后指定大节点，每个文件不超过 20 MB。</p>`;
+const picker = (direct = false) => `<button type="button" class="button secondary" data-file-pick>${uploadIcon}选择文件</button><input type="file" multiple class="sr-only" tabindex="-1" data-file-input aria-label="选择要上传的文件"><p class="file-upload-hint">${direct?'文件将直接上传到当前节点':'选择文件后指定大节点'}，每个文件不超过 20 MB。</p>`;
 
 export function renderProjectFiles(state, project) {
   const milestones = projectMilestones(state, project.id);
@@ -19,7 +19,7 @@ export function renderProjectFiles(state, project) {
 }
 
 export function renderNodeFiles(projectId, entityType, entityId) {
-  return `<section class="node-files" data-project-files data-project-id="${escape(projectId)}" data-entity-type="${escape(entityType)}" data-entity-id="${escape(entityId)}" aria-label="节点文件"><div class="file-center-heading"><h4>文件 <span class="file-node-count" data-file-total></span></h4><button type="button" class="button ghost small" data-file-refresh>刷新</button></div><div class="file-dropzone" data-file-drop>${picker()}</div><p class="file-operation-status" data-file-status role="status" aria-live="polite"></p><div data-file-list aria-live="polite"><p class="file-empty">正在加载文件…</p></div></section>`;
+  return `<section class="node-files" data-project-files data-project-id="${escape(projectId)}" data-entity-type="${escape(entityType)}" data-entity-id="${escape(entityId)}" aria-label="节点文件"><div class="file-center-heading"><h4>文件 <span class="file-node-count" data-file-total></span></h4><button type="button" class="button ghost small" data-file-refresh>刷新</button></div><div class="file-dropzone" data-file-drop>${picker(true)}</div><p class="file-operation-status" data-file-status role="status" aria-live="polite"></p><div data-file-list aria-live="polite"><p class="file-empty">正在加载文件…</p></div></section>`;
 }
 
 export function renderFileRows(files, state, { query = '', node = '', compact = false } = {}) {
@@ -83,7 +83,7 @@ const targetExists = (context, target) => {
   return (target.entityType==='task'?state.tasks:target.entityType==='milestone'?state.milestones:[]).some(node => node.id===target.entityId && node.projectId===target.projectId);
 };
 const hostTarget = host => ({projectId:host.dataset.projectId,entityType:host.dataset.entityType || '',entityId:host.dataset.entityId || ''});
-const canChooseTarget = (context, origin) => accessible(context,origin.projectId) && projectMilestones(context.getState(),origin.projectId).length > 0 && (!origin.entityId || targetExists(context,origin));
+const canChooseTarget = (context, origin) => origin.entityId ? targetExists(context,origin) : accessible(context,origin.projectId) && projectMilestones(context.getState(),origin.projectId).length > 0;
 const belongsToHost = (file, host, state) => file.projectId === host.dataset.projectId && (!host.dataset.entityId || (host.dataset.entityType==='milestone' ? fileMilestone(file,state)?.id === host.dataset.entityId : file.entityType==='task'&&file.entityId===host.dataset.entityId));
 function validateFiles(files, max) {
   for(const file of files){if(file.size>max)throw new Error(`“${file.name}”超过 ${formatFileSize(max)}。`);if(!file.size)throw new Error(`“${file.name}”是空文件，请重新选择。`);}
@@ -105,12 +105,9 @@ function chooseMilestone(files, origin, context, {signal, isPresent = () => true
     const chosenTarget=()=>{
       const node=projectMilestones(context.getState(),origin.projectId).find(item=>item.id===select.value);
       if(!node)return null;
-      const task=origin.entityType==='task'&&context.getState().tasks.find(item=>item.id===origin.entityId&&item.projectId===origin.projectId);
-      return task?.milestoneId===node.id ? {...origin} : {projectId:origin.projectId,entityType:'milestone',entityId:node.id};
+      return {projectId:origin.projectId,entityType:'milestone',entityId:node.id};
     };
     select.addEventListener('change',()=>{
-      const target=valid()&&chosenTarget(),task=target?.entityType==='task'&&context.getState().tasks.find(item=>item.id===target.entityId);
-      dialog.querySelector('[data-file-target-note]').textContent=task?`文件归入所选大节点，并保留在任务“${task.title}”中。`:'确认后开始上传，文件会归入所选大节点。';
       error.hidden=true;
     });
     dialog.addEventListener('submit',event=>{event.preventDefault();event.stopPropagation();if(!valid()){finish(null);return;}const target=chosenTarget();if(!target){error.hidden=false;error.textContent='请选择一个有效的大节点。';select.focus();return;}finish(target);});
@@ -167,7 +164,7 @@ export function bindProjectFiles(container, context) {
       record.busy=true;updatePicker();
       try{
         validateFiles(files,record.maxFileBytes);
-        const target=await chooseMilestone(files,origin,context,{signal:abort.signal,isPresent:()=>host.isConnected});
+        const target=origin.entityId ? origin : await chooseMilestone(files,origin,context,{signal:abort.signal,isPresent:()=>host.isConnected});
         if(!target){if(valid())status('已取消上传。');return;}
         if(!valid())return;
         await uploadFiles(files,target,context,{signal:abort.signal,max:record.maxFileBytes,onProgress:message=>status(message)});
@@ -191,19 +188,57 @@ export function bindProjectFiles(container, context) {
     bindDrop(drop,files=>void upload(files));
     updatePicker();void record.load();
   }
+  for (const flow of container.querySelectorAll?.('[data-file-flow]') || []) {
+    if (hosts.has(flow)) continue;
+    const projectId = flow.dataset.projectId, actor = context.getActorId(), epoch = generation;
+    const abort = new AbortController();
+    let sequence = 0;
+    const load = async () => {
+      const current = ++sequence;
+      try {
+        const data = await request(`/api/files?${new URLSearchParams({projectId, summary:'counts'})}`, {signal:abort.signal});
+        if (current !== sequence || !flow.isConnected || epoch !== generation || actor !== context.getActorId() || !accessible(context, projectId)) return;
+        const counts = new Map();
+        const parents = new Map(context.getState().tasks.filter(task => task.projectId === projectId).map(task => [task.id,task.milestoneId]));
+        for (const row of data.counts) {
+          const key = row.type + ':' + row.id;
+          counts.set(key,(counts.get(key) || 0) + row.total);
+          if (row.type === 'task' && parents.get(row.id)) {
+            const parentKey = 'milestone:' + parents.get(row.id);
+            counts.set(parentKey,(counts.get(parentKey) || 0) + row.total);
+          }
+        }
+        for (const node of flow.querySelectorAll('[data-node-file-drop]')) {
+          const badge = node.querySelector('[data-file-badge]');
+          if (!badge) continue;
+          const count = counts.get(node.dataset.fileType + ':' + node.dataset.fileId) || 0;
+          badge.hidden = count === 0;
+          node.querySelector('[data-file-number]').textContent = String(count);
+          const label = count + ' 个附件' + (node.dataset.fileType === 'milestone' ? '（含下属小任务）' : '');
+          badge.title = label;
+          node.setAttribute('aria-description', count ? label : '可拖入文件直接上传');
+        }
+      } catch (error) {
+        if (!abort.signal.aborted && flow.isConnected && epoch === generation && actor === context.getActorId()) {
+          if ([401,403].includes(error.status)) context.onUnauthorized?.();
+          else context.notify?.('附件数量暂时无法加载，请刷新。',true);
+        }
+      }
+    };
+    hosts.set(flow,{abort,load,flow:true});
+    void load();
+  }
   for (const node of (container.querySelectorAll?.('[data-node-file-drop]') || [])) {
     if(node.dataset.fileDropBound)continue;node.dataset.fileDropBound='true';
     bindDrop(node, async files => {
       if(node.dataset.fileUploading)return;
       const origin={projectId:node.dataset.fileProject,entityType:node.dataset.fileType,entityId:node.dataset.fileId};
-      if(!files.length||!canChooseTarget(context,origin))return;
+      if(!files.length||!node.isConnected||!targetExists(context,origin))return;
       node.dataset.fileUploading='true';
       try{
         validateFiles(files,DEFAULT_LIMIT);
-        const target=await chooseMilestone(files,origin,context,{isPresent:()=>node.isConnected});
-        if(!target)return;
         node.classList.add('is-file-uploading');
-        await uploadFiles(files,target,context,{onProgress:message=>context.notify?.(message)});
+        await uploadFiles(files,origin,context,{onProgress:message=>context.notify?.(message)});
       }
       catch(error){if(error.name!=='AbortError')context.notify?.(error.message,true);}
       finally{delete node.dataset.fileUploading;node.classList.remove('is-file-uploading');}
@@ -215,6 +250,10 @@ function bindDrop(node, upload) {
   node.addEventListener('dragleave',event=>{if(!node.contains(event.relatedTarget))node.classList.remove('is-file-dragover');});
   node.addEventListener('drop',event=>{if(!hasFiles(event))return;event.preventDefault();event.stopPropagation();node.classList.remove('is-file-dragover');void upload(Array.from(event.dataTransfer.files||[]));});
 }
+export function refreshFlowFileCounts() {
+  for (const [host, record] of hosts) if (record.flow && host.isConnected) void record.load();
+}
+
 async function refreshProjectFiles(projectId) {
   await Promise.all([...hosts].filter(([host])=>host.isConnected&&host.dataset.projectId===projectId).map(([,record])=>record.load()));
 }

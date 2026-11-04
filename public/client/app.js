@@ -1,7 +1,8 @@
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from './roles.js';
 import { canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from './approval-access.js';
+import { planEditor, bindPlanEditor, readPlanStages, planContents } from './project-plan.js';
 import { renderProjectFlow, bindFlowCanvas } from './flow.js';
-import { renderNodeFiles, bindProjectFiles, resetProjectFiles, hasActiveFileOperations } from './files.js';
+import { renderNodeFiles, bindProjectFiles, resetProjectFiles, refreshFlowFileCounts, hasActiveFileOperations } from './files.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from './maintenance.js';
 import { today, addDays, weekRange, projectProgress, progressAgainstPlan, memberStats } from './domain.js';
 import { datePart, deadlineMs, isOverdue, formatDateTime, toDateTimeInput } from './time.js';
@@ -95,7 +96,7 @@ function changePassword() {
 }
 async function loadSession(silent=false) {
   const epoch=sessionEpoch;
-  try{const data=await api('/api/session');if(epoch!==sessionEpoch)return;const wasReady=!!state,changed=data.revision!==revision,previousNotices=notifications.map(n=>n.id).join(',');if(!acceptSession(data))return;storageIssue='';const noticesChanged=previousNotices!==notifications.map(n=>n.id).join(',');sessionRenderPending ||= changed||noticesChanged;if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks');if(!silent||((sessionRenderPending||renderedTiming!==timingSignature())&&!modal.open&&!maintenanceIsBusy()&&!hasActiveFileOperations()))render();}
+  try{const data=await api('/api/session');if(epoch!==sessionEpoch)return;const wasReady=!!state,changed=data.revision!==revision,previousNotices=notifications.map(n=>n.id).join(',');if(!acceptSession(data))return;storageIssue='';const noticesChanged=previousNotices!==notifications.map(n=>n.id).join(',');sessionRenderPending ||= changed||noticesChanged;if(!wasReady&&!location.hash)history.replaceState(null,'',isAdmin()?'#overview':'#tasks');if(!silent||((sessionRenderPending||renderedTiming!==timingSignature())&&!modal.open&&!maintenanceIsBusy()&&!hasActiveFileOperations()))render();else if(!modal.open&&!hasActiveFileOperations())refreshFlowFileCounts();}
   catch(error){if(epoch!==sessionEpoch)return;if(error.status===401)authScreen();else if(error.status===403)authScreen(error.message,true);else if(!state)authScreen(error.message);else if(!silent)toast(error.message,true);}
 }
 const user = id => state?.users.find(u => u.id === id);
@@ -227,7 +228,7 @@ function readVisibleNotifications(page,id) {
     visible.push(...notifications.filter(item=>item.category==='approvals'&&ids.has(item.entityId)));
   }
   if(page==='approvals') {
-    const records=approvalKind==='nodes'?visibleNodeRequests():visibleExtensions();
+    const records=approvalKind==='plans' ? state.projectPlans || [] : approvalKind==='nodes'?visibleNodeRequests():visibleExtensions();
     const ids=new Set(records.filter(item=>approvalFilter==='all'||item.status===approvalFilter).map(item=>item.id));
     visible=notifications.filter(item=>item.category==='approvals'&&ids.has(item.entityId));
   }
@@ -241,7 +242,7 @@ async function openNotification(id) {
   modal.close();searchTerm='';
   if(item.category==='tasks'&&task(item.entityId)){taskDetail(item.entityId);return;}
   if(item.category==='approvals'){
-    approvalKind=state.extensions.some(x=>x.id===item.entityId)?'extensions':'nodes';approvalFilter='all';
+    approvalKind=state.projectPlans?.some(plan=>plan.id===item.entityId)?'plans':state.extensions.some(x=>x.id===item.entityId)?'extensions':'nodes';approvalFilter='all';
     history.replaceState(null,'','#approvals');render();
   } else if(visibleProjects().some(p=>p.id===item.projectId)) {
     projectView='flow';flowProjectId=item.projectId;history.replaceState(null,'',`#projects/${encodeURIComponent(item.projectId)}`);render();
@@ -251,9 +252,13 @@ async function openNotification(id) {
 }
 async function commit(action, payload, message, expectedRevision=revision) {
   if(saving)return;
-  const epoch=sessionEpoch,previousProjectIds=action==='createProject'?new Set(state.projects.map(p=>p.id)):null;
+  const epoch=sessionEpoch;
   saving=true; const submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
-  try {const data=await api('/api/command',{method:'POST',body:JSON.stringify({action,payload,revision:expectedRevision})});if(epoch!==sessionEpoch)return;acceptSession(data);if(['deleteTask','deleteMilestone','deleteProject'].includes(action))resetProjectFiles();if(action==='deleteProject'){flowProjectId='';projectView='flow';history.replaceState(null,'','#projects');}storageIssue='';modal.close();if(previousProjectIds){const created=state.projects.find(p=>!previousProjectIds.has(p.id));if(created){flowProjectId=created.id;projectView='flow';location.hash=`projects/${created.id}`;}}render();toast(message);}
+  try {const data=await api('/api/command',{method:'POST',body:JSON.stringify({action,payload,revision:expectedRevision})});if(epoch!==sessionEpoch)return;acceptSession(data);if(['deleteTask','deleteMilestone','deleteProject'].includes(action))resetProjectFiles();if(action==='deleteProject'){flowProjectId='';projectView='flow';history.replaceState(null,'','#projects');}storageIssue='';modal.close();if(action==='createProject'){
+      approvalKind='plans';approvalFilter='pending';history.replaceState(null,'','#approvals');
+    } else if(action==='reviewProjectPlan') {
+      approvalKind='plans';approvalFilter=payload.approve?'approved':'rejected';
+    }render();toast(message);}
   catch(error){if(error.status===409){await loadSession(true);error.message+=' 已刷新最新数据，请核对后重试。';}if(error.status===401||error.status===403)await loadSession(true);throw error;}
   finally{saving=false;if(submit)submit.disabled=false;}
 }
@@ -265,14 +270,14 @@ function route() {
 }
 const navigationPage = page => page === 'projects' ? 'overview' : page;
 const pageTitle = page => page === 'projects' ? (route()[1] ? '项目中心' : '全部项目 · 项目中心') : routes.find(r=>r.id===page)?.name || '平台设置';
-function navigationRoutes() {const list=routes.filter(r=>canAccessRoute(actor(),r.id));return isAdmin()?list:list.sort((a,b)=>['tasks','overview','weekly','approvals','my-account'].indexOf(a.id)-['tasks','overview','weekly','approvals','my-account'].indexOf(b.id)).map(r=>r.id==='approvals'?{...r,name:visibleProjects().some(p=>canApproveProject(p,actor()))?'审批中心':'申请记录'}:r);}
+function navigationRoutes() {const list=routes.filter(r=>canAccessRoute(actor(),r.id));return isAdmin()?list:list.sort((a,b)=>['tasks','overview','weekly','approvals','my-account'].indexOf(a.id)-['tasks','overview','weekly','approvals','my-account'].indexOf(b.id)).map(r=>r.id==='approvals'?{...r,name:(visibleProjects().some(p=>canApproveProject(p,actor())) || state.projectPlans?.some(plan=>canApproveRequest(plan.project,plan,actor())))?'审批中心':'申请记录'}:r);}
 function render() {
   if(!state)return;
   sessionRenderPending=false;
   const [page] = route(), activePage=navigationPage(page), a = actor(), nav=navigationRoutes();
   const mobile=(isAdmin()?['overview','approvals','tasks','accounts','my-account'].map(id=>routes.find(r=>r.id===id)):nav);
   const navLink=r=>`<a href="#${r.id}" aria-label="${e(r.name)}" title="${e(r.name)}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${r.name}</span>${navigationUnread(r.id)}</a>`;
-  app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'}</div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isSuperAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>服务器保存 · 独立账号</div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><strong>${pageTitle(page)}</strong></div><div class="topbar-actions"><button type="button" class="notification-trigger icon-button" data-action="notifications" aria-label="查看通知">${icon('bell')}${unreadSlot()}</button><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${accountRoleLabel(accountInfo)}</small></span></a><button type="button" data-action="logout" class="signout-link" aria-label="退出登录">${icon('logout')}</button></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" aria-label="${e(r.name)}" title="${e(r.name)}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${({overview:'项目中心',approvals:visibleProjects().some(p=>canApproveProject(p,actor()))?'审批':'申请',tasks:'任务',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span>${navigationUnread(r.id)}</a>`).join('')}</nav></div></div>`;
+  app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'}</div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isSuperAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>服务器保存 · 独立账号</div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><strong>${pageTitle(page)}</strong></div><div class="topbar-actions"><button type="button" class="notification-trigger icon-button" data-action="notifications" aria-label="查看通知">${icon('bell')}${unreadSlot()}</button><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${accountRoleLabel(accountInfo)}</small></span></a><button type="button" data-action="logout" class="signout-link" aria-label="退出登录">${icon('logout')}</button></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" aria-label="${e(r.name)}" title="${e(r.name)}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${({overview:'项目中心',approvals:(visibleProjects().some(p=>canApproveProject(p,actor())) || state.projectPlans?.some(plan=>canApproveRequest(plan.project,plan,actor())))?'审批':'申请',tasks:'任务',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span>${navigationUnread(r.id)}</a>`).join('')}</nav></div></div>`;
   renderContent();
 }
 function renderContent() {
@@ -376,9 +381,34 @@ function projectNodeRequests(p) {
   return `<section class="project-node-requests"><div class="section-heading"><div><h2>大节点申请</h2><p class="panel-subtitle">新增节点与计划调整由项目负责人或总管理员审批。</p></div>${button('申请新增大节点','new-milestone',p.id,'secondary','plus')}</div><div class="approval-list">${list.map(x=>renderMilestoneRequestCard(state,x,{admin:canReviewApplication(x),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})})).join('')||empty('还没有大节点申请','新增节点可在此提交；修改节点请点击流程图中的大节点，再选择“申请调整计划”。')}</div></section>`;
 }
 function approvalsPage() {
-  const nodes=visibleNodeRequests(),extensions=visibleExtensions(),all=approvalKind==='nodes'?nodes:extensions;
+  const nodes=visibleNodeRequests(),extensions=visibleExtensions(),plans=state.projectPlans || [];
+  const all=approvalKind==='plans'?plans:approvalKind==='nodes'?nodes:extensions;
   const list=all.filter(x=>approvalFilter==='all'||x.status===approvalFilter).slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
-  return heading('审批中心','提交申请、查看处理意见，批准后计划才会更新。',approvalKind==='extensions'&&visibleProjects().length?button('申请项目延期','new-extension','','primary','plus'):'')+`<div class="approval-kind-tabs" aria-label="申请类型">${[['nodes','大节点申请',nodes],['extensions','项目延期',extensions]].map(([id,label,items])=>`<button class="filter-tab ${approvalKind===id?'active':''}" aria-pressed="${approvalKind===id}" data-action="approval-kind" data-id="${id}">${label}${approvalBadge(items.filter(x=>x.status==='pending').length)}</button>`).join('')}</div><div class="filters"><div class="filter-tabs">${[['pending',`待审批${approvalBadge(all.filter(x=>x.status==='pending').length)}`],['approved','已批准'],['rejected','已驳回'],['all','全部申请']].map(([id,label])=>`<button class="filter-tab ${approvalFilter===id?'active':''}" data-action="approval-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${list.length} 条记录</span></div><div class="approval-list">${list.map(x=>approvalKind==='nodes'?renderMilestoneRequestCard(state,x,{admin:canReviewApplication(x),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})}):approvalCard(x)).join('')||empty('当前没有此类申请',approvalKind==='nodes'?'在项目流程中申请新增大节点，或点击已有大节点申请修改。':'项目负责人可以从项目详情提交延期申请。')}</div>`;
+  return heading('审批中心','提交申请、查看处理意见，批准后计划才会更新。',approvalKind==='extensions'&&visibleProjects().length?button('申请项目延期','new-extension','','primary','plus'):'')+`<div class="approval-kind-tabs" aria-label="申请类型">${[['plans','新建项目',plans],['nodes','大节点申请',nodes],['extensions','项目延期',extensions]].map(([id,label,items])=>`<button class="filter-tab ${approvalKind===id?'active':''}" aria-pressed="${approvalKind===id}" data-action="approval-kind" data-id="${id}">${label}${approvalBadge(items.filter(x=>x.status==='pending').length)}</button>`).join('')}</div><div class="filters"><div class="filter-tabs">${[['pending',`待审批${approvalBadge(all.filter(x=>x.status==='pending').length)}`],['approved','已批准'],['rejected','已驳回'],['all','全部申请']].map(([id,label])=>`<button class="filter-tab ${approvalFilter===id?'active':''}" data-action="approval-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${list.length} 条记录</span></div><div class="approval-list">${list.map(x=>approvalKind==='plans'?projectPlanCard(x):approvalKind==='nodes'?renderMilestoneRequestCard(state,x,{admin:canReviewApplication(x),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})}):approvalCard(x)).join('')||empty('当前没有此类申请',approvalKind==='plans'?'从项目中心新建项目，整份计划可一起提交。':approvalKind==='nodes'?'在项目流程中申请新增大节点，或点击已有大节点申请修改。':'项目负责人可以从项目详情提交延期申请。')}</div>`;
+}
+function projectPlanCard(plan) {
+  const status = {pending:'待审批', approved:'已批准', rejected:'已驳回'}[plan.status];
+  const approved = plan.status === 'approved';
+  const canReview = canApproveRequest(plan.project, plan, actor());
+  const retry = plan.status === 'rejected' && plan.applicantId === actorId && isAdmin();
+  return `<article class="approval-card"><div class="approval-head"><div><strong>${e(plan.project.name)}</strong>${approvalReminder(plan)}
+    <p class="cell-subtext">${e(user(plan.applicantId)?.name)} 提交 · ${fullDate(plan.createdAt)}</p></div>
+    <span class="status ${approved?'green':plan.status==='pending'?'amber':'gray'}">${status}</span></div>
+    <div class="approval-body"><details><summary>查看整份计划 · ${plan.milestones.length} 个大节点 · ${plan.tasks.length} 项小任务</summary>${planContents(plan,state.users)}</details>
+    ${plan.reviewedAt?`<p class="field-help">${e(user(plan.reviewerId)?.name)} · ${fullDate(plan.reviewedAt)}${plan.comment?' · '+e(plan.comment):''}</p>`:''}</div>
+    <div class="approval-footer"><span class="muted">项目负责人　${e(user(plan.project.ownerId)?.name)}</span>
+    ${canReview?`<div class="approval-buttons">${button('驳回','reject-plan',plan.id)}${button('批准整份计划','approve-plan',plan.id,'primary')}</div>`:''}
+    ${retry?button('修改后重新提交','retry-plan',plan.id):''}
+    ${approved&&project(plan.projectId)?`<a class="text-link" href="#projects/${e(plan.projectId)}">查看项目流程图</a>`:''}</div></article>`;
+}
+
+function reviewPlan(id, approve) {
+  const plan = state.projectPlans?.find(item => item.id === id);
+  if (!plan || !canApproveRequest(plan.project, plan, actor())) return;
+  readEntityNotifications('approvals', id);
+  showModal(approve?'批准整份项目计划':'驳回项目计划',
+    `<h3>${e(plan.project.name)}</h3>${planContents(plan,state.users)}${textarea('审批意见（选填）','comment','',false)}`,
+    approve?'确认批准并创建项目':'确认驳回', approve?'approvePlan':'rejectPlan', id);
 }
 function approvalCard(x) {
   const p=project(x.projectId), duration=durationLabel(x.originalDueDate,x.newDueDate);
@@ -556,9 +586,22 @@ const textarea=(label,name,placeholder='',required=true,value='')=>`<div class="
 const selectField=(label,name,options,required=true)=>`<div class="field"><label for="f-${name}">${label}</label><select id="f-${name}" name="${name}" ${required?'required':''}>${options}</select></div>`;
 const userOptions=(selected,users=state.users)=>users.map(u=>`<option value="${e(u.id)}" ${selected===u.id?'selected':''}>${e(u.name)} · ${e(u.title || roleLabel(u.role))}</option>`).join('');
 const projectOptions=(selected,ps=visibleProjects())=>ps.map(p=>`<option value="${e(p.id)}" ${selected===p.id?'selected':''}>${e(p.name)}</option>`).join('');
-function newProject() {
-  if(!isAdmin()) {toast('仅管理员可以创建项目。',true);return;}
-  showModal('新建项目',`<p class="form-intro">先明确目标与团队，再拆解里程碑和任务。</p><div class="form-grid">${field('项目名称','name','','text','required maxlength="80" placeholder="例如：新产品上市计划"')}${field('项目类别','category','','text','maxlength="30" placeholder="例如：产品研发"')}${selectField('项目负责人','ownerId',userOptions(actorId,state.users))}<div class="field"><label>项目成员</label><div class="member-checks">${state.users.map(u=>`<label class="checkbox-label"><input type="checkbox" name="memberIds" value="${e(u.id)}" ${u.id===actorId?'checked':''}>${e(u.name)}</label>`).join('')}</div></div>${scheduleField('开始时间','startDate',`${currentDay()}T09:00`,'required')}${scheduleField('计划截止时间','dueDate',`${shift(currentDay(),30)}T18:00`,'required')}${textarea('项目目标与说明','description','这个项目要解决什么问题，最终交付什么？')}</div>${scheduleHelp}`,'创建项目','createProject');
+function newProject(prior) {
+  if (!isAdmin()) { toast('仅管理员可以创建项目。',true); return; }
+  const p = prior?.project || {};
+  const people = state.users.filter(person => taskReviewerIds.includes(person.id));
+  const members = p.memberIds || [actorId];
+  const team = people.map(person => `<label class="checkbox-label"><input type="checkbox" name="memberIds" value="${e(person.id)}" ${members.includes(person.id)?'checked':''}>${e(person.name)}</label>`).join('');
+  showModal('新建项目',`<p class="form-intro">填好项目和节点后一起提交。整份计划获批后，成员会收到任务。</p><div class="form-grid">
+    ${field('项目名称','name',p.name,'text','required maxlength="80" placeholder="例如：新产品上市计划"')}
+    ${field('项目类别','category',p.category,'text','maxlength="40"')}
+    ${selectField('项目负责人','ownerId',userOptions(p.ownerId || actorId,people))}
+    <div class="field"><label>项目成员</label><div class="member-checks">${team}</div></div>
+    ${scheduleField('开始时间','startDate',p.startDate?scheduleInput(p.startDate):`${currentDay()}T09:00`,'required')}
+    ${scheduleField('计划截止时间','dueDate',p.dueDate?scheduleInput(p.dueDate):`${shift(currentDay(),30)}T18:00`,'required')}
+    ${textarea('项目目标与说明（选填）','description','项目最终交付什么？',false,p.description)}</div>${planEditor}`,
+    '提交整份计划','createProject');
+  bindPlanEditor(modal.querySelector('form'),people,prior);
 }
 function eligibleTaskReviewers(p,ownerId) {
   return state.users.filter(u=>taskReviewerIds.includes(u.id)&&(u.id!==ownerId||isSuperAdminRole(u.role))&&(p.memberIds.includes(u.id)||p.ownerId===u.id||isAdminRole(u.role)));
@@ -741,6 +784,11 @@ document.addEventListener('click',async event=>{
     if(action==='export-legacy'){const old=localStorage.getItem(LEGACY_KEY);if(old)exportFile('鼎峰旧版浏览器备份.json',old,'application/json;charset=utf-8');return;}
     if(action==='close-modal'){modal.close();return;}
     if(action==='new-project')return newProject();
+    if(action==='approve-plan'||action==='reject-plan')return reviewPlan(id,action==='approve-plan');
+    if(action==='retry-plan'){
+      const plan=state.projectPlans?.find(item=>item.id===id && item.applicantId===actorId && item.status==='rejected');
+      if(plan)return newProject(plan);
+    }
     if(action==='new-task'){newTask(id,el.dataset.milestoneId);if(el.dataset.milestoneId){const f=modal.querySelector('form[data-form="createTask"]');if(f){f.elements.milestoneId.value=el.dataset.milestoneId;const m=milestone(el.dataset.milestoneId);if(m){taskScheduleBounds(f,project(m.projectId),m);}}}return;}
     if(action==='new-milestone')return newMilestone(id);
     if(action==='edit-milestone')return newMilestone(milestone(id)?.projectId,id);
@@ -786,7 +834,8 @@ document.addEventListener('submit',async event=>{
     if(action==='delete-account')return await saveAccountDeletion(id);
     if(action==='add-project-member')return await saveProjectMember(form,payload,id);
     if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
-    if(action==='createProject'){payload.memberIds=data.getAll('memberIds');return await commit(action,payload,'项目已创建，可以开始添加里程碑与任务。');}
+    if(action==='createProject')return await commit(action,{...payload,memberIds:data.getAll('memberIds'),stages:readPlanStages(form)},'整份项目计划已提交，等待审批。');
+    if(action==='approvePlan'||action==='rejectPlan')return await commit('reviewProjectPlan',{id,approve:action==='approvePlan',comment:payload.comment},action==='approvePlan'?'整份计划已批准，项目和任务已生效。':'项目计划已驳回。');
     if(action==='createTask'){
       const p=visibleProjects().find(item=>item.id===payload.projectId);
       if(!p||!eligibleTaskReviewers(p,payload.ownerId).some(u=>u.id===payload.reviewerId))throw new Error('请选择有效的任务验收人。');

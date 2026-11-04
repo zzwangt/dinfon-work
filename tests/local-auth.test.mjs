@@ -292,9 +292,14 @@ test('account refresh returns projects and revision from the same session snapsh
   assert.equal(initial.data.account.id, owner.data.account.id);
   assert.equal(initial.data.capabilities.manageAccounts, true);
   assert.deepEqual(initial.data.users, initial.data.state.users);
-  const created = await f.call('/api/command', {
+  const submitted = await f.call('/api/command', {
     revision: initial.data.revision, action: 'createProject',
     payload: { name: '后创建的项目', ownerId: 'u-admin', memberIds: [], startDate: '2099-10-25T09:00', dueDate: '2099-10-30T18:00' },
+  }, { cookie: owner.cookie });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.data));
+  const created = await f.call('/api/command', {
+    revision: submitted.data.revision, action: 'reviewProjectPlan',
+    payload: {id: submitted.data.state.projectPlans[0].id, approve:true},
   }, { cookie: owner.cookie });
   assert.equal(created.status, 200, JSON.stringify(created.data));
   const project = created.data.state.projects.at(-1);

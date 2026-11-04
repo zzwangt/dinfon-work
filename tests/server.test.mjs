@@ -537,9 +537,14 @@ test('hour-level plans pass through server approval with exact times, scoped per
   const f = fixture(t);
   await provision(f, MANAGER, 'u-manager');
   const staff = await provision(f, ENGINEER, 'u-engineer');
-  const created = await f.call('/api/command', ADMIN, {
+  const submitted = await f.call('/api/command', ADMIN, {
     revision: staff.data.revision, action: 'createProject',
     payload: { name: '小时排期项目', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
+  });
+  assert.equal(submitted.status, 200, JSON.stringify(submitted.data));
+  const created = await f.call('/api/command', MANAGER, {
+    revision: submitted.data.revision, action: 'reviewProjectPlan',
+    payload: {id: submitted.data.state.projectPlans[0].id, approve:true},
   });
   assert.equal(created.status, 200, JSON.stringify(created.data));
   const project = created.data.state.projects.at(-1);
@@ -717,4 +722,44 @@ test('API persists blank extension reason and approval opinions without changing
     assert.equal(updated.dueDate, approve ? newDueDate : project.dueDate);
     assert.doesNotMatch(stored.logs[0].message, /[；;]\s*$/);
   }
+});
+
+test('one project plan defers every node and assignment until an authorized reviewer approves once', async t => {
+  const f = fixture(t);
+  await provision(f, MANAGER, 'u-manager');
+  await provision(f, ENGINEER, 'u-engineer');
+  const other = {userId:'unrelatedadmin',email:'unrelatedadmin@example.com',displayName:'其他管理员'};
+  await provision(f, other, 'u-ops', 'admin');
+  const cmd = async (identity, action, payload, revision = f.stored().revision) =>
+    f.call('/api/command', identity, {action, revision, payload});
+  const makeTask = title => ({title,ownerId:'u-engineer',reviewerId:'u-manager',dueDate:'2099-10-15T10:00',acceptance:'可验收成果'});
+  const plan = {name:'多阶段立项', ownerId:'u-manager',memberIds:['u-engineer'],startDate:'2099-10-01',dueDate:'2099-11-01',
+    stages:['设计','测试'].map(title => ({title,description:'预期交付',dueDate:'2099-10-20T18:00',tasks:[makeTask(title+' 1'),makeTask(title+' 2')]}))};
+  const previous = f.stored();
+  const invalid = structuredClone(plan);
+  invalid.stages[1].tasks[1].dueDate = '2099-10-23';
+  assert.equal((await cmd(ADMIN,'createProject',invalid)).status,400);
+  assert.deepEqual(f.stored(),previous);
+  const submission = await cmd(ADMIN,'createProject',plan);
+  assert.equal(submission.status,200);
+  const request = submission.data.state.projectPlans[0], id = request.id;
+  assert.equal(request.tasks.length,4);
+  for (const key of ['projects','milestones','tasks']) assert.deepEqual(f.stored().state[key],previous.state[key]);
+  assert.equal((await f.call('/api/session', ENGINEER)).data.state.projectPlans.length,0);
+  assert.equal((await f.call('/api/session', MANAGER)).data.notifications.some(n=>n.entityId===id),true);
+  assert.equal((await cmd(other,'reviewProjectPlan',{id,approve:true})).status,404);
+  assert.equal((await cmd(ENGINEER,'reviewProjectPlan',{id,approve:true})).status,404);
+  const decisions=await Promise.all([1,2].map(()=>cmd(MANAGER,'reviewProjectPlan',{id,approve:true},submission.data.revision)));
+  assert.deepEqual(decisions.map(r=>r.status).sort(),[200,409]);
+  const staff=(await f.call('/api/session', ENGINEER)).data;
+  assert.equal(staff.state.projects.filter(p=>p.id===request.projectId).length,1);
+  assert.equal(staff.state.milestones.filter(m=>m.projectId===request.projectId).length,2);
+  const tasks=staff.state.tasks.filter(t=>t.projectId===request.projectId);
+  assert.equal(tasks.length,4);
+  assert.ok(tasks.every(t=>t.createdBy==='u-admin'&&t.status==='todo'&&staff.notifications.some(n=>n.entityId===t.id)));
+  assert.equal((await cmd(MANAGER,'reviewProjectPlan',{id,approve:true})).status,400);
+  const repeat=await cmd(ADMIN,'createProject',plan), second=repeat.data.state.projectPlans[0];
+  const rejected=await cmd(MANAGER,'reviewProjectPlan',{id:second.id,approve:false,comment:'调整时间'});
+  assert.equal(rejected.data.state.projectPlans[0].status,'rejected');
+  assert.ok(!f.stored().state.projects.some(p=>p.id===second.projectId));
 });

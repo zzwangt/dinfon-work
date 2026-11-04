@@ -1,3 +1,4 @@
+import { canViewProjectPlan } from './approval-access.js';
 import { isAdminRole, normalizeRole } from './roles.js';
 
 /**
@@ -36,6 +37,7 @@ export function sanitizeStateForActor(state, actorId) {
   const actor = state.users.find((user) => user.id === actorId);
   if (!actor || !ROLES.has(normalizeRole(actor.role))) throw new Error('账号不存在或没有有效访问角色');
 
+  const projectPlans = (state.projectPlans || []).filter(plan => canViewProjectPlan(plan, actor));
   if (isAdminRole(actor.role)) {
     return structuredClone({
       version: state.version,
@@ -45,6 +47,7 @@ export function sanitizeStateForActor(state, actorId) {
       tasks: state.tasks,
       extensions: state.extensions,
       milestoneRequests: allMilestoneRequests,
+      projectPlans,
       logs: state.logs,
     });
   }
@@ -64,6 +67,11 @@ export function sanitizeStateForActor(state, actorId) {
   for (const project of projects) {
     userIds.add(project.ownerId);
     for (const id of project.memberIds || []) userIds.add(id);
+  }
+  for (const plan of projectPlans) {
+    for (const id of [plan.applicantId, plan.reviewerId, ...plan.project.memberIds]) userIds.add(id);
+    for (const stage of plan.milestones) userIds.add(stage.coReviewerId);
+    for (const task of plan.tasks) userIds.add(task.reviewerId);
   }
   for (const node of milestones) {
     userIds.add(node.coReviewerId);
@@ -87,7 +95,7 @@ export function sanitizeStateForActor(state, actorId) {
   return structuredClone({
     version: state.version,
     users: state.users.filter((user) => userIds.has(user.id)).map(profile),
-    projects, milestones, tasks, extensions, milestoneRequests, logs,
+    projects, milestones, tasks, extensions, milestoneRequests, projectPlans, logs,
   });
 }
 

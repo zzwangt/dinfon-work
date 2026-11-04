@@ -34,7 +34,7 @@ test('legacy project reviewer assignments stay historical and cannot be configur
   assert.equal(get(normalizeState(state), 'projects', project.id).reviewerId, 'u-qa');
   assert.throws(() => assign(state, 'u-design'), /已停用/);
   const payload = { name: '独立项目', ownerId: 'u-manager', memberIds: [], startDate: '2099-01-01', dueDate: '2099-02-01' };
-  assert.equal(transact(state, 'createProject', payload, 'u-admin').projects.at(-1).reviewerId, null);
+  assert.equal(transact(state, 'createProject', payload, 'u-admin').projectPlans[0].project.reviewerId, null);
   assert.throws(() => transact(state, 'createProject', { ...payload, reviewerId: 'u-qa' }, 'u-admin'), /已停用/);
 });
 

@@ -2,7 +2,7 @@ import { isAdminRole } from '../public/client/roles.js';
 // Events commit in the same workspace CAS as the business change. Read receipts
 // live separately, so opening a notification never conflicts with a task edit.
 // Old workspaces start with an empty event stream; historical logs are not replayed.
-import { canApproveRequest, canSignMilestone, canReviewTask } from '../public/client/approval-access.js';
+import { canApproveRequest, canViewProjectPlan, canSignMilestone, canReviewTask } from '../public/client/approval-access.js';
 
 const schemaReady = new WeakMap();
 
@@ -34,11 +34,11 @@ export function appendNotifications(previous, next, actorId, action, payload = {
   const projectAudience = (projectId) => [...projectMembers(state.projects.find((project) => project.id === projectId)), ...admins];
   const createdAt = state.logs.find((entry) => !previous.state.logs.some((old) => old.id === entry.id))?.at || new Date().toISOString();
   const emitted = new Set();
-  const emit = (recipients, data) => {
+  const emit = (recipients, data, plan) => {
     for (const account of next.accounts) {
       const user = state.users.find((entry) => entry.id === account.userId);
       if (account.status !== 'active' || !user || user.id === actorId || !recipients.includes(user.id)) continue;
-      if (!hasProjectAccess(action === 'deleteProject' ? previous.state : state, user, data.projectId)) continue;
+      if (plan ? !canViewProjectPlan(plan, user) : !hasProjectAccess(action === 'deleteProject' ? previous.state : state, user, data.projectId)) continue;
       // One operation appears once per recipient, even when they hold several roles.
       const key = `${account.id}:${data.entityId}`;
       if (emitted.has(key)) continue;
@@ -61,9 +61,23 @@ export function appendNotifications(previous, next, actorId, action, payload = {
       title:`阶段待你签字：${node.title}`, target:`#projects/${project.id}`});
   };
 
-  if (action === 'createProject') {
-    const project = newEntry(previous.state.projects, state.projects);
-    if (project) projectNotice(project, `你参与的项目已建立：${project.name}`);
+  if (action === 'createProject' || action === 'reviewProjectPlan') {
+    const submitting = action === 'createProject';
+    const plan = submitting ? state.projectPlans[0] : state.projectPlans.find(item => item.id === payload.id);
+    const project = plan.project;
+    const recipients = submitting
+      ? state.users.filter(user => canApproveRequest(project, plan, user)).map(user => user.id)
+      : [plan.applicantId];
+    const status = submitting ? '待审批' : plan.status === 'approved' ? '已批准' : '已驳回';
+    emit(recipients, { category: 'approvals', projectId: project.id, entityId: plan.id,
+      title: `新建项目${status}：${project.name}`, target: '#approvals' }, plan);
+    if (!submitting && plan.status === 'approved') {
+      projectNotice(project, `项目计划已生效：${project.name}`);
+      for (const task of plan.tasks) {
+        emit([task.ownerId], { category: 'tasks', projectId: project.id, entityId: task.id,
+          title: `新增任务：${task.title}`, target: '#tasks' });
+      }
+    }
   } else if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(action)) {
     const wholeProject = action === 'deleteProject';
     const target = previous.state[wholeProject ? 'projects' : action === 'deleteMilestone' ? 'milestones' : 'tasks'].find(entry => entry.id === payload.id);
@@ -146,6 +160,10 @@ function visibleNotifications(workspace, account, actor) {
   if (account.status !== 'active') return [];
   return (workspace.notifications || []).filter((entry) => {
     if (entry.accountId !== account.id) return false;
+    if (entry.category === 'approvals' && ['createProject', 'reviewProjectPlan'].includes(entry.action)) {
+      const plan = workspace.state.projectPlans?.find(item => item.id === entry.entityId);
+      return plan && canViewProjectPlan(plan, actor) && (entry.action !== 'createProject' || canApproveRequest(plan.project, plan, actor));
+    }
     if (entry.action === 'deleteProject' && entry.category === 'projects' && !workspace.state.projects.some(project => project.id === entry.projectId)) return true;
     if (!hasProjectAccess(workspace.state, actor, entry.projectId)) return false;
     if (entry.category === 'tasks') {

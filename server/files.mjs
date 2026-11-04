@@ -119,6 +119,10 @@ export async function handleFileApi(request, { db, authorize }) {
     if (path === '/api/files' && method === 'GET') {
       const projectId = identifier(url.searchParams.get('projectId'), '项目');
       const context = await authorize(), project = projectFor(context, projectId);
+      if (url.searchParams.get('summary') === 'counts') {
+        const result = await db.prepare('SELECT entity_type AS type, entity_id AS id, COUNT(*) AS total FROM project_files WHERE project_id = ? GROUP BY entity_type, entity_id').bind(projectId).all();
+        return json({ counts: result.results });
+      }
       const entityType = url.searchParams.get('entityType'), entityId = url.searchParams.get('entityId');
       if (entityType || entityId) entityFor(context, projectId, entityType, identifier(entityId, '节点'));
       const includeTaskFiles = url.searchParams.get('includeTaskFiles') === 'true';

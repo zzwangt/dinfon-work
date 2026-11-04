@@ -7,7 +7,7 @@ import { openDatabase } from './sqlite.mjs';
 import { initializeAuthSchema } from './auth.mjs';
 import { MAX_FILE_REQUEST_BYTES } from './files.mjs';
 import { createMaintenanceManager } from './maintenance.mjs';
-import { handleHttpApi, initializeLocalWorkspace } from './service.mjs';
+import { handleHttpApi, initializeLocalWorkspace, MAX_PLAN_BYTES } from './service.mjs';
 
 export const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_ROOT = resolve(PROJECT_ROOT, 'public');
@@ -76,6 +76,7 @@ export async function createAppServer(input) {
           tracked = true;
         }
         const bodyLimit = method === 'POST' && url.pathname === '/api/files' ? MAX_FILE_REQUEST_BYTES
+          : method === 'POST' && url.pathname === '/api/command' ? MAX_PLAN_BYTES
           : method === 'POST' && url.pathname === '/api/maintenance/upgrade/prepare' ? 50 * 1024 * 1024 + 65536 : 65536;
         const chunks = []; let bytes = 0;
         for await (const chunk of incoming) { bytes += chunk.length; if (bytes > bodyLimit) return finish(413, '提交内容过长'); chunks.push(chunk); }

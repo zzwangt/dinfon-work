@@ -60,7 +60,7 @@ test('unapproved new or changed nodes cannot change the current project plan or 
 test('hour-level project and task creation respect same-day order and offset equivalence', () => {
   const state = hourlyState();
   const projectInput = { name: '小时排期', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: at(10), dueDate: at(18) };
-  assert.equal(transact(state, 'createProject', projectInput, 'u-admin').projects.at(-1).dueDate, at(18));
+  assert.equal(transact(state, 'createProject', projectInput, 'u-admin').projectPlans[0].project.dueDate, at(18));
   assert.throws(() => transact(state, 'createProject', { ...projectInput, dueDate: at(9) }, 'u-admin'), /不能早于开始/);
   const input = { projectId: 'p-mower', milestoneId: 'm-mower-2', ownerId: 'u-engineer', reviewerId: 'u-manager', title: '小时任务', acceptance: '完整记录', dueDate: `${DAY}T06:00:00Z` };
   assert.equal(transact(state, 'createTask', input, 'u-manager').tasks.at(-1).dueDate, input.dueDate);

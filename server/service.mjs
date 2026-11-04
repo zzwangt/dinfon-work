@@ -8,8 +8,9 @@ import { handleFileApi, initializeFileSchema } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['superadmin', 'admin', 'member']);
-const COMMANDS = new Set(['createProject', 'setMilestoneCoReviewer', 'setTaskReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const COMMANDS = new Set(['createProject', 'reviewProjectPlan', 'setMilestoneCoReviewer', 'setTaskReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
+export const MAX_PLAN_BYTES = 2 * 1024 * 1024;
 
 class ApiError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
@@ -46,18 +47,20 @@ function authenticate(identity) {
   return { authId: identity.userId, email: normalized, displayName: typeof identity.displayName === 'string' ? identity.displayName.trim().slice(0, 30) : '' };
 }
 
-async function body(request) {
+async function body(request, limit = MAX_BODY_BYTES) {
   const origin = request.headers.get('Origin');
   if (!origin || origin !== new URL(request.url).origin || request.headers.get('Sec-Fetch-Site') === 'cross-site') {
     fail(403, 'ORIGIN_REJECTED', '请求来源无效，请从平台页面重试');
   }
   if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('application/json')) fail(415, 'JSON_REQUIRED', '请求必须使用 JSON 格式');
-  if (Number(request.headers.get('Content-Length') || 0) > MAX_BODY_BYTES) fail(413, 'BODY_TOO_LARGE', '提交内容过长');
+  if (Number(request.headers.get('Content-Length') || 0) > limit) fail(413, 'BODY_TOO_LARGE', '提交内容过长');
   const raw = await request.text();
-  if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) fail(413, 'BODY_TOO_LARGE', '提交内容过长');
+  const size = new TextEncoder().encode(raw).byteLength;
+  if (size > limit) fail(413, 'BODY_TOO_LARGE', '提交内容过长');
   let value;
   try { value = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON', '提交内容格式不正确'); }
   requireValue(value && typeof value === 'object' && !Array.isArray(value), '提交内容格式不正确');
+  if (size > MAX_BODY_BYTES && value.action !== 'createProject') fail(413, 'BODY_TOO_LARGE', '提交内容过长');
   return value;
 }
 
@@ -230,8 +233,17 @@ function log(workspace, actorId, message, projectId = null) {
 }
 
 function accessibleCommand(workspace, actor, action, payload) {
-  if (action === 'createProject') return;
+  if (action === 'createProject') {
+    adminOnly(actor);
+    return;
+  }
   const scope = sanitizeStateForActor(workspace.state, actor.id);
+  if (action === 'reviewProjectPlan') {
+    const plan = scope.projectPlans.find(item => item.id === payload.id);
+    if (!plan) fail(404, 'NOT_FOUND', '项目计划不存在或无权查看');
+    if (!canApproveProject(plan.project, actor)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅拟任项目负责人或总管理员可以审批');
+    return scope;
+  }
   let projectId = payload.projectId;
   if (action === 'deleteProject') projectId = payload.id;
   if (['updateTask', 'deleteTask', 'editTaskContent', 'submitTask', 'reviewTask', 'setTaskReviewer'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
@@ -387,7 +399,7 @@ export async function handleApi(request, env, authenticatedIdentity) {
       return json({ notifications: await unreadNotifications(env.DB, latest, current.account, current.actor) });
     }
     if (path === '/api/command' && method === 'POST') {
-      const data = await body(request);
+      const data = await body(request, MAX_PLAN_BYTES);
       revisionMatches(data.revision, workspace.revision);
       requireValue(COMMANDS.has(data.action), '不支持的业务操作');
       requireValue(data.payload == null || (typeof data.payload === 'object' && !Array.isArray(data.payload)), '操作内容格式不正确');
@@ -417,6 +429,12 @@ export async function handleApi(request, env, authenticatedIdentity) {
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
+      if (data.action === 'createProject' || (data.action === 'reviewProjectPlan' && payload.approve)) {
+        const plan = data.action === 'createProject' ? state.projectPlans[0] : state.projectPlans.find(item => item.id === payload.id);
+        const active = await activeLoginUsers(env.DB, workspace, identity);
+        const people = [plan.applicantId, ...plan.project.memberIds, ...plan.tasks.map(task => task.reviewerId), ...plan.milestones.map(node => node.coReviewerId).filter(Boolean)];
+        requireValue(people.every(id => active.has(id)), '计划中包含未启用登录的人员，请调整人员后重新提交');
+      }
       const next = appendNotifications(workspace, { ...workspace, state }, actor.id, data.action, payload);
       let saved;
       if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(data.action)) {

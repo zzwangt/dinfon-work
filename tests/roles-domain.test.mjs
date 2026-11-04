@@ -30,7 +30,7 @@ test('both administrative roles can assign any employee as project owner; an own
   const payload = { name: '独立分工项目', ownerId: 'u-engineer', memberIds: [], startDate: '2099-01-01', dueDate: '2099-01-20' };
   for (const role of ['admin', 'superadmin']) {
     const next = transact(seed(role), 'createProject', payload, 'u-admin');
-    const project = next.projects.at(-1);
+    const project = next.projectPlans[0].project;
     assert.equal(project.ownerId, 'u-engineer');
     assert.equal(get(next, 'users', 'u-engineer').role, 'member');
     assert.throws(() => transact(next, 'createProject', payload, 'u-engineer'), /仅管理员/);

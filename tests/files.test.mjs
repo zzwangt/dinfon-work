@@ -272,3 +272,16 @@ test('milestone file summaries verify project scope and a real milestone before 
   const emptyChildren = await f.call('/api/files?projectId=p-mower&entityType=milestone&entityId=m-mower-2&includeTaskFiles=true');
   assert.deepEqual(emptyChildren.data.files, [uploaded.data.file]);
 });
+
+test('flow badge counts are project-scoped, group direct attachments and update after deletion',async t=>{
+  const f=await fixture(t);
+  const one=await f.upload({entityType:'task',entityId:'t-03'});
+  await f.upload({entityType:'task',entityId:'t-03'});
+  await f.upload({entityType:'milestone',entityId:'m-mower-2'});
+  const path='/api/files?projectId=p-mower&summary=counts';
+  assert.equal((await f.call(path,{user:'u-ops'})).status,404);
+  const counts=(await f.call(path)).data.counts;
+  assert.deepEqual(counts,[{type:'milestone',id:'m-mower-2',total:1},{type:'task',id:'t-03',total:2}]);
+  assert.equal((await f.call('/api/files/'+one.data.file.id,{method:'DELETE',body:{}})).status,200);
+  assert.equal((await f.call(path)).data.counts.find(r=>r.type==='task').total,1);
+});

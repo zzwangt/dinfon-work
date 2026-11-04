@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSeedState, normalizeState, transact, addDays } from '../public/client/domain.js';
-import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
+import { taskOwners, taskReviewers, canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
 import { openDatabase } from '../server/sqlite.mjs';
 import { handleApi } from '../server/service.mjs';
@@ -161,4 +161,29 @@ test('API accepts member task registration with trusted creator metadata and ret
   assert.equal((await f.command('submitTask', { id: task.id, deliverable: '替别人交付' }, 'u-engineer')).status, 400);
   assert.equal((await f.command('submitTask', { id: task.id, deliverable: '成果完整' }, 'u-qa')).status, 200);
   assert.equal((await f.command('reviewTask', { id: task.id, approve: true }, 'u-engineer')).status, 400);
+});
+
+test('checkbox assignments replace the former first owner, protect pending work and require every signature', async t => {
+  const f=await fixture(t);
+  const {ownerId,reviewerId,...base}=taskPayload(f.stored().state);
+  const roster={ownerIds:['u-qa','u-engineer'],reviewerIds:['u-manager','u-admin']};
+  for(const bad of [{ownerIds:[]},{reviewerIds:[]},{ownerIds:['u-ops']},{ownerIds:['u-design']},{reviewerIds:['u-qa']}]){
+    assert.equal((await f.command('createTask',{...base,...roster,...bad})).status,400);
+  }
+  const created=await f.command('createTask',{...base,...roster});
+  assert.equal(created.status,200,JSON.stringify(created.data));const id=created.data.state.tasks.at(-1).id;
+  const cmd=(action,payload,actor)=>f.command(action,{id,...payload},actor);
+  assert.equal((await cmd('submitTask',{deliverable:'测试记录'},'u-qa')).status,200);
+  assert.equal((await cmd('setTaskReviewer',{ownerIds:['u-engineer','u-qa'],reviewerIds:['u-admin','u-manager']})).status,400);
+  const swapped=await cmd('setTaskReviewer',{ownerIds:['u-engineer','u-manager'],reviewerIds:['u-qa','u-admin']});
+  assert.equal(swapped.status,200,JSON.stringify(swapped.data));
+  const task=get(swapped.data.state,'tasks',id);assert.deepEqual(taskOwners(task),['u-engineer','u-manager']);
+  assert.deepEqual(taskReviewers(task).sort(),['u-admin','u-qa']);assert.equal(task.deliveryHistory.at(-1).deliveries[0].ownerId,'u-qa');
+  assert.equal((await cmd('submitTask',{deliverable:'旧负责人'},'u-qa')).status,400);
+  for(const actor of taskOwners(task))assert.equal((await cmd('submitTask',{deliverable:'更新成果'},actor)).status,200);
+  assert.equal((await cmd('setTaskReviewer',{ownerIds:['u-engineer'],reviewerIds:['u-qa']})).status,400);
+  for(const [actor,status] of [['u-qa','review'],['u-admin','done']]){
+    const signed=await cmd('reviewTask',{approve:true},actor);assert.equal(signed.status,200);
+    assert.equal(get(signed.data.state,'tasks',id).status,status);
+  }
 });

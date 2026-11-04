@@ -127,3 +127,5 @@
 .flow-unassigned svg { width:13px; height:13px; }
 @media (max-width:700px) { .flow-toolbar { padding:10px 12px 7px; gap:8px; } .flow-filters { flex:1; } .flow-filter { flex:1; min-height:44px; padding:6px 10px; } .flow-tools { margin-left:auto; } .flow-tools button { min-width:44px; height:44px; } .flow-overview { padding:0 13px 11px; } .flow-filter-summary { gap:3px 8px; } .flow-scroll { max-height:555px; } .flow-footer { padding:10px 13px; flex-wrap:wrap; gap:6px; } .flow-semantics { gap:5px 10px; } .flow-pan-hint { display:none; } .flow-touch-hint { display:inline; } .flow-add-task { min-height:40px; } }
 @media (prefers-reduced-motion:reduce) { .project-flow button { transition:none; } }
+
+.flow-person-names {overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}

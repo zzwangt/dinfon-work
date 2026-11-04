@@ -1,4 +1,4 @@
-import { readPeople, updatePeopleBox } from './node-people.js';
+import { readPeople, readTaskPeople, updatePeopleBox } from './node-people.js';
 import { taskOwners, taskReviewers, stageReviewers } from './approval-access.js';
 import { isAdminRole } from './roles.js';
 import { formatDateTime, toDateTimeInput } from './time.js';
@@ -11,7 +11,11 @@ const note = (label, key, required, value) =>
 const select = (label, key, required = true) => `<label class="field"><span>${label}</span><select data-key="${key}" ${required ? 'required' : ''}></select></label>`;
 const control = (name, label) => `<button type="button" class="button secondary small" data-plan-control="${name}">${label}</button>`;
 const part = (parent, key) => parent.querySelector(`[data-key="${key}"]`);
-const values = box => ({...readPeople(box.querySelector(':scope > .form-grid .node-people')), ...Object.fromEntries([...box.querySelectorAll(':scope > .form-grid [data-key]')].map(el => [el.dataset.key, el.value]))});
+const values = row => {
+  const box = row.querySelector(':scope > .form-grid .node-people');
+  return {...(row.hasAttribute('data-plan-task') ? readTaskPeople(box,true) : readPeople(box)),
+    ...Object.fromEntries([...row.querySelectorAll(':scope > .form-grid [data-key]')].map(el => [el.dataset.key, el.value]))};
+};
 
 export const planEditor = `<section class="plan-editor"><div class="plan-toolbar"><h3>项目流程</h3><span class="muted" data-plan-count aria-live="polite"></span></div><div data-plan-stages></div>${control('add-stage','＋ 添加大节点')}</section>`;
 
@@ -47,12 +51,10 @@ export function bindPlanEditor(form, users, prior) {
     due.min = form.elements.startDate.value;
     due.max = projectEnd();
     for (const task of stage.querySelectorAll('[data-plan-task]')) {
-      const assignee = part(task, 'ownerId'), reviewer = part(task, 'reviewerId');
-      choices(assignee, members, assignee.value, '选择负责人');
-      const eligible = users.filter(user => (members.includes(user) || isAdminRole(user.role)) && (user.id !== assignee.value || user.role === 'superadmin'));
-      choices(reviewer, eligible, reviewer.value, '选择验收人');
-      const box=task.querySelector('.node-people');
-      updatePeopleBox(box,{...readPeople(box),owner:assignee.value,reviewer:reviewer.value,members,reviewers:eligible});
+      const box=task.querySelector('.node-people'), selected=readTaskPeople(box);
+      const reviewers=users.filter(u=>members.includes(u)||isAdminRole(u.role));
+      updatePeopleBox(box,{members,reviewers,ownerIds:selected.ownerIds.filter(id=>members.some(u=>u.id===id)),
+        reviewerIds:selected.reviewerIds.filter(id=>reviewers.some(u=>u.id===id))});
       part(task, 'dueDate').min = due.min;
       part(task, 'dueDate').max = due.value || due.max;
     }
@@ -73,18 +75,12 @@ export function bindPlanEditor(form, users, prior) {
     const list = stage.querySelector('[data-plan-tasks]');
     list.insertAdjacentHTML('beforeend', `<fieldset data-plan-task><legend></legend><div class="form-grid">
       ${input('任务名称','title','text',true,task.title)}${input('任务截止时间','dueDate','datetime-local',true,dueInput(task.dueDate) || part(stage,'dueDate').value)}
-      ${select('任务负责人','ownerId')}${select('任务验收人','reviewerId')}
       <div class="node-people"></div>${note('验收标准','acceptance',true,task.acceptance)}${note('任务说明（选填）','description',false,task.description)}
       </div>${control('remove-task','移除小任务')}</fieldset>`);
     const row = list.lastElementChild;
     updateStage(stage);
-    part(row, 'ownerId').value = task.ownerId ?? people().owner;
-    updateStage(stage);
-    const reviewer = part(row, 'reviewerId');
-    reviewer.value = task.reviewerId ?? people().owner;
-    if (!reviewer.value && !task.reviewerId) reviewer.value = reviewer.options[1]?.value || '';
     const {members}=people();
-    updatePeopleBox(row.querySelector('.node-people'),{...task,owner:part(row,'ownerId').value,reviewer:reviewer.value,members,reviewers:users.filter(u=>members.includes(u)||isAdminRole(u.role))});
+    updatePeopleBox(row.querySelector('.node-people'),{ownerIds:taskOwners(task),reviewerIds:taskReviewers(task),members,reviewers:users.filter(u=>members.includes(u)||isAdminRole(u.role))});
     return row;
   }
   function addStage(stage = {}) {

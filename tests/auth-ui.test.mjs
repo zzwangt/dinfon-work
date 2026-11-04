@@ -76,39 +76,46 @@ function deferred() {let resolve;const promise=new Promise(done=>resolve=done);r
 
 const notice=(id,category='tasks',entityId='qa-task',projectId='p-mower')=>({id,category,entityId,projectId,title:'新的任务动态',createdAt:'2026-10-26T08:00:00.000Z',target:'#tasks'});
 
-test('new tasks offer only active and eligible reviewers and exclude an ordinary task owner',()=>{
+function taskBox(owners=[],signers=[]) {
+  return {ownerDocument:{activeElement:null},contains:()=>false,innerHTML:'',
+    querySelectorAll:sel=>(sel.includes('"owners"')?owners:signers).map(value=>({value}))};
+}
+
+test('new tasks offer two empty checklists containing eligible active people',()=>{
   const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session(),project=data.state.projects.find(item=>item.id==='p-mower');
   data.taskReviewerIds=['u-admin','u-manager','u-qa'];ui.acceptSession(data);ui.newTask(project.id);
-  const owners=modal.innerHTML.match(/<select[^>]+name="ownerId"[^>]*>([\s\S]*?)<\/select>/)[1];
-  const owner=owners.match(/<option value="([^"]+)" selected/)[1];
-  const reviewers=modal.innerHTML.match(/<select[^>]+name="reviewerId"[^>]*>([\s\S]*?)<\/select>/)[1];
-  assert.doesNotMatch(reviewers,new RegExp('value="'+owner+'"'));
-  assert.match(reviewers,/value="u-qa"/);assert.match(reviewers,/value="u-admin"/);
-  assert.doesNotMatch(reviewers,/value="u-design"|value="u-ops"/);
+  assert.match(modal.innerHTML,/负责人（可多选）/);assert.match(modal.innerHTML,/验收人（可多选）/);
+  assert.doesNotMatch(modal.innerHTML,/主负责人|协作成员|name="(?:ownerId|reviewerId)"| checked/);
+  assert.match(modal.innerHTML,/data-roster="owners" value="u-qa"/);
+  for(const id of ['u-qa','u-admin'])assert.match(modal.innerHTML,new RegExp('data-roster="signers" value="'+id+'"'));
+  assert.doesNotMatch(modal.innerHTML,/value="u-design"|value="u-ops"/);
 });
 
-test('changing the owner removes an ordinary owner from review and preserves other eligible reviewers',()=>{
+test('checking multiple workers and reviewers disables only conflicting roles, with the superadmin exception',()=>{
   const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session();data.state.projects[0].memberIds.push('u-admin');ui.acceptSession(data);
-  const f={dataset:{form:'createTask'},elements:{projectId:{value:'p-mower'},ownerId:{value:''},reviewerId:{value:'u-engineer',innerHTML:''}}};
-  const choose=id=>{f.elements.ownerId.value=id;listeners.get('document:change')({target:{name:'ownerId',value:id,dataset:{},hasAttribute:()=>false,closest:()=>f}});};
-  choose('u-qa');assert.equal(f.elements.reviewerId.value,'u-engineer');
-  choose('u-engineer');assert.notEqual(f.elements.reviewerId.value,'u-engineer');assert.doesNotMatch(f.elements.reviewerId.innerHTML,/value="u-engineer"/);
-  choose('u-admin');assert.match(f.elements.reviewerId.innerHTML,/value="u-admin"/);
+  const box=taskBox(['u-qa','u-admin'],['u-engineer','u-manager']);
+  const f={dataset:{form:'createTask'},elements:{projectId:{value:'p-mower'}},querySelector:()=>box};
+  listeners.get('document:change')({target:{dataset:{roster:'owners'},hasAttribute:()=>false,closest:()=>f}});
+  for(const id of ['u-qa','u-admin'])assert.match(box.innerHTML,new RegExp('data-roster="owners" value="'+id+'" checked'));
+  for(const id of ['u-engineer','u-manager'])assert.match(box.innerHTML,new RegExp('data-roster="signers" value="'+id+'" checked'));
+  assert.match(box.innerHTML,/data-roster="signers" value="u-qa" disabled/);
+  assert.doesNotMatch(box.innerHTML,/data-roster="signers" value="u-admin" disabled/);
 });
 
-test('switching task projects rebuilds reviewer choices and selects the new project owner',()=>{
+test('switching task projects clears both lists and limits choices to the new project',()=>{
   const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session(),project=data.state.projects.find(item=>item.id==='p-delivery');
-  project.memberIds=project.memberIds.filter(id=>id!==project.ownerId);
-  ui.acceptSession(data);
-  const taskForm={dataset:{form:'createTask'},elements:{projectId:{value:project.id},milestoneId:{innerHTML:''},ownerId:{value:'u-engineer',innerHTML:''},reviewerId:{value:'u-engineer',innerHTML:''},dueDate:{value:''}}};
-  listeners.get('document:change')({target:{name:'projectId',value:project.id,dataset:{},hasAttribute:()=>false,closest:()=>taskForm}});
-  assert.match(taskForm.elements.reviewerId.innerHTML,new RegExp(`<option value="${project.ownerId}" selected`));
-  for(const id of [...project.memberIds,'u-admin'].filter(id=>id!==taskForm.elements.ownerId.value))assert.match(taskForm.elements.reviewerId.innerHTML,new RegExp(`<option value="${id}"`));
-  assert.doesNotMatch(taskForm.elements.reviewerId.innerHTML,/<option value="u-engineer"/);
-  assert.match(taskForm.elements.ownerId.innerHTML,new RegExp(`<option value="${project.ownerId}"`));
+  project.memberIds=project.memberIds.filter(id=>id!==project.ownerId);ui.acceptSession(data);
+  const box=taskBox(['u-engineer'],['u-manager']);
+  const f={dataset:{form:'createTask'},querySelector:()=>box,elements:{projectId:{value:project.id},milestoneId:{innerHTML:''},dueDate:{value:''}}};
+  listeners.get('document:change')({target:{name:'projectId',value:project.id,dataset:{},hasAttribute:()=>false,closest:()=>f}});
+  assert.doesNotMatch(box.innerHTML,/ checked/);
+  for(const id of [...project.memberIds,project.ownerId])assert.match(box.innerHTML,new RegExp('data-roster="owners" value="'+id+'"'));
+  assert.match(box.innerHTML,/data-roster="signers" value="u-admin"/);
+  const outsider=data.state.users.find(u=>u.role==='member'&&u.id!==project.ownerId&&!project.memberIds.includes(u.id));
+  assert.doesNotMatch(box.innerHTML,new RegExp('value="'+outsider.id+'"'));
 });
 
 test('only the super administrator can accept their own task, even when an ordinary owner was historically the reviewer',()=>{
@@ -988,7 +995,7 @@ test('only project owner and super admin can manage stage co-reviewer and task r
     ui.setMilestoneCoReviewer('m-mower-2');assert.equal(modal.open,allowed);
     if(allowed){assert.match(modal.innerHTML,/value="second-admin"/);assert.doesNotMatch(modal.innerHTML,/value="u-manager"/);assert.match(modal.innerHTML,/仅主验/);modal.close();}
     ui.setTaskReviewer('t-02');assert.equal(modal.open,allowed);
-    if(allowed){assert.match(modal.innerHTML,/data-form="setTaskReviewer"/);assert.doesNotMatch(modal.innerHTML,/value="u-qa"/);}
+    if(allowed){assert.match(modal.innerHTML,/data-form="setTaskReviewer"/);assert.match(modal.innerHTML,/data-roster="owners" value="u-qa" checked/);assert.match(modal.innerHTML,/data-roster="signers" value="u-qa" disabled/);}
   }
 });
 
@@ -1006,9 +1013,8 @@ test('ordinary project members can create tasks for teammates without gaining pr
   assert.doesNotMatch(modal.innerHTML,/data-action="(?:complete-milestone|edit-milestone-content)"/);
   ui.newTask(project.id);
   assert.match(modal.innerHTML,/data-form="createTask"/);
-  const owners=modal.innerHTML.match(/<select[^>]+name="ownerId"[^>]*>([\s\S]*?)<\/select>/)[1];
-  assert.match(owners,/<option value="u-qa"/);
-  assert.match(owners,/<option value="u-engineer"/);
+  assert.match(modal.innerHTML,/data-roster="owners" value="u-qa"/);
+  assert.match(modal.innerHTML,/data-roster="owners" value="u-engineer"/);
   const projects=modal.innerHTML.match(/<select[^>]+name="projectId"[^>]*>([\s\S]*?)<\/select>/)[1];
   assert.match(projects,/<option value="p-mower"/);assert.match(projects,/<option value="p-pcb"/);
   assert.doesNotMatch(projects,/<option value="p-site"/);

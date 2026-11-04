@@ -193,3 +193,9 @@
 .node-roster-group legend {padding:0 3px;font-size:13px;font-weight:600;}
 .node-roster-group label {display:inline-flex;align-items:center;gap:4px;margin:2px 8px 2px 0;font-size:13px;}
 .node-roster-group small {color:var(--secondary);}
+
+.task-roster legend small {font-weight:400;white-space:nowrap}
+.node-roster-group.task-roster label {min-height:32px;gap:6px;margin:0 10px 0 0;cursor:pointer}
+.task-roster input[type=checkbox] {width:16px;height:16px;margin:0;accent-color:var(--accent,#0071e3)}
+.task-roster label:has(:disabled) {color:var(--secondary);cursor:default}
+@media(max-width:600px){.node-roster-group.task-roster label{min-height:44px}}

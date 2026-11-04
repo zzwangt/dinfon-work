@@ -114,7 +114,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
         title:`待你提交个人成果：${task.title}`,target:'#tasks'});
       return next;
     }
-    const label = action === 'setTaskReviewer' ? '任务验收人已更新' : action === 'createTask' ? '新增任务' : action === 'editTaskContent' ? '任务内容已更新' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : task.status === 'review' ? '任务已部分签字' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
+    const label = action === 'setTaskReviewer' ? '任务负责人和验收人已更新' : action === 'createTask' ? '新增任务' : action === 'editTaskContent' ? '任务内容已更新' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : task.status === 'review' ? '任务已部分签字' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
     emit(action === 'editTaskContent' ? projectAudience(task.projectId) : [...taskOwners(task), ...taskReviewers(task), project?.ownerId, ...admins], {
       category: 'tasks', projectId: task.projectId, entityId: task.id,
       title: `${label}：${task.title}`, target: '#tasks',

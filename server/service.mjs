@@ -412,7 +412,9 @@ export async function handleApi(request, env, authenticatedIdentity) {
       requireValue(data.payload == null || (typeof data.payload === 'object' && !Array.isArray(data.payload)), '操作内容格式不正确');
       const payload = data.payload || {};
       const scope = accessibleCommand(workspace, actor, data.action, payload);
-      if (data.action === 'createTask' || data.action === 'setTaskReviewer' || (data.action === 'setMilestoneCoReviewer' && payload.reviewerId)) {
+      const taskPersonnel = data.action === 'createTask' || data.action === 'setTaskReviewer';
+      const checkboxRoster = taskPersonnel && ('ownerIds' in payload || 'reviewerIds' in payload);
+      if ((taskPersonnel && !checkboxRoster) || (data.action === 'setMilestoneCoReviewer' && payload.reviewerId)) {
         const reviewerId = payload.reviewerId || (data.action === 'createTask' && workspace.state.projects.find(project => project.id === payload.projectId)?.ownerId);
         const activeUsers = await activeLoginUsers(env.DB, workspace, identity);
         requireValue((data.action === 'setMilestoneCoReviewer' || scope.users.some(user => user.id === reviewerId)) && activeUsers.has(reviewerId), '请选择可见且已启用登录的验收人账号');
@@ -422,7 +424,7 @@ export async function handleApi(request, env, authenticatedIdentity) {
       }
       if (['setTaskReviewer','setMilestoneCoReviewer','createTask'].includes(data.action)) {
         const active = await activeLoginUsers(env.DB, workspace, identity);
-        for (const key of ['memberIds','extraReviewerIds']) {
+        for (const key of (checkboxRoster ? ['ownerIds','reviewerIds'] : ['memberIds','extraReviewerIds'])) {
           if (!Object.hasOwn(payload,key)) continue;
           requireValue(Array.isArray(payload[key]) && payload[key].every(id => active.has(id) &&
             (data.action === 'setMilestoneCoReviewer' && key === 'extraReviewerIds' || scope.users.some(user => user.id === id))), '请选择可见且已启用登录的人员');

@@ -1,4 +1,4 @@
-import { canViewProjectPlan } from './approval-access.js';
+import { canViewProjectPlan, taskOwners, taskReviewers, stageReviewers } from './approval-access.js';
 import { isAdminRole, normalizeRole } from './roles.js';
 
 /**
@@ -70,16 +70,17 @@ export function sanitizeStateForActor(state, actorId) {
   }
   for (const plan of projectPlans) {
     for (const id of [plan.applicantId, plan.reviewerId, ...plan.project.memberIds]) userIds.add(id);
-    for (const stage of plan.milestones) userIds.add(stage.coReviewerId);
-    for (const task of plan.tasks) userIds.add(task.reviewerId);
+    for (const stage of plan.milestones) stageReviewers(stage).forEach(id=>userIds.add(id));
+    for (const task of plan.tasks) taskReviewers(task).forEach(id=>userIds.add(id));
   }
   for (const node of milestones) {
-    userIds.add(node.coReviewerId);
+    [...stageReviewers(node), ...(node.memberIds || [])].forEach(id=>userIds.add(id));
     for (const signature of node.signatures || []) userIds.add(signature.actorId);
   }
   for (const task of tasks) {
-    userIds.add(task.ownerId);
-    userIds.add(task.reviewerId);
+    taskOwners(task).forEach(id=>userIds.add(id));
+    for (const s of task.reviewSignatures || []) userIds.add(s.actorId);
+    taskReviewers(task).forEach(id=>userIds.add(id));
     userIds.add(task.createdBy);
   }
   for (const extension of extensions) {
@@ -87,6 +88,7 @@ export function sanitizeStateForActor(state, actorId) {
     userIds.add(extension.reviewerId);
   }
   for (const request of milestoneRequests) {
+    stageReviewers(request.proposed || {}).forEach(id=>userIds.add(id));
     userIds.add(request.applicantId);
     userIds.add(request.reviewerId);
   }

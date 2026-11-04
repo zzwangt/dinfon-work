@@ -84,24 +84,25 @@ function assertWritten(result) {
 
 async function saveAttachment(db, context, row, statement) {
   const { workspace, actor } = context;
-  const milestoneId = row.entity_type === 'task'
-    ? workspace.state.tasks.find(task => task.id === row.entity_id && task.projectId === row.project_id)?.milestoneId
-    : row.entity_id;
+  const task = row.entity_type === 'task' && workspace.state.tasks.find(item => item.id === row.entity_id && item.projectId === row.project_id);
+  const milestoneId = row.entity_type === 'task' ? task?.milestoneId : row.entity_id;
   const milestone = workspace.state.milestones.find(node => node.id === milestoneId && node.projectId === row.project_id);
-  if (!milestone?.signatures?.length || milestone.status === 'done') {
+  const affected = [];
+  if (task?.status === 'review' && task.reviewSignatures?.length) affected.push(['tasks',task.id,'reviewSignatures']);
+  if (milestone?.status !== 'done' && milestone?.signatures?.length) affected.push(['milestones',milestone.id,'signatures']);
+  if (!affected.length) {
     assertWritten(await statement.run());
     return;
   }
-  // Both reviewers must sign the same evidence. Only a file change during
-  // an unfinished signed review also needs to update the business snapshot.
   const next = structuredClone(workspace);
-  const node = next.state.milestones.find(item => item.id === milestoneId);
-  next.state.logs.unshift({
-    id: 'log-' + crypto.randomUUID(), at: new Date().toISOString(), actorId: actor.id, projectId: row.project_id,
-    message: '“' + node.title + '”的验收附件已变更，原签字失效',
-    changes: { signatures: { before: node.signatures, after: [] } },
-  });
-  node.signatures = [];
+  for (const [collection,id,key] of affected) {
+    const node = next.state[collection].find(item => item.id === id);
+    next.state.logs.unshift({
+      id:'log-' + crypto.randomUUID(), at:new Date().toISOString(), actorId:actor.id, projectId:row.project_id,
+      message:`“${node.title}”的验收附件已变更，原签字失效`, changes:{[key]:{before:node[key],after:[]}},
+    });
+    node[key] = [];
+  }
   const updateState = db.prepare("UPDATE workspace SET payload = ?, revision = revision + 1 WHERE id = 'main' AND revision = ? AND changes() = 1")
     .bind(workspacePayload(next), workspace.revision);
   const [fileWrite, stateWrite] = await db.batch([statement, updateState]);

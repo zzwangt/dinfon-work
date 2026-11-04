@@ -1,3 +1,4 @@
+import { taskOwners } from './approval-access.js';
 import { memberStats, progressAgainstPlan, weekRange } from './domain.js';
 import { datePart, deadlineMs, isOverdue, startMs } from './time.js';
 
@@ -52,12 +53,12 @@ export function dashboardData(state, now = Date.now()) {
   const dueTasks = weeklyTasks.filter((task) => deadlineMs(task.dueDate) <= instant);
   const statsState = { tasks: dueTasks };
   const people = users.map((user) => {
-    const planned = weeklyTasks.filter((task) => task.ownerId === user.id);
+    const planned = weeklyTasks.filter((task) => taskOwners(task).includes(user.id));
     return {
       user, stats: memberStats(statsState, user.id, week.start, week.end),
       weeklyTotal: planned.length,
       notDue: planned.filter((task) => deadlineMs(task.dueDate) > instant).length,
-      pendingReview: dueTasks.filter((task) => task.ownerId === user.id && task.status === 'review').length,
+      pendingReview: dueTasks.filter((task) => taskOwners(task).includes(user.id) && task.status === 'review').length,
     };
   });
 

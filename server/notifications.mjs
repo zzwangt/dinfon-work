@@ -2,7 +2,7 @@ import { isAdminRole } from '../public/client/roles.js';
 // Events commit in the same workspace CAS as the business change. Read receipts
 // live separately, so opening a notification never conflicts with a task edit.
 // Old workspaces start with an empty event stream; historical logs are not replayed.
-import { canApproveRequest, canViewProjectPlan, canSignMilestone, canReviewTask } from '../public/client/approval-access.js';
+import { taskOwners, taskReviewers, stageReviewers, canApproveRequest, canViewProjectPlan, canSignMilestone, canReviewTask } from '../public/client/approval-access.js';
 
 const schemaReady = new WeakMap();
 
@@ -53,7 +53,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     const project = state.projects.find(item => item.id === node?.projectId);
     if (!project || !node) return;
     next.notifications = next.notifications.filter(entry => entry.action !== 'milestoneSignatureNeeded' || entry.entityId !== node.id);
-    const signers = [project.ownerId, node.coReviewerId].filter(id => {
+    const signers = [project.ownerId, ...stageReviewers(node)].filter(id => {
       const user = state.users.find(person => person.id === id);
       return user && canSignMilestone(project, node, user, state.tasks);
     });
@@ -74,7 +74,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     if (!submitting && plan.status === 'approved') {
       projectNotice(project, `项目计划已生效：${project.name}`);
       for (const task of plan.tasks) {
-        emit([task.ownerId], { category: 'tasks', projectId: project.id, entityId: task.id,
+        emit(taskOwners(task), { category: 'tasks', projectId: project.id, entityId: task.id,
           title: `新增任务：${task.title}`, target: '#tasks' });
       }
     }
@@ -91,7 +91,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     const project = state.projects.find(item => item.id === node?.projectId);
     if (node && project) {
       signatureNotice(node);
-      projectNotice(project, `阶段加验人已更新：${node.title}`, node.id, [project.ownerId, node.coReviewerId]);
+      projectNotice(project, `阶段加验人已更新：${node.title}`, node.id, [project.ownerId, ...(node.memberIds || []), ...stageReviewers(node)]);
     }
   } else if (['createTask', 'updateTask', 'editTaskContent', 'setTaskReviewer', 'submitTask', 'reviewTask'].includes(action)) {
     const task = action === 'createTask' ? newEntry(previous.state.tasks, state.tasks) : state.tasks.find((entry) => entry.id === payload.id);
@@ -103,13 +103,19 @@ export function appendNotifications(previous, next, actorId, action, payload = {
       next.notifications = next.notifications.filter(entry => entry.action !== 'submitTask' || entry.entityId !== task.id);
     }
     if (action === 'reviewTask' && task.status === 'done') signatureNotice(state.milestones.find(node => node.id === task.milestoneId));
-    if (action === 'submitTask' || (action === 'setTaskReviewer' && task.status === 'review')) {
-      const reviewer = state.users.find(user => user.id === task.reviewerId);
-      if (reviewer && canReviewTask(task, reviewer)) emit([reviewer.id], {action:'submitTask', category:'tasks', projectId:task.projectId, entityId:task.id, title:`任务待验收：${task.title}`, target:'#tasks'});
+    if (task.status === 'review' && ['submitTask','reviewTask','setTaskReviewer'].includes(action)) {
+      const remaining = state.users.filter(user => taskReviewers(task).includes(user.id) && canReviewTask(task,user));
+      emit(remaining.map(user => user.id), {action:'submitTask', category:'tasks', projectId:task.projectId, entityId:task.id, title:`任务待验收：${task.title}`, target:'#tasks'});
       if (action === 'submitTask') return next;
     }
-    const label = action === 'setTaskReviewer' ? '任务验收人已更新' : action === 'createTask' ? '新增任务' : action === 'editTaskContent' ? '任务内容已更新' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
-    emit(action === 'editTaskContent' ? projectAudience(task.projectId) : [task.ownerId, task.reviewerId, project?.ownerId, ...admins], {
+    if (action === 'submitTask' && task.status === 'doing') {
+      const outstanding = taskOwners(task).filter(id=>!task.deliveries?.some(item=>item.ownerId===id));
+      emit(outstanding,{category:'tasks',action:'deliveryNeeded',projectId:task.projectId,entityId:task.id,
+        title:`待你提交个人成果：${task.title}`,target:'#tasks'});
+      return next;
+    }
+    const label = action === 'setTaskReviewer' ? '任务验收人已更新' : action === 'createTask' ? '新增任务' : action === 'editTaskContent' ? '任务内容已更新' : action === 'reviewTask' ? (task.status === 'done' ? '任务验收通过' : task.status === 'review' ? '任务已部分签字' : '任务退回修改') : before?.status !== task.status ? (task.status === 'doing' ? '任务已开始' : '任务恢复待办') : '任务说明已更新';
+    emit(action === 'editTaskContent' ? projectAudience(task.projectId) : [...taskOwners(task), ...taskReviewers(task), project?.ownerId, ...admins], {
       category: 'tasks', projectId: task.projectId, entityId: task.id,
       title: `${label}：${task.title}`, target: '#tasks',
     });
@@ -169,13 +175,14 @@ function visibleNotifications(workspace, account, actor) {
     if (entry.category === 'tasks') {
       const task = workspace.state.tasks.find(item => item.id === entry.entityId);
       if (!task) return false;
-      if (entry.action === 'submitTask') return task.status === 'review' && task.reviewerId === actor.id && canReviewTask(task, actor);
+      if (entry.action === 'deliveryNeeded') return task.status === 'doing' && taskOwners(task).includes(actor.id) && !task.deliveries?.some(item=>item.ownerId===actor.id);
+      if (entry.action === 'submitTask') return task.status === 'review' && taskReviewers(task).includes(actor.id) && canReviewTask(task, actor);
     }
     if (entry.action === 'milestoneSignatureNeeded') {
       const node = workspace.state.milestones.find(item => item.id === entry.entityId);
       const project = workspace.state.projects.find(item => item.id === node?.projectId);
-      if (!node || !project || ![node.coReviewerId, project.ownerId].includes(actor.id)) return false;
-      if (node.coReviewerId && !workspace.accounts.some(account => account.userId === node.coReviewerId && account.status === 'active' && workspace.state.users.find(user => user.id === account.userId)?.role === 'admin')) return false;
+      if (!node || !project || ![...stageReviewers(node), project.ownerId].includes(actor.id)) return false;
+      if (stageReviewers(node).some(id => !workspace.accounts.some(account => account.userId === id && account.status === 'active' && workspace.state.users.find(user => user.id === id)?.role === 'admin'))) return false;
       return canSignMilestone(project, node, actor, workspace.state.tasks);
     }
     if (entry.action === 'requestMilestone' || entry.action === 'requestExtension') {

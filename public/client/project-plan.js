@@ -1,3 +1,5 @@
+import { readPeople, updatePeopleBox } from './node-people.js';
+import { taskOwners, taskReviewers, stageReviewers } from './approval-access.js';
 import { isAdminRole } from './roles.js';
 import { formatDateTime, toDateTimeInput } from './time.js';
 
@@ -9,7 +11,7 @@ const note = (label, key, required, value) =>
 const select = (label, key, required = true) => `<label class="field"><span>${label}</span><select data-key="${key}" ${required ? 'required' : ''}></select></label>`;
 const control = (name, label) => `<button type="button" class="button secondary small" data-plan-control="${name}">${label}</button>`;
 const part = (parent, key) => parent.querySelector(`[data-key="${key}"]`);
-const values = box => Object.fromEntries([...box.querySelectorAll(':scope > .form-grid [data-key]')].map(el => [el.dataset.key, el.value]));
+const values = box => ({...readPeople(box.querySelector(':scope > .form-grid .node-people')), ...Object.fromEntries([...box.querySelectorAll(':scope > .form-grid [data-key]')].map(el => [el.dataset.key, el.value]))});
 
 export const planEditor = `<section class="plan-editor"><div class="plan-toolbar"><h3>项目流程</h3><span class="muted" data-plan-count aria-live="polite"></span></div><div data-plan-stages></div>${control('add-stage','＋ 添加大节点')}</section>`;
 
@@ -38,6 +40,9 @@ export function bindPlanEditor(form, users, prior) {
     const {owner, members} = people();
     const extra = part(stage, 'coReviewerId');
     choices(extra, users.filter(user => user.role === 'admin' && user.id !== owner), stored.coReviewerId ?? extra.value, '仅项目负责人');
+    const stageBox=stage.querySelector(':scope > .form-grid .node-people');
+    const admins=users.filter(user=>user.role==='admin');
+    updatePeopleBox(stageBox,{...readPeople(stageBox),...stored,stage:true,owner,reviewer:extra.value,members,reviewers:admins});
     const due = part(stage, 'dueDate');
     due.min = form.elements.startDate.value;
     due.max = projectEnd();
@@ -46,6 +51,8 @@ export function bindPlanEditor(form, users, prior) {
       choices(assignee, members, assignee.value, '选择负责人');
       const eligible = users.filter(user => (members.includes(user) || isAdminRole(user.role)) && (user.id !== assignee.value || user.role === 'superadmin'));
       choices(reviewer, eligible, reviewer.value, '选择验收人');
+      const box=task.querySelector('.node-people');
+      updatePeopleBox(box,{...readPeople(box),owner:assignee.value,reviewer:reviewer.value,members,reviewers:eligible});
       part(task, 'dueDate').min = due.min;
       part(task, 'dueDate').max = due.value || due.max;
     }
@@ -67,7 +74,7 @@ export function bindPlanEditor(form, users, prior) {
     list.insertAdjacentHTML('beforeend', `<fieldset data-plan-task><legend></legend><div class="form-grid">
       ${input('任务名称','title','text',true,task.title)}${input('任务截止时间','dueDate','datetime-local',true,dueInput(task.dueDate) || part(stage,'dueDate').value)}
       ${select('任务负责人','ownerId')}${select('任务验收人','reviewerId')}
-      ${note('验收标准','acceptance',true,task.acceptance)}${note('任务说明（选填）','description',false,task.description)}
+      <div class="node-people"></div>${note('验收标准','acceptance',true,task.acceptance)}${note('任务说明（选填）','description',false,task.description)}
       </div>${control('remove-task','移除小任务')}</fieldset>`);
     const row = list.lastElementChild;
     updateStage(stage);
@@ -76,12 +83,14 @@ export function bindPlanEditor(form, users, prior) {
     const reviewer = part(row, 'reviewerId');
     reviewer.value = task.reviewerId ?? people().owner;
     if (!reviewer.value && !task.reviewerId) reviewer.value = reviewer.options[1]?.value || '';
+    const {members}=people();
+    updatePeopleBox(row.querySelector('.node-people'),{...task,owner:part(row,'ownerId').value,reviewer:reviewer.value,members,reviewers:users.filter(u=>members.includes(u)||isAdminRole(u.role))});
     return row;
   }
   function addStage(stage = {}) {
     stages.insertAdjacentHTML('beforeend', `<fieldset data-plan-stage><legend></legend><div class="form-grid">
       ${input('大节点名称','title','text',true,stage.title)}${input('节点截止时间','dueDate','datetime-local',true,dueInput(stage.dueDate) || projectEnd())}
-      ${select('加验管理员（选填）','coReviewerId',false)}${note('阶段交付说明（选填）','description',false,stage.description)}
+      ${select('加验管理员（选填）','coReviewerId',false)}<div class="node-people"></div>${note('阶段交付说明（选填）','description',false,stage.description)}
       </div><div data-plan-tasks></div><div class="plan-controls">${control('add-task','＋ 添加小任务')}${control('remove-stage','移除大节点')}</div></fieldset>`);
     const card = stages.lastElementChild;
     updateStage(card, stage);
@@ -110,7 +119,7 @@ export function bindPlanEditor(form, users, prior) {
     const el = event.target;
     if (['ownerId','memberIds','startDate','dueDate'].includes(el.name)) {
       for (const stage of stages.children) updateStage(stage);
-    } else if (['ownerId','dueDate'].includes(el.dataset.key)) {
+    } else if ((['ownerId','dueDate','reviewerId','coReviewerId'].includes(el.dataset.key) || el.dataset.roster)) {
       updateStage(el.closest('[data-plan-stage]'));
     }
   });
@@ -122,8 +131,8 @@ export function planContents(plan, users) {
   const when = value => html(formatDateTime(value));
   return `<div class="plan-preview"><p>项目负责人 <strong>${person(p.ownerId)}</strong> · ${html(p.category)}</p><p>项目成员　${p.memberIds.map(person).join('、')}</p>
     <p>${when(p.startDate)} 至 ${when(p.dueDate)}</p>${p.description ? `<p>${html(p.description)}</p>` : ''}
-    ${plan.milestones.map((m,i) => `<section><h4>${i+1}. ${html(m.title)}</h4><p>${when(m.dueDate)} 截止${m.coReviewerId ? ' · 加验 '+person(m.coReviewerId) : ''}</p>
+    ${plan.milestones.map((m,i) => `<section><h4>${i+1}. ${html(m.title)}</h4><p>${when(m.dueDate)} 截止${m.memberIds?.length?' · 执行 '+m.memberIds.map(person).join('、'):''}${stageReviewers(m).length ? ' · 加验 '+stageReviewers(m).map(person).join('、') : ''}</p>
       ${m.description ? `<p>${html(m.description)}</p>` : ''}
-      <ol>${plan.tasks.filter(t => t.milestoneId === m.id).map(t => `<li><strong>${html(t.title)}</strong><p>${person(t.ownerId)} 负责 · ${person(t.reviewerId)} 验收 · ${when(t.dueDate)} 截止</p>
+      <ol>${plan.tasks.filter(t => t.milestoneId === m.id).map(t => `<li><strong>${html(t.title)}</strong><p>${taskOwners(t).map(person).join('、')} 负责 · ${taskReviewers(t).map(person).join('、')} 验收 · ${when(t.dueDate)} 截止</p>
       <p>验收标准　${html(t.acceptance)}</p>${t.description ? `<p>${html(t.description)}</p>` : ''}</li>`).join('')}</ol></section>`).join('')}</div>`;
 }

@@ -285,3 +285,12 @@ test('flow badge counts are project-scoped, group direct attachments and update 
   assert.equal((await f.call('/api/files/'+one.data.file.id,{method:'DELETE',body:{}})).status,200);
   assert.equal((await f.call(path)).data.counts.find(r=>r.type==='task').total,1);
 });
+
+test('changing evidence between task signatures restarts the current review round',async t=>{
+  const f=await fixture(t);
+  f.edit(ws=>{const task=ws.state.tasks.find(t=>t.id==='t-03');Object.assign(task,{status:'review',extraReviewerIds:['u-qa'],reviewSignatures:[{actorId:'u-manager',reviewerId:'u-manager'}]});});
+  assert.equal((await f.upload()).status,201);
+  const task=f.stored().state.tasks.find(t=>t.id==='t-03');
+  assert.deepEqual(task.reviewSignatures,[]);
+  assert.equal(task.status,'review');
+});

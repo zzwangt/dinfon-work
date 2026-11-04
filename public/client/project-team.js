@@ -1,3 +1,4 @@
+import { taskOwners, taskReviewers, stageReviewers, stageSeats, canReviewTask } from './approval-access.js';
 import { formatDateTime } from './time.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
@@ -14,9 +15,9 @@ function collect(state = {}, project = {}) {
   const tasks = (Array.isArray(state.tasks) ? state.tasks : []).filter(task => task && task.projectId === project.id);
   const memberIds = [...new Set([project.ownerId, ...(Array.isArray(project.memberIds) ? project.memberIds : [])].filter(validId))];
   const members = new Set(memberIds);
-  const collaboratorIds = [...new Set(tasks.map(task => task.ownerId).filter(id => validId(id) && !members.has(id)))];
+  const collaboratorIds = [...new Set(tasks.flatMap(taskOwners).filter(id => validId(id) && !members.has(id)))];
   const collaborators = new Set(collaboratorIds);
-  const reviewerIds = [...new Set([...stages.map(m=>m.coReviewerId), ...tasks.map(task => task.reviewerId)].filter(id => validId(id) && !members.has(id) && !collaborators.has(id)))];
+  const reviewerIds = [...new Set([...stages.flatMap(stageReviewers), ...tasks.flatMap(taskReviewers)].filter(id => validId(id) && !members.has(id) && !collaborators.has(id)))];
   const profile = id => {
     const user = users.get(id);
     return { name: textOr(user?.name, '成员资料待补充'), title: textOr(user?.title, '岗位未设置'), department: textOr(user?.department, '部门未设置'), missing: !user };
@@ -49,18 +50,20 @@ function taskList(tasks, responsibility) {
 
 function personRow(context, project, id, kind = 'member') {
   const person = context.profile(id);
-  const owned = context.tasks.filter(task => task.ownerId === id);
-  const reviewing = context.tasks.filter(task => task.reviewerId === id);
-  const assignedStages=context.stages.filter(m=>m.coReviewerId===id);
+  const owned = context.tasks.filter(task => taskOwners(task).includes(id));
+  const reviewing = context.tasks.filter(task => taskReviewers(task).includes(id));
+  const assignedStages=context.stages.filter(m=>stageReviewers(m).includes(id));
   const completed = owned.filter(task => task.status === 'done').length;
-  const awaitingReview = reviewing.filter(task => task.status === 'review').length;
+  const awaitingReview = reviewing.filter(task => task.status === 'review' && canReviewTask(task,{...person,id})).length;
   const owner = id === project.ownerId;
   const role = owner ? '项目负责人' : kind === 'reviewer' ? '验收协作' : kind === 'collaborator' ? '任务协作' : '项目成员';
   const initial = person.missing ? '?' : Array.from(person.name).slice(-1).join('');
   const execution = kind !== 'reviewer' ? `<div class="project-team-duty"><div class="project-team-duty-heading"><h3>执行任务 <span>${owned.length}</span></h3>${owned.length ? `<p>已完成 <strong>${completed} / ${owned.length}</strong></p>` : ''}</div>${owned.length ? taskList(owned, '负责的任务') : '<p class="project-team-empty-duty">尚未分配执行任务</p>'}</div>` : '';
   const review = reviewing.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>验收任务 <span>${reviewing.length}</span></h3>${awaitingReview ? `<p>待验收 <strong>${awaitingReview}</strong> 项</p>` : ''}</div>${taskList(reviewing, '负责验收的任务')}</div>` : '';
-  const stageReviews = assignedStages.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>阶段加验 <span>${assignedStages.length}</span></h3></div><ul class="project-team-task-list">${assignedStages.map(m=>`<li><button type="button" class="project-team-task" data-action="milestone-detail" data-id="${escape(m.id)}"><span>${escape(m.title)}</span><span>${m.status==='done'?'已达成':m.signatures?.some(item=>item.as==='coReviewer')?'已签字':'待加验'}</span></button></li>`).join('')}</ul></div>` : '';
-  return `<li class="project-team-row${owner ? ' is-owner' : ''}" data-team-person="${escape(id)}"><div class="project-team-person"><span class="project-team-avatar${kind === 'reviewer' ? ' is-reviewer' : ''}" aria-hidden="true">${escape(initial)}</span><div><div class="project-team-person-name"><h3>${escape(person.name)}</h3><span class="project-team-role${owner ? ' is-owner' : ''}">${role}</span></div><p>${escape(person.department)}<span aria-hidden="true"> · </span>${escape(person.title)}</p>${person.missing ? '<small>当前没有此成员的资料</small>' : ''}</div></div><div class="project-team-duties">${execution}${review}${stageReviews}</div></li>`;
+  const stages = context.stages.filter(stage=>stage.memberIds?.includes(id));
+  const stageWork = stages.length ? `<div class="project-team-duty"><h3>执行阶段</h3>${stages.map(stage=>`<button class="text-link" data-action="milestone-detail" data-id="${escape(stage.id)}">${escape(stage.title)}</button>`).join('、')}</div>` : '';
+  const stageReviews = assignedStages.length ? `<div class="project-team-duty is-review"><div class="project-team-duty-heading"><h3>阶段加验 <span>${assignedStages.length}</span></h3></div><ul class="project-team-task-list">${assignedStages.map(m=>`<li><button type="button" class="project-team-task" data-action="milestone-detail" data-id="${escape(m.id)}"><span>${escape(m.title)}</span><span>${m.status==='done'?'已达成':m.signatures?.some(item=>stageSeats(project,m).some(([slot,reviewer])=>reviewer===id && slot===item.as))?'已签字':'待加验'}</span></button></li>`).join('')}</ul></div>` : '';
+  return `<li class="project-team-row${owner ? ' is-owner' : ''}" data-team-person="${escape(id)}"><div class="project-team-person"><span class="project-team-avatar${kind === 'reviewer' ? ' is-reviewer' : ''}" aria-hidden="true">${escape(initial)}</span><div><div class="project-team-person-name"><h3>${escape(person.name)}</h3><span class="project-team-role${owner ? ' is-owner' : ''}">${role}</span></div><p>${escape(person.department)}<span aria-hidden="true"> · </span>${escape(person.title)}</p>${person.missing ? '<small>当前没有此成员的资料</small>' : ''}</div></div><div class="project-team-duties">${execution}${stageWork}${review}${stageReviews}</div></li>`;
 }
 
 /** Compact summary for the project header; reviewers are not counted as members. */

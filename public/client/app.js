@@ -1,5 +1,6 @@
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from './roles.js';
-import { canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from './approval-access.js';
+import { peopleFields, readPeople, updatePeopleBox } from './node-people.js';
+import { canSubmitTask, taskOwners, taskReviewers, taskSignSeats, stageSeats, stageReviewers, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from './approval-access.js';
 import { planEditor, bindPlanEditor, readPlanStages, planContents } from './project-plan.js';
 import { renderProjectFlow, bindFlowCanvas } from './flow.js';
 import { renderNodeFiles, bindProjectFiles, resetProjectFiles, refreshFlowFileCounts, hasActiveFileOperations } from './files.js';
@@ -118,8 +119,8 @@ const visibleExtensions = () => state.extensions.filter(x => visibleProjects().s
 const visibleNodeRequests = () => (state.milestoneRequests||[]).filter(x => visibleProjects().some(p => p.id === x.projectId));
 const overdue = t => t.status !== 'done' && isOverdue(t.dueDate);
 const canReview = t => canReviewTask(t,actor());
-const canOperate = t => t.ownerId === actorId || isAdmin() || project(t.projectId)?.ownerId === actorId;
-const canSubmit = t => t.ownerId === actorId || isAdmin();
+const canOperate = t => taskOwners(t).includes(actorId) || isAdmin() || project(t.projectId)?.ownerId === actorId;
+const canSubmit = t => canSubmitTask(t,actor());
 function range() {
   const d = shift(currentDay(), weekOffset * 7);
   const result = weekRange(d);
@@ -311,7 +312,7 @@ function projectsPage() {
   return heading('全部项目','选择项目，进入流程图查看节点和团队进度。', '<a class="button secondary" href="#overview">返回流程图</a>'+(isAdmin() ? button('新建项目','new-project','','primary','plus') : '')) + `<div class="filters"><div class="filter-tabs">${[['active','进行中'],['delayed','延期关注'],['complete','已完成'],['all',`全部项目 ${count}`]].map(([id,label])=>`<button class="filter-tab ${projectFilter===id?'active':''}" data-action="project-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${projects.length} 个项目</span></div><div class="project-grid">${projects.map(p => `<a class="project-card" href="#projects/${e(p.id)}"><div class="project-card-head">${projectMark(p)}${projectStatus(p)}</div><div class="project-card-title"><span class="cell-subtext">${e(p.code || p.category || '项目')}</span><h2>${e(p.name)}${projectReminder(p.id)}${unreadSlot({category:'projects',projectId:p.id})}</h2></div><p class="project-card-description">${e(p.description || '暂无项目说明')}</p>${progress(p)}<div class="project-card-footer"><div class="member-stack">${[...new Set([p.ownerId,...p.memberIds])].slice(0,4).map(id=>avatar(id)).join('')}</div><span>${dateLabel(p.dueDate)}截止</span></div></a>`).join('')}</div>${!projects.length ? empty('这里还没有项目','调整筛选条件，或创建一个新的项目。',isAdmin()?button('新建项目','new-project','','primary','plus'):'') : ''}`;
 }
 function taskRow(t, showProject = true) {
-  return `<div class="task-row"><button class="task-state ${t.status === 'done'?'is-done':''}" data-action="task-detail" data-id="${e(t.id)}" aria-label="查看任务 ${e(t.title)}">${icon(t.status==='done'?'check':t.status==='review'?'approval':'task')}</button><div class="task-main"><button class="task-title ${t.status==='done'?'is-done':''}" data-action="task-detail" data-id="${e(t.id)}">${e(t.title)}${taskReminder(t.id)}${unreadSlot({category:'tasks',entityId:t.id})}</button><div class="task-meta">${showProject?`<span>${e(project(t.projectId)?.name)}</span>`:''}<span>${e(user(t.ownerId)?.name)}</span><span class="${overdue(t)?'overdue-text':''}">${dateLabel(t.dueDate)}截止${overdue(t)?' · 已逾期':''}</span>${t.priority==='high'?'<span class="priority-high">高优先级</span>':''}</div></div><div class="task-actions">${statusPill(t.status)}${t.status==='review' && canReview(t)?button('验收','task-detail',t.id,'small secondary'):t.ownerId===actorId && t.status==='doing'?button('提交成果','submit-task',t.id,'small secondary'):button('详情','task-detail',t.id,'small ghost')}</div></div>`;
+  return `<div class="task-row"><button class="task-state ${t.status === 'done'?'is-done':''}" data-action="task-detail" data-id="${e(t.id)}" aria-label="查看任务 ${e(t.title)}">${icon(t.status==='done'?'check':t.status==='review'?'approval':'task')}</button><div class="task-main"><button class="task-title ${t.status==='done'?'is-done':''}" data-action="task-detail" data-id="${e(t.id)}">${e(t.title)}${taskReminder(t.id)}${unreadSlot({category:'tasks',entityId:t.id})}</button><div class="task-meta">${showProject?`<span>${e(project(t.projectId)?.name)}</span>`:''}<span>${e(taskOwners(t).map(id=>user(id)?.name).filter(Boolean).join('、'))}</span><span class="${overdue(t)?'overdue-text':''}">${dateLabel(t.dueDate)}截止${overdue(t)?' · 已逾期':''}</span>${t.priority==='high'?'<span class="priority-high">高优先级</span>':''}</div></div><div class="task-actions">${statusPill(t.status)}${t.status==='review' && canReview(t)?button('验收','task-detail',t.id,'small secondary'):canSubmit(t) && t.status==='doing'?button('提交成果','submit-task',t.id,'small secondary'):button('详情','task-detail',t.id,'small ghost')}</div></div>`;
 }
 function overviewPage() {
   const ps = visibleProjects();
@@ -350,13 +351,13 @@ function projectWorkspace(p) {
 function milestoneDetail(id) {
   const m=milestone(id),p=m&&project(m.projectId);if(!m||!visibleProjects().some(item=>item.id===p.id))return;
   const ts=state.tasks.filter(t=>t.milestoneId===m.id),done=ts.filter(t=>t.status==='done').length;
-  const actions=(canManage(p)?button('编辑大节点','edit-milestone-content',m.id,'secondary'):'')+(isAdmin()?button('删除大节点','delete-milestone',m.id,'danger'):'')+(canManage(p)&&m.status!=='done'?button('设置加验人','set-milestone-co-reviewer',m.id,'secondary'):'')+(m.status!=='done'?`<button type="button" class="button secondary" data-action="new-task" data-id="${e(p.id)}" data-milestone-id="${e(m.id)}">添加小任务</button>`:'')+(canSignMilestone(p,m,actor(),ts)?button('签字验收','complete-milestone',m.id,'primary','check'):'')+(m.status!=='done'&&!visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?button('申请调整计划','edit-milestone',m.id,'secondary'):'');
-  showModal('大节点详情',`<div class="task-detail-heading"><h3>${e(m.title)}</h3>${statusPill(m.status==='done'?'done':'doing',m.status==='done'?'已达成':'待达成')}</div><p class="muted">${e(p.name)}</p><div class="task-detail-meta"><div><span>阶段截止</span><strong>${fullDate(m.dueDate)}</strong>${m.dueDate!==m.originalDueDate?`<small>原计划 ${fullDate(m.originalDueDate)}</small>`:''}</div><div><span>已验收任务</span><strong>${done} / ${ts.length}</strong></div>${m.acceptedAt?`<div><span>节点达成时间</span><strong>${fullDate(m.acceptedAt)}</strong></div>`:''}</div>${visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?'<p class="request-pending-note">此节点已有修改申请待审批，当前计划仍然生效。<a class="text-link" href="#approvals">查看申请</a></p>':''}<div class="detail-text"><h4>节点内容</h4><p class="preserve-space">${e(m.description||'暂无补充内容')}</p></div><h4>节点内的任务</h4><div class="task-list">${ts.map(t=>taskRow(t,false)).join('')||'<p class="form-intro">为这个阶段添加具体任务，明确执行人与验收标准。</p>'}</div><p class="field-help">全部小任务通过验收后，完成阶段签字即可达成大节点。</p>${milestoneSignatures(p,m)}${renderNodeFiles(p.id,'milestone',m.id)}`,'','',m.id,actions);
+  const actions=(canManage(p)?button('编辑大节点','edit-milestone-content',m.id,'secondary'):'')+(isAdmin()?button('删除大节点','delete-milestone',m.id,'danger'):'')+(canManage(p)&&m.status!=='done'?button('成员与验收人','set-milestone-co-reviewer',m.id,'secondary'):'')+(m.status!=='done'?`<button type="button" class="button secondary" data-action="new-task" data-id="${e(p.id)}" data-milestone-id="${e(m.id)}">添加小任务</button>`:'')+(canSignMilestone(p,m,actor(),ts)?button('签字验收','complete-milestone',m.id,'primary','check'):'')+(m.status!=='done'&&!visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?button('申请调整计划','edit-milestone',m.id,'secondary'):'');
+  showModal('大节点详情',`<div class="task-detail-heading"><h3>${e(m.title)}</h3>${statusPill(m.status==='done'?'done':'doing',m.status==='done'?'已达成':'待达成')}</div><p class="muted">${e(p.name)}</p><div class="task-detail-meta">${m.memberIds?.length?`<div><span>阶段执行成员</span>${m.memberIds.map(person).join('、')}</div>`:''}<div><span>阶段截止</span><strong>${fullDate(m.dueDate)}</strong>${m.dueDate!==m.originalDueDate?`<small>原计划 ${fullDate(m.originalDueDate)}</small>`:''}</div><div><span>已验收任务</span><strong>${done} / ${ts.length}</strong></div>${m.acceptedAt?`<div><span>节点达成时间</span><strong>${fullDate(m.acceptedAt)}</strong></div>`:''}</div>${visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')?'<p class="request-pending-note">此节点已有修改申请待审批，当前计划仍然生效。<a class="text-link" href="#approvals">查看申请</a></p>':''}<div class="detail-text"><h4>节点内容</h4><p class="preserve-space">${e(m.description||'暂无补充内容')}</p></div><h4>节点内的任务</h4><div class="task-list">${ts.map(t=>taskRow(t,false)).join('')||'<p class="form-intro">为这个阶段添加具体任务，明确执行人与验收标准。</p>'}</div><p class="field-help">全部小任务通过验收后，完成阶段签字即可达成大节点。</p>${milestoneSignatures(p,m)}${renderNodeFiles(p.id,'milestone',m.id)}`,'','',m.id,actions);
   bindProjectFiles(modal,fileContext());
 }
 function tasksPage() {
   let tasks=visibleTasks(); const reminders=taskReminderSummary(state,actorId);
-  if(taskFilter==='mine') tasks=tasks.filter(t=>t.ownerId===actorId);
+  if(taskFilter==='mine') tasks=tasks.filter(t=>taskOwners(t).includes(actorId));
   if(taskFilter==='review') tasks=tasks.filter(t=>t.status==='review'&&canReview(t));
   if(taskFilter==='overdue') tasks=tasks.filter(overdue);
   if(taskFilter==='done') tasks=tasks.filter(t=>t.status==='done');
@@ -370,7 +371,7 @@ function milestoneCard(m, compact=false) {
 function reportData() { const r=range(), ts=visibleTasks().filter(t=>inRange(t.dueDate,r)), ms=visibleMilestones().filter(m=>inRange(m.dueDate,r)); return {r,ts,ms,done:ts.filter(t=>t.status==='done'),late:ts.filter(overdue)}; }
 function weeklyPage() {
   const {r,ts,ms,done,late}=reportData(); const nextR={start:shift(r.start,7),end:shift(r.end,7)}, next=visibleTasks().filter(t=>inRange(t.dueDate,nextR));
-  return heading('周计划与汇总','以每周交付节点，连接日常工作与项目目标。',button('导出 Excel','export-week','xlsx','secondary','download')+button('导出 Word','export-week','docx','secondary','file'))+`<div class="toolbar week-toolbar"><div class="week-switch">${button('上一周','previous-week','','small ghost')}<strong>${dayLabel(r.start)} — ${dayLabel(r.end)}</strong>${button('下一周','next-week','','small ghost')}</div>${button(weekOffset===0?'本周':'回到本周','current-week','','small secondary')}</div><div class="report-summary"><div><span>本周任务</span><strong>${ts.length}<small>项</small></strong></div><div><span>已验收完成</span><strong>${done.length}<small>项</small></strong></div><div><span>周节点达成</span><strong>${ms.filter(m=>m.status==='done').length}<small>/ ${ms.length}</small></strong></div><div><span>逾期任务</span><strong>${late.length}<small>项</small></strong></div></div><div class="section-heading"><div><h2>本周里程碑</h2><p class="panel-subtitle">每个节点都对应明确的交付成果</p></div></div><div class="week-grid">${ms.sort((a,b)=>deadlineMs(a.dueDate)-deadlineMs(b.dueDate)).map(m=>milestoneCard(m)).join('')}</div>${!ms.length?empty('这一周还没有里程碑','在项目详情中添加带验收标准的周节点。'):''}<section class="panel report-panel"><div class="panel-header"><div><h2>周汇总草稿</h2><p class="panel-subtitle">根据项目数据自动汇总，可导出后补充原因与下周安排</p></div><span class="tag">自动汇总</span></div><div class="report-columns"><div class="report-block"><h3>已完成的工作 <span class="count">${done.length}</span></h3>${done.length?`<ul>${done.map(t=>`<li><strong>${e(t.title)}</strong><span>${e(user(t.ownerId)?.name)} · ${e(project(t.projectId)?.name)}</span></li>`).join('')}</ul>`:'<p class="muted">本周到期任务尚无验收完成记录。</p>'}</div><div class="report-block"><h3>逾期待跟进 <span class="count">${late.length}</span></h3>${late.map(t=>`<p><strong>${e(t.title)}</strong><span>${e(`已超过 ${dateLabel(t.dueDate)} 截止时间`)}</span></p>`).join('')||'<p class="muted">本周到期任务暂无逾期事项。</p>'}<h3 class="next-week-title">下周计划 <span class="count">${next.length}</span></h3>${next.slice(0,5).map(t=>`<p>${e(t.title)}<span>${dateLabel(t.dueDate)} · ${e(user(t.ownerId)?.name)}</span></p>`).join('')||'<p class="muted">下周暂未安排到期任务。</p>'}</div></div></section>`;
+  return heading('周计划与汇总','以每周交付节点，连接日常工作与项目目标。',button('导出 Excel','export-week','xlsx','secondary','download')+button('导出 Word','export-week','docx','secondary','file'))+`<div class="toolbar week-toolbar"><div class="week-switch">${button('上一周','previous-week','','small ghost')}<strong>${dayLabel(r.start)} — ${dayLabel(r.end)}</strong>${button('下一周','next-week','','small ghost')}</div>${button(weekOffset===0?'本周':'回到本周','current-week','','small secondary')}</div><div class="report-summary"><div><span>本周任务</span><strong>${ts.length}<small>项</small></strong></div><div><span>已验收完成</span><strong>${done.length}<small>项</small></strong></div><div><span>周节点达成</span><strong>${ms.filter(m=>m.status==='done').length}<small>/ ${ms.length}</small></strong></div><div><span>逾期任务</span><strong>${late.length}<small>项</small></strong></div></div><div class="section-heading"><div><h2>本周里程碑</h2><p class="panel-subtitle">每个节点都对应明确的交付成果</p></div></div><div class="week-grid">${ms.sort((a,b)=>deadlineMs(a.dueDate)-deadlineMs(b.dueDate)).map(m=>milestoneCard(m)).join('')}</div>${!ms.length?empty('这一周还没有里程碑','在项目详情中添加带验收标准的周节点。'):''}<section class="panel report-panel"><div class="panel-header"><div><h2>周汇总草稿</h2><p class="panel-subtitle">根据项目数据自动汇总，可导出后补充原因与下周安排</p></div><span class="tag">自动汇总</span></div><div class="report-columns"><div class="report-block"><h3>已完成的工作 <span class="count">${done.length}</span></h3>${done.length?`<ul>${done.map(t=>`<li><strong>${e(t.title)}</strong><span>${e(taskOwners(t).map(id=>user(id)?.name).filter(Boolean).join('、'))} · ${e(project(t.projectId)?.name)}</span></li>`).join('')}</ul>`:'<p class="muted">本周到期任务尚无验收完成记录。</p>'}</div><div class="report-block"><h3>逾期待跟进 <span class="count">${late.length}</span></h3>${late.map(t=>`<p><strong>${e(t.title)}</strong><span>${e(`已超过 ${dateLabel(t.dueDate)} 截止时间`)}</span></p>`).join('')||'<p class="muted">本周到期任务暂无逾期事项。</p>'}<h3 class="next-week-title">下周计划 <span class="count">${next.length}</span></h3>${next.slice(0,5).map(t=>`<p>${e(t.title)}<span>${dateLabel(t.dueDate)} · ${e(taskOwners(t).map(id=>user(id)?.name).filter(Boolean).join('、'))}</span></p>`).join('')||'<p class="muted">下周暂未安排到期任务。</p>'}</div></div></section>`;
 }
 function nodeApprovalBanner(p) {
   const count=visibleNodeRequests().filter(x=>x.projectId===p.id&&x.status==='pending').length;
@@ -569,7 +570,7 @@ async function saveAccount(action,payload,id) {
   }catch(error){if(error.status===409){const refreshed=await loadAccounts();if(refreshed)error.message+=' 账号信息已刷新，请核对后重试。';}throw error;}finally{saving=false;if(submit)submit.disabled=false;}
 }
 function searchPage() {
-  const q=searchTerm.trim().toLowerCase(), ps=visibleProjects().filter(p=>`${p.name} ${p.description} ${p.code}`.toLowerCase().includes(q)),ts=visibleTasks().filter(t=>`${t.title} ${t.description} ${user(t.ownerId)?.name}`.toLowerCase().includes(q));
+  const q=searchTerm.trim().toLowerCase(), ps=visibleProjects().filter(p=>`${p.name} ${p.description} ${p.code}`.toLowerCase().includes(q)),ts=visibleTasks().filter(t=>`${t.title} ${t.description} ${taskOwners(t).map(id=>user(id)?.name).join(' ')}`.toLowerCase().includes(q));
   return heading('搜索结果',`“${e(searchTerm.trim())}” · 找到 ${ps.length} 个项目、${ts.length} 项任务`,button('清除搜索','clear-search','','secondary'))+`<section class="panel"><div class="panel-header"><h2>项目 <span class="count">${ps.length}</span></h2></div><div class="project-list">${ps.map(projectRow).join('')||'<p class="search-empty">没有匹配的项目</p>'}</div></section><section class="panel detail-section"><div class="panel-header"><h2>任务 <span class="count">${ts.length}</span></h2></div><div class="task-list">${ts.map(t=>taskRow(t)).join('')||'<p class="search-empty">没有匹配的任务，试试项目名、任务名或负责人。</p>'}</div></section>`;
 }
 
@@ -611,11 +612,30 @@ function reviewerOptionsForTask(p,ownerId,preferred='') {
   const selected=[preferred,p.ownerId].find(id=>candidates.some(u=>u.id===id))||candidates[0]?.id||'';
   return {selected,html:candidates.length?userOptions(selected,candidates):'<option value="">暂无可用验收人，请联系管理员开通其他成员账号</option>'};
 }
+function personnelOptions(p, stage, owner, reviewer, selection={}, locked=false) {
+  const members=state.users.filter(u=>taskReviewerIds.includes(u.id) && (p.memberIds.includes(u.id)||u.id===p.ownerId));
+  const reviewers=stage?[...new Map([...state.users.filter(u=>u.role==='admin' && taskReviewerIds.includes(u.id)), ...milestoneReviewerOptions.map(u=>({...u,role:'admin'}))].map(u=>[u.id,u])).values()]:eligibleTaskReviewers(p,owner);
+  return { ...selection, stage, owner, reviewer, members, reviewers, locked };
+}
+function rosterBox(options) {
+  return `<div class="node-people" data-personnel>${peopleFields(options)}</div>`;
+}
+function syncPersonnel(form) {
+  const box=form.querySelector?.('[data-personnel]');
+  if(!box)return;
+  const type=form.dataset.form,stage=type==='setMilestoneCoReviewer'||type==='requestMilestone';
+  const target=type==='setTaskReviewer'?task(form.dataset.id):stage?milestone(form.dataset.id):null;
+  const p=project(target?.projectId || form.elements.projectId?.value || form.dataset.id);
+  if(!p)return;
+  const owner=stage?p.ownerId:target?.ownerId||form.elements.ownerId.value;
+  const reviewer=form.elements.reviewerId?.value || '';
+  updatePeopleBox(box,personnelOptions(p,stage,owner,reviewer,readPeople(box),target?.status==='review'));
+}
 function setTaskReviewer(id) {
   const t=visibleTasks().find(item=>item.id===id),p=t&&project(t.projectId);
   if(!t||t.status==='done'||!canManage(p))return;
   const options=reviewerOptionsForTask(p,t.ownerId,t.reviewerId);
-  showModal('指定任务验收人',`<p class="form-intro">${e(t.title)}</p>${selectField('任务验收人','reviewerId',options.html)}`,'保存','setTaskReviewer',id);
+  showModal('设置任务成员与验收人',`<p class="form-intro">${e(t.title)}</p>${selectField('任务验收人','reviewerId',options.html)}${rosterBox(personnelOptions(p,false,t.ownerId,options.selected,t,t.status==='review'))}${t.deliveries?.length && t.status==='doing'?'<p class="field-help">调整执行名单后，已有个人成果会存入历史，所有成员需按新名单重新提交。</p>':''}`,'保存','setTaskReviewer',id);
 }
 function setMilestoneCoReviewer(id) {
   const m=visibleMilestones().find(item=>item.id===id),p=m&&project(m.projectId);
@@ -623,16 +643,16 @@ function setMilestoneCoReviewer(id) {
   const candidates=milestoneReviewerOptions.filter(u=>u.id!==p.ownerId);
   const previousUnavailable=m.coReviewerId&&!candidates.some(u=>u.id===m.coReviewerId);
   const options='<option value="">仅主验</option>'+(previousUnavailable?`<option value="${e(m.coReviewerId)}" selected disabled>原加验人已不可选</option>`:'')+userOptions(m.coReviewerId||'',candidates);
-  const help=m.signatures?.length?'变更加验人将清空已有签字，需要重新验收。':'加选管理员后，需要两位不同人员签字。';
-  showModal('设置阶段加验人',`<p class="form-intro">${e(m.title)}</p>${selectField('加验管理员','reviewerId',options,false)}<p class="field-help">${help}</p>`,'保存','setMilestoneCoReviewer',id);
+  const help=m.signatures?.length?'变更加验人将清空已有签字，需要重新验收。':'由项目负责人和选中的加验管理员分别签字。';
+  showModal('设置阶段成员与验收人',`<p class="form-intro">${e(m.title)}</p>${selectField('加验管理员','reviewerId',options,false)}${rosterBox(personnelOptions(p,true,p.ownerId,m.coReviewerId,m))}<p class="field-help">${help}</p>`,'保存','setMilestoneCoReviewer',id);
 }
 function signatureProgress(m) {
   if(m.status==='done'&&!m.signatures?.length)return '已达成';
-  return `阶段签字 ${(m.signatures||[]).length} / ${m.coReviewerId?2:1}`;
+  return `阶段签字 ${(m.signatures||[]).length} / ${1+stageReviewers(m).length}`;
 }
 function milestoneSignatures(p,m) {
   if(m.status==='done'&&!m.signatures?.length)return '';
-  const slots=[['owner','主验',p.ownerId],...(m.coReviewerId?[['coReviewer','加验',m.coReviewerId]]:[])];
+  const slots=stageSeats(p,m).map(([slot,id])=>[slot,slot==='owner'?'主验':'加验',id]);
   const rows=slots.map(([slot,label,id])=>{
     const signature=m.signatures?.find(item=>item.as===slot);
     const name=user(id)?.name||'人员资料待补充';
@@ -646,8 +666,8 @@ function signMilestone(id) {
   if(!m)return;
   const slots=milestoneSignSlots(p,m,actor(),state.tasks);
   if(!slots.length)return;
-  const labels={owner:'主验',coReviewer:'加验'};
-  const choice=slots.length>1?selectField('本次签字位置','as',slots.map(slot=>`<option value="${e(slot)}">${labels[slot]}</option>`).join('')):`<input type="hidden" name="as" value="${e(slots[0])}">`;
+  const labels=Object.fromEntries(stageSeats(p,m).map(([slot,id])=>[slot,(slot==='owner'?'主验':'加验')+' · '+(user(id)?.name||'成员')]));
+  const choice=slots.length>1?selectField('本次签字位置','as',slots.map(slot=>`<option value="${e(slot)}">${e(labels[slot])}</option>`).join('')):`<input type="hidden" name="as" value="${e(slots[0])}">`;
   showModal('签字验收',`<p class="form-intro">${e(m.title)}</p>${milestoneSignatures(p,m)}${choice}`,'确认签字','completeMilestone',id);
 }
 function newTask(projectId, selectedMilestoneId) {
@@ -655,25 +675,35 @@ function newTask(projectId, selectedMilestoneId) {
   const ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done');
   if(!ms.length){showModal('先规划项目里程碑',`<p class="form-intro">${e(p.name)}</p><p>任务需要关联一个尚未完成的里程碑，确保所有交付都计入项目计划。请先申请新增大节点，待项目负责人或总管理员批准后再创建任务。</p>`,'','',p.id,button('申请新增大节点','new-milestone',p.id,'primary','plus'));return;}
   const members=state.users.filter(u=>p.memberIds.includes(u.id)||u.id===p.ownerId), owner=members[0]?.id||actorId;
-  showModal('新建任务',`<p class="form-intro">任务需要明确交付标准，由负责人提交、验收人确认。</p><div class="form-grid">${selectField('所属项目','projectId',projectOptions(p.id,ps))}${selectField('所属里程碑','milestoneId',ms.map(m=>`<option value="${e(m.id)}">${e(m.title)}</option>`).join(''))}<div class="field full">${field('任务名称','title','','text','required maxlength="100" placeholder="例如：完成外观设计 V1"')}</div>${selectField('主负责人','ownerId',userOptions(owner,members))}${selectField('验收人','reviewerId',reviewerOptionsForTask(p,owner).html)}${scheduleField('交付截止时间','dueDate',scheduleInput(ms[0].dueDate),`required min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(ms[0].dueDate))}"`)}${selectField('优先级','priority','<option value="normal">普通</option><option value="high">高</option><option value="low">低</option>')}${textarea('任务说明','description','说明工作范围和注意事项。',false)}${textarea('交付物与验收标准','acceptance','例如：提交三视图、尺寸及材料说明，负责人确认后通过。')}</div>${scheduleHelp}`,'创建任务','createTask');
+  showModal('新建任务',`<p class="form-intro">每位执行成员分别提交成果，所有指定验收人签字后完成。</p><div class="form-grid">${selectField('所属项目','projectId',projectOptions(p.id,ps))}${selectField('所属里程碑','milestoneId',ms.map(m=>`<option value="${e(m.id)}">${e(m.title)}</option>`).join(''))}<div class="field full">${field('任务名称','title','','text','required maxlength="100" placeholder="例如：完成外观设计 V1"')}</div>${selectField('主负责人','ownerId',userOptions(owner,members))}${selectField('验收人','reviewerId',reviewerOptionsForTask(p,owner).html)}${rosterBox(personnelOptions(p,false,owner,reviewerOptionsForTask(p,owner).selected))}${scheduleField('交付截止时间','dueDate',scheduleInput(ms[0].dueDate),`required min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(ms[0].dueDate))}"`)}${selectField('优先级','priority','<option value="normal">普通</option><option value="high">高</option><option value="low">低</option>')}${textarea('任务说明','description','说明工作范围和注意事项。',false)}${textarea('交付物与验收标准','acceptance','例如：提交三视图、尺寸及材料说明，负责人确认后通过。')}</div>${scheduleHelp}`,'创建任务','createTask');
 }
 function newMilestone(projectId, milestoneId) {
   const p=visibleProjects().find(p=>p.id===projectId),m=milestoneId&&milestone(milestoneId);if(!p)return;
   if(m&&(m.projectId!==p.id||m.status==='done')){toast('已完成的大节点不能修改。',true);return;}
   if(m&&visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')){toast('此节点已有待审批申请，请等待处理。',true);return;}
   const kind=m?'update':'create',legacyDue=!!m&&/^\d{4}-\d{2}-\d{2}$/.test(m.dueDate);
-  showModal(m?'申请修改大节点':'申请新增大节点',`<p class="form-intro">${e(p.name)} · 项目负责人或总管理员批准后更新正式计划。</p><input type="hidden" name="kind" value="${kind}"><input type="hidden" name="milestoneId" value="${e(m?.id||'')}">${m?`<p class="node-approval-help">当前节点：${e(m.title)} · ${fullDate(m.dueDate)} 截止</p>`:''}<div class="form-grid"><div class="field full">${field('节点交付成果','title',m?.title||'','text','required maxlength="100" placeholder="例如：样机方案通过评审"')}</div>${scheduleField('节点截止时间','dueDate',scheduleInput(m?.dueDate||p.dueDate),`required ${legacyDue?'disabled':''} min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(p.dueDate))}"`)}${legacyDue?`<label class="checkbox-label field full"><input type="checkbox" name="preserveAllDay" checked data-preserve-all-day>保留原截止日（全天）；取消勾选后设置具体小时</label>`:''}${textarea('申请原因（选填）','reason',m?'可补充调整节点或日期的原因。':'可补充新增阶段的原因和预期交付。',false)}</div><p class="field-help">节点日期须在项目周期内，且不得早于其下属任务的截止时间。超过项目截止时间时，请先申请项目延期。批准不会自动调整小任务时间。</p>${scheduleHelp}`,'提交申请','requestMilestone',p.id);
+  showModal(m?'申请修改大节点':'申请新增大节点',`<p class="form-intro">${e(p.name)} · 项目负责人或总管理员批准后更新正式计划。</p><input type="hidden" name="kind" value="${kind}"><input type="hidden" name="milestoneId" value="${e(m?.id||'')}">${m?`<p class="node-approval-help">当前节点：${e(m.title)} · ${fullDate(m.dueDate)} 截止</p>`:''}<div class="form-grid"><div class="field full">${field('节点交付成果','title',m?.title||'','text','required maxlength="100" placeholder="例如：样机方案通过评审"')}</div>${scheduleField('节点截止时间','dueDate',scheduleInput(m?.dueDate||p.dueDate),`required ${legacyDue?'disabled':''} min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(p.dueDate))}"`)}${legacyDue?`<label class="checkbox-label field full"><input type="checkbox" name="preserveAllDay" checked data-preserve-all-day>保留原截止日（全天）；取消勾选后设置具体小时</label>`:''}${m?'':rosterBox(personnelOptions(p,true,p.ownerId,''))}${textarea('申请原因（选填）','reason',m?'可补充调整节点或日期的原因。':'可补充新增阶段的原因和预期交付。',false)}</div><p class="field-help">节点日期须在项目周期内，且不得早于其下属任务的截止时间。超过项目截止时间时，请先申请项目延期。批准不会自动调整小任务时间。</p>${scheduleHelp}`,'提交申请','requestMilestone',p.id);
 }
 function reviewNodeRequest(id, approve) {
   readEntityNotifications('approvals',id);
   const x=visibleNodeRequests().find(x=>x.id===id);if(!x||!canReviewApplication(x))return;
-  showModal(approve?'批准大节点申请':'驳回大节点申请',`<p class="form-intro">${e(project(x.projectId)?.name)} · ${e(user(x.applicantId)?.name)} 提交</p>${requestComparison(x)}${typeof x.reason==='string'&&x.reason.trim()?`<div class="approval-reason"><span>申请原因</span><p>${e(x.reason)}</p></div>`:''}<p class="field-help">${approve?'批准后更新正式节点。':'驳回后保留当前计划，员工可根据审批意见重新提交。'}</p>${textarea('审批意见（选填）','comment',approve?'可补充批准依据及执行要求。':'可补充需要调整的内容。',false)}`,approve?'确认批准并生效':'确认驳回',approve?'approveMilestoneRequest':'rejectMilestoneRequest',id);
+  showModal(approve?'批准大节点申请':'驳回大节点申请',`<p class="form-intro">${e(project(x.projectId)?.name)} · ${e(user(x.applicantId)?.name)} 提交</p>${requestComparison(x,state.users)}${typeof x.reason==='string'&&x.reason.trim()?`<div class="approval-reason"><span>申请原因</span><p>${e(x.reason)}</p></div>`:''}<p class="field-help">${approve?'批准后更新正式节点。':'驳回后保留当前计划，员工可根据审批意见重新提交。'}</p>${textarea('审批意见（选填）','comment',approve?'可补充批准依据及执行要求。':'可补充需要调整的内容。',false)}`,approve?'确认批准并生效':'确认驳回',approve?'approveMilestoneRequest':'rejectMilestoneRequest',id);
+}
+function deliveryDetails(t) {
+  if (taskOwners(t).length <= 1 && !t.deliveryHistory?.length) return '';
+  const rows=taskOwners(t).map(id=>{
+    const item=t.deliveries?.find(d=>d.ownerId===id);
+    return `<div><strong>${e(user(id)?.name||'成员')}</strong><small>${item?'已提交 · '+fullDate(item.at):'待提交'}</small>${item?`<p class="preserve-space">${e(item.deliverable)}</p>`:''}</div>`;
+  });
+  const history=(t.deliveryHistory || []).map(round=>`<details><summary>${fullDate(round.at)} · ${e(round.reason)}</summary>${round.deliveries.map(item=>`<p class="preserve-space">${e(user(item.ownerId)?.name)} · ${fullDate(item.at)}<br>${e(item.deliverable)}</p>`).join('')}</details>`).join('');
+  const active=taskOwners(t).length>1?`<h4>个人成果 · ${t.deliveries?.length||0} / ${taskOwners(t).length} 已提交</h4><div class="task-detail-meta">${rows.join('')}</div>`:'';
+  return active+history;
 }
 function taskDetail(id) {
   readEntityNotifications('tasks',id);
   const t=visibleTasks().find(t=>t.id===id);if(!t)return;
-  const actions = (canManage(project(t.projectId))?button('编辑小节点','edit-task-content',t.id,'secondary')+(t.status!=='done'?button('指定验收人','set-task-reviewer',t.id,'secondary'):''):'')+(isAdmin()?button('删除小节点','delete-task',t.id,'danger'):'')+(t.status==='review'&&canReview(t)?`${button('退回修改','reject-task',id,'secondary')}${button('验收通过','approve-task',id,'primary','check')}`:t.status==='todo'&&canOperate(t)?button('开始任务','start-task',id,'primary','arrow'):t.status==='doing'&&canSubmit(t)?button('提交成果','submit-task',id,'primary','check'):'');
-  showModal('任务详情',`<div class="task-detail-heading"><h3>${e(t.title)}</h3>${statusPill(t.status)}</div><p class="muted">${e(project(t.projectId)?.name)}${t.milestoneId?` · ${e(milestone(t.milestoneId)?.title)}`:''}</p><div class="task-detail-meta"><div><span>主负责人</span>${person(t.ownerId)}</div><div><span>验收人</span>${person(t.reviewerId)}</div>${t.createdBy?`<div><span>创建人</span>${person(t.createdBy)}${t.createdAt?`<small>${fullDate(t.createdAt)}</small>`:''}</div>`:''}<div><span>截止时间</span><strong>${fullDate(t.dueDate)}</strong>${t.dueDate!==t.originalDueDate?`<small>原定 ${fullDate(t.originalDueDate)}</small>`:''}</div></div><div class="detail-text"><h4>任务说明</h4><p class="preserve-space">${e(t.description || '暂无补充说明')}</p><h4>交付物与验收标准</h4><p class="preserve-space">${e(t.acceptance)}</p>${t.deliverable?`<h4>已提交成果</h4><p class="preserve-space">${e(t.deliverable)}</p><span class="cell-subtext">提交时间：${fullDate(t.submittedAt)}</span>`:''}${t.reviewComment?`<h4>验收意见</h4><p>${e(t.reviewComment)}</p>`:''}${t.reviewedAt?`<span class="cell-subtext">${t.status==='done'?'验收通过时间':'最近审核时间'}：${fullDate(t.reviewedAt)}</span>`:''}</div>${renderNodeFiles(t.projectId,'task',t.id)}`, '', '', id, actions);
+  const actions = (canManage(project(t.projectId))?button('编辑小节点','edit-task-content',t.id,'secondary')+(t.status!=='done'?button('成员与验收人','set-task-reviewer',t.id,'secondary'):''):'')+(isAdmin()?button('删除小节点','delete-task',t.id,'danger'):'')+(t.status==='review'&&canReview(t)?`${button('退回修改','reject-task',id,'secondary')}${button('验收通过','approve-task',id,'primary','check')}`:t.status==='todo'&&canOperate(t)?button('开始任务','start-task',id,'primary','arrow'):t.status==='doing'&&canSubmit(t)?button('提交成果','submit-task',id,'primary','check'):'');
+  showModal('任务详情',`<div class="task-detail-heading"><h3>${e(t.title)}</h3>${statusPill(t.status)}</div><p class="muted">${e(project(t.projectId)?.name)}${t.milestoneId?` · ${e(milestone(t.milestoneId)?.title)}`:''}</p><div class="task-detail-meta"><div><span>执行成员</span>${taskOwners(t).map(person).join('、')}</div><div><span>验收人</span>${taskReviewers(t).map(person).join('、')}</div>${t.createdBy?`<div><span>创建人</span>${person(t.createdBy)}${t.createdAt?`<small>${fullDate(t.createdAt)}</small>`:''}</div>`:''}<div><span>截止时间</span><strong>${fullDate(t.dueDate)}</strong>${t.dueDate!==t.originalDueDate?`<small>原定 ${fullDate(t.originalDueDate)}</small>`:''}</div></div><div class="detail-text"><h4>任务说明</h4><p class="preserve-space">${e(t.description || '暂无补充说明')}</p><h4>交付物与验收标准</h4><p class="preserve-space">${e(t.acceptance)}</p>${deliveryDetails(t)}${t.reviewSignatures?.length?`<h4>已签字 ${t.reviewSignatures.length} / ${taskReviewers(t).length}</h4>${t.reviewSignatures.map(sign=>`<p>${e(user(sign.actorId)?.name)} · ${fullDate(sign.at)}${sign.comment?' · '+e(sign.comment):''}</p>`).join('')}`:''}${t.deliverable && taskOwners(t).length===1?`<h4>已提交成果</h4><p class="preserve-space">${e(t.deliverable)}</p><span class="cell-subtext">提交时间：${fullDate(t.submittedAt)}</span>`:''}${t.reviewComment?`<h4>验收意见</h4><p>${e(t.reviewComment)}</p>`:''}${t.reviewedAt?`<span class="cell-subtext">${t.status==='done'?'验收通过时间':'最近审核时间'}：${fullDate(t.reviewedAt)}</span>`:''}</div>${renderNodeFiles(t.projectId,'task',t.id)}`, '', '', id, actions);
   bindProjectFiles(modal,fileContext());
   modal.querySelector('.modal-footer > button[data-action="close-modal"]').textContent='关闭';
 }
@@ -729,9 +759,9 @@ function editTaskContent(id) {
 }
 function submitTask(id) {
   const t=visibleTasks().find(item=>item.id===id);if(!t||!canSubmit(t)||!['todo','doing'].includes(t.status))return;
-  showModal('提交任务成果',`<p class="form-intro">${e(t.title)}</p><div class="notice info"><span>验收标准：${e(t.acceptance)}</span></div>${textarea('成果说明或交付链接','deliverable','描述已完成的工作，并填写文件链接或交付结果。提交后由验收人确认。',true,t.deliverable||'')}<p class="field-help">提交和验收时间由系统自动记录，按北京时间显示。</p>`,'提交验收','submitTask',id);
+  showModal('提交任务成果',`<p class="form-intro">${e(t.title)}</p><div class="notice info"><span>验收标准：${e(t.acceptance)}</span></div>${textarea('成果说明或交付链接','deliverable','描述已完成的工作，并填写文件链接或交付结果。提交后由验收人确认。',true,taskOwners(t).length>1?'':t.deliverable||'')}<p class="field-help">${taskOwners(t).length>1?'每位执行成员分别提交，全部交齐后进入验收。':'提交和验收时间按北京时间记录。'}</p>`,'提交验收','submitTask',id);
 }
-function reviewTask(id,approve) { readEntityNotifications('tasks',id); const t=visibleTasks().find(item=>item.id===id);if(!t||t.status!=='review'||!canReview(t))return;showModal(approve?'确认验收通过':'退回任务修改',`<p class="form-intro">${e(t.title)}</p><div class="notice info"><span>交付成果：${e(t.deliverable)}</span></div>${textarea('验收意见','comment',approve?'说明通过验收的依据。':'请明确指出需要修改的内容。',!approve)}` ,approve?'验收通过':'退回修改',approve?'approveTask':'rejectTask',id); }
+function reviewTask(id,approve) { readEntityNotifications('tasks',id); const t=visibleTasks().find(item=>item.id===id);if(!t||t.status!=='review'||!canReview(t))return;showModal(approve?'确认验收通过':'退回任务修改',`<p class="form-intro">${e(t.title)}</p><div class="notice info"><span>交付成果：${e(t.deliverable)}</span></div>${taskSignSeats(t,actor()).length>1?selectField('本次代签位置','as',userOptions('',state.users.filter(u=>taskSignSeats(t,actor()).includes(u.id)))):''}${taskOwners(t).length>1 && !approve?'<p class="field-help">退回后，所有成员需分别重新提交成果。</p>':''}${textarea('验收意见','comment',approve?'说明通过验收的依据。':'请明确指出需要修改的内容。',!approve)}` ,approve?'验收通过':'退回修改',approve?'approveTask':'rejectTask',id); }
 function extensionFields(projectId) {
   const p=project(projectId),ms=state.milestones.filter(m=>m.projectId===p.id&&m.status!=='done'),ts=state.tasks.filter(t=>t.projectId===p.id&&t.status!=='done');
   return `<div class="date-current"><span>当前截止时间</span><strong>${fullDate(p.dueDate)}</strong><span>原计划 ${fullDate(p.originalDueDate)}</span></div>${scheduleField('申请的新截止时间','newDueDate',offsetInput(p.dueDate,7),`required min="${nextHourInput(p.dueDate)}"`)}${scheduleHelp}<p class="field-help">勾选需要同步调整的节点或任务，并分别填写新日期。未勾选的日期保持原值。</p><div class="reschedule-list">${ms.map(m=>rescheduleRow('milestone',m)).join('')}${ts.map(t=>rescheduleRow('task',t)).join('')}${!ms.length&&!ts.length?'<p class="muted">当前没有未完成的节点或任务。</p>':''}</div>`;
@@ -748,7 +778,7 @@ function dataForExport() {
   const projects=visibleProjects(),ids=new Set(projects.map(p=>p.id));
   const tasks=visibleTasks(),milestones=visibleMilestones(),extensions=visibleExtensions(),logs=state.logs.filter(l=>ids.has(l.projectId));
   const users=new Set(projects.flatMap(p=>[p.ownerId,...p.memberIds]));users.add(actorId);
-  tasks.forEach(t=>[t.ownerId,t.reviewerId].forEach(id=>users.add(id)));
+  tasks.forEach(t=>[...taskOwners(t),...taskReviewers(t)].forEach(id=>users.add(id)));
   extensions.forEach(x=>[x.applicantId,x.reviewerId].forEach(id=>users.add(id)));
   logs.forEach(l=>users.add(l.actorId));
   return {...state,projects,tasks,milestones,extensions,logs,users:state.users.filter(u=>users.has(u.id))};
@@ -839,7 +869,7 @@ document.addEventListener('submit',async event=>{
     if(action==='createTask'){
       const p=visibleProjects().find(item=>item.id===payload.projectId);
       if(!p||!eligibleTaskReviewers(p,payload.ownerId).some(u=>u.id===payload.reviewerId))throw new Error('请选择有效的任务验收人。');
-      return await commit(action,payload,'任务已创建并分配。');
+      return await commit(action,{...payload,...readPeople(form)},'任务已创建并分配。');
     }
     if(action==='setTaskReviewer'||action==='setMilestoneCoReviewer'){
       const target=action==='setTaskReviewer'?task(id):milestone(id),p=target&&project(target.projectId);
@@ -848,7 +878,8 @@ document.addEventListener('submit',async event=>{
       const chosen=payload.reviewerId;
       if(action==='setTaskReviewer'&&!eligibleTaskReviewers(p,target.ownerId).some(u=>u.id===chosen))throw new Error('请选择有效的任务验收人。');
       if(action==='setMilestoneCoReviewer'&&chosen&&(chosen===p.ownerId||!milestoneReviewerOptions.some(u=>u.id===chosen)))throw new Error('请选择与项目负责人不同的启用管理员。');
-      return await commit(action,{id,reviewerId:chosen||null},'验收人已更新。');
+      const box=form.querySelector('[data-personnel]');
+      return await commit(action,{id,reviewerId:chosen||null,...(box?readPeople(box):{})},'节点人员已更新。');
     }
     if(action==='editMilestoneContent'||action==='editTaskContent'){
       const target=action==='editTaskContent'?task(id):milestone(id);
@@ -856,18 +887,21 @@ document.addEventListener('submit',async event=>{
       return await commit(action,{...payload,id},'节点内容已更新。');
     }
     if(Object.hasOwn(deletionCommands,action))return await saveEntityDeletion(action,payload,id);
-    if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id},'申请已提交，项目负责人或总管理员批准后才生效。');}
+    if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id,...(form.querySelector('[data-personnel]')?readPeople(form):{})},'申请已提交，项目负责人或总管理员批准后才生效。');}
     if(['approveMilestoneRequest','rejectMilestoneRequest','approveExtension','rejectExtension'].includes(action)){
       const requests=action.endsWith('Extension')?visibleExtensions():visibleNodeRequests();
       const request=requests.find(item=>item.id===id);
       if(!request||!canReviewApplication(request))throw new Error('当前无权审批此申请。');
     }
     if(action==='approveMilestoneRequest'||action==='rejectMilestoneRequest')return await commit('reviewMilestoneRequest',{id,approve:action==='approveMilestoneRequest',comment:payload.comment},action==='approveMilestoneRequest'?'申请已批准，正式节点已更新。':'申请已驳回，当前计划保持不变。');
-    if(action==='submitTask')return await commit(action,{id,deliverable:payload.deliverable},'成果已提交，等待验收。');
+    if(action==='submitTask'){
+      const item=task(id), allReady=(item.deliveries?.length||0)+1>=taskOwners(item).length;
+      return await commit(action,{id,deliverable:payload.deliverable},allReady?'成果已交齐，等待验收。':'个人成果已保存，等待其他成员提交。');
+    }
     if(action==='approveTask'||action==='rejectTask'){
       const t=visibleTasks().find(item=>item.id===id);
       if(t?.status!=='review'||!canReview(t))throw new Error('当前无法验收此任务。');
-      return await commit('reviewTask',{id,approve:action==='approveTask',comment:payload.comment},action==='approveTask'?'任务已通过验收。':'任务已退回，等待负责人修改。');
+      return await commit('reviewTask',{id,approve:action==='approveTask',comment:payload.comment,...(payload.as?{as:payload.as}:{})},action==='approveTask'?'验收意见已保存。':'任务已退回，等待负责人修改。');
     }
     if(action==='completeMilestone'){
       const m=visibleMilestones().find(item=>item.id===id);
@@ -895,12 +929,13 @@ document.addEventListener('change',event=>{
     form.elements.ownerId.innerHTML=userOptions('',members);form.elements.ownerId.value=members[0]?.id||'';
     const reviewers=reviewerOptionsForTask(p,form.elements.ownerId.value);
     form.elements.reviewerId.innerHTML=reviewers.html;form.elements.reviewerId.value=reviewers.selected;
-    taskScheduleBounds(form,p,ms[0]);return;
+    taskScheduleBounds(form,p,ms[0]);syncPersonnel(form);return;
   }
   if(form.dataset.form==='createTask'&&el.name==='ownerId'){
     const options=reviewerOptionsForTask(project(form.elements.projectId.value),el.value,form.elements.reviewerId.value);
-    form.elements.reviewerId.innerHTML=options.html;form.elements.reviewerId.value=options.selected;return;
+    form.elements.reviewerId.innerHTML=options.html;form.elements.reviewerId.value=options.selected;syncPersonnel(form);return;
   }
+  if(el.name==='reviewerId'||el.dataset.roster)syncPersonnel(form);
   if(form.dataset.form==='createTask'&&el.name==='milestoneId'){const p=project(form.elements.projectId.value),m=milestone(el.value);if(m)taskScheduleBounds(form,p,m);}
 });
 document.addEventListener('input',event=>{if(event.target.id==='global-search'){searchTerm=event.target.value;renderContent();}});

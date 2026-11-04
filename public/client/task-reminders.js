@@ -1,3 +1,4 @@
+import { taskOwners } from './approval-access.js';
 import { canReviewTask, canViewProjectPlan } from './approval-access.js';
 import { isAdminRole, normalizeRole } from './roles.js';
 /**
@@ -11,7 +12,7 @@ export function taskReminderSummary(state, actorId) {
     isAdminRole(actor.role) || project.ownerId === actorId || project.memberIds?.includes(actorId)) : [];
   const projectIds = new Set(visibleProjects.map(project => project.id));
   const pending = (state?.tasks || []).filter(task => projectIds.has(task.projectId) && task.status !== 'done');
-  const owned = pending.filter(task => task.ownerId === actorId);
+  const owned = pending.filter(task => taskOwners(task).includes(actorId));
   const review = pending.filter(task => task.status === 'review' && canReviewTask(task,actor));
   const ownedTaskIds = owned.map(task => task.id);
   const reviewTaskIds = review.map(task => task.id);

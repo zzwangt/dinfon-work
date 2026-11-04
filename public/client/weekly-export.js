@@ -1,3 +1,4 @@
+import { taskOwners, stageSeats } from './approval-access.js';
 import { isAdminRole } from './roles.js';
 import { sanitizeStateForActor } from './access.js';
 import { addDays, progressAgainstPlan } from './domain.js';
@@ -27,11 +28,11 @@ export function buildWeeklyReport(state, { actorId, range, now = Date.now() } = 
   const next = ordered(scoped.tasks.filter(item => inRange(item, nextRange)));
   const done = tasks.filter(item => item.status === 'done').length;
   const late = tasks.filter(item => item.status !== 'done' && isOverdue(item.dueDate, now)).length;
-  const taskRows = items => items.map(item => [item.title, projects.get(item.projectId)?.name || '—', users.get(item.ownerId)?.name || '未分配', `${STATUS[item.status] || item.status}${item.status !== 'done' && isOverdue(item.dueDate, now) ? ' · 已逾期' : ''}`, formatDateTime(item.dueDate), formatDateTime(item.submittedAt), formatDateTime(item.reviewedAt), item.deliverable || '—']);
+  const taskRows = items => items.map(item => [item.title, projects.get(item.projectId)?.name || '—', taskOwners(item).map(id=>users.get(id)?.name || '未分配').join('、'), `${STATUS[item.status] || item.status}${item.status !== 'done' && isOverdue(item.dueDate, now) ? ' · 已逾期' : ''}`, formatDateTime(item.dueDate), formatDateTime(item.submittedAt), formatDateTime(item.reviewedAt), item.deliverable || '—']);
   const stageSignatures = milestone => {
     if(milestone.status==='done'&&!milestone.signatures?.length)return '已达成（历史记录）';
     const primary=projects.get(milestone.projectId)?.ownerId;
-    const seats=[['owner','主验',primary],...(milestone.coReviewerId?[['coReviewer','加验',milestone.coReviewerId]]:[])];
+    const seats=stageSeats({ownerId:primary},milestone).map(([slot,id])=>[slot,slot==='owner'?'主验':'加验',id]);
     return seats.map(([position,label,expected])=>{
       const signature=milestone.signatures?.find(item=>item.as===position);
       return signature?`${label} ${users.get(signature.actorId)?.name||'—'} 已签 ${formatDateTime(signature.at)}`:`${label} ${users.get(expected)?.name||'—'} 待签`;

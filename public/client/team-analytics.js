@@ -1,3 +1,4 @@
+import { taskOwners } from './approval-access.js';
 import { memberStats } from './domain.js';
 import { deadlineMs, startMs } from './time.js';
 
@@ -17,11 +18,11 @@ export function teamAnalyticsData(scopedState, { people = [], range, now = Date.
   const ids = new Set(uniquePeople.map(user => user.id));
   const windowStart = startMs(range.start);
   const windowEnd = deadlineMs(range.end);
-  const scopedTasks = (scopedState.tasks || []).filter(task => ids.has(task.ownerId));
+  const scopedTasks = (scopedState.tasks || []).filter(task => taskOwners(task).some(id => ids.has(id)));
   const tasks = scopedTasks.filter(task => deadlineMs(task.dueDate) >= windowStart && deadlineMs(task.dueDate) <= windowEnd);
   const members = uniquePeople.map(user => {
     const stats = memberStats({ ...scopedState, tasks }, user.id, range.start, range.end);
-    const assigned = scopedTasks.filter(task => task.ownerId === user.id);
+    const assigned = scopedTasks.filter(task => taskOwners(task).includes(user.id));
     return {
       user, stats,
       pending: assigned.filter(task => task.status !== 'done').length,
@@ -29,9 +30,9 @@ export function teamAnalyticsData(scopedState, { people = [], range, now = Date.
       overdue: assigned.filter(task => task.status !== 'done' && deadlineMs(task.dueDate) < now).length,
     };
   });
-  const total = members.reduce((sum, member) => sum + member.stats.due, 0);
-  const completed = members.reduce((sum, member) => sum + member.stats.completed, 0);
-  const onTime = members.reduce((sum, member) => sum + member.stats.onTime, 0);
+  const total = tasks.length;
+  const completed = tasks.filter(task => task.status === 'done').length;
+  const onTime = tasks.filter(task => task.submittedAt && deadlineMs(task.submittedAt) <= deadlineMs(task.dueDate)).length;
   const distribution = statuses.map(status => ({ ...status, count: tasks.filter(task => task.status === status.id).length }));
   // Keep original order inside each group; active plans come first, never ranked by rate.
   const orderedMembers = [...members.filter(member => member.stats.due > 0), ...members.filter(member => member.stats.due === 0)];

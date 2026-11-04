@@ -763,3 +763,53 @@ test('one project plan defers every node and assignment until an authorized revi
   assert.equal(rejected.data.state.projectPlans[0].status,'rejected');
   assert.ok(!f.stored().state.projects.some(p=>p.id===second.projectId));
 });
+
+test('a collaborative plan notifies both workers and requires each task and stage signature',async t=>{
+  const f=fixture(t);
+  const qa={userId:'auth-qa-multi',email:'qa-multi@example.com',displayName:'验收员'};
+  const design={userId:'auth-design-multi',email:'design-multi@example.com',displayName:'设计员'};
+  const extra={userId:'auth-extra-multi',email:'extra-multi@example.com',displayName:'加验甲'};
+  const second={userId:'auth-second-multi',email:'second-multi@example.com',displayName:'加验乙'};
+  for(const [account,id,role] of [[MANAGER,'u-manager'],[ENGINEER,'u-engineer'],[qa,'u-qa'],[design,'u-design'],[extra,'u-ops','admin'],[second,undefined,'admin']])await provision(f,account,id,role);
+  const secondId=(await f.call('/api/session',second)).data.actor.id;
+  async function cmd(who,action,payload,code=200,revision=f.stored().revision) {
+    const res=await f.call('/api/command',who,{action,payload,revision});
+    assert.equal(res.status,code,JSON.stringify(res.data.error));return res.data;
+  }
+  const task={title:'联调',ownerId:'u-engineer',memberIds:['u-design'],reviewerId:'u-qa',extraReviewerIds:['u-manager'],dueDate:'2099-04-10',acceptance:'实现预期'};
+  const stage={title:'阶段甲',dueDate:'2099-04-12',memberIds:['u-design','u-engineer'],coReviewerId:'u-ops',extraReviewerIds:[secondId],tasks:[task]};
+  const body={name:'多人验证',ownerId:'u-manager',memberIds:['u-engineer','u-qa','u-design'],startDate:'2099-04-01',dueDate:'2099-04-30',stages:[stage]};
+  await cmd(ADMIN,'createProject',{...body,stages:[{...stage,tasks:[{...task,extraReviewerIds:['u-design']}]}]},400);
+  const pending=(await cmd(ADMIN,'createProject',body)).state.projectPlans[0];
+  const live=await cmd(MANAGER,'reviewProjectPlan',{id:pending.id,approve:true});
+  const id=live.state.tasks.at(-1).id,mid=live.state.milestones.at(-1).id;
+  for(const worker of [design,ENGINEER])assert.ok((await f.call('/api/session',worker)).data.notifications.some(n=>n.entityId===id&&n.category==='tasks'));
+  const partial=await cmd(design,'submitTask',{id,deliverable:'设计成果'});
+  assert.equal(partial.state.tasks.at(-1).status,'doing');
+  assert.equal(partial.state.tasks.at(-1).submittedAt,null);
+  await cmd(qa,'reviewTask',{id,approve:true},400);
+  await cmd(design,'submitTask',{id,deliverable:'重复提交'},400);
+  await cmd(ADMIN,'submitTask',{id,deliverable:'代交'},400);
+  await cmd(ENGINEER,'submitTask',{id,deliverable:'联调记录'});
+  await cmd(design,'reviewTask',{id,approve:true},400);
+  let result=await cmd(qa,'reviewTask',{id,approve:true});
+  assert.equal(result.state.tasks.at(-1).status,'review');
+  assert.ok((await f.call('/api/session',MANAGER)).data.notifications.some(n=>n.entityId===id&&n.action==='submitTask'));
+  await cmd(qa,'reviewTask',{id,approve:true},400);
+  await cmd(MANAGER,'completeMilestone',{id:mid},400);
+  result=await cmd(MANAGER,'reviewTask',{id,approve:false,comment:'补测试'});
+  assert.equal(result.state.tasks.at(-1).status,'doing');
+  assert.equal(result.state.tasks.at(-1).deliveryHistory[0].deliveries.length,2);
+  assert.deepEqual(result.state.tasks.at(-1).deliveries,[]);
+  await cmd(ENGINEER,'submitTask',{id,deliverable:'第二次交付'});
+  await cmd(design,'submitTask',{id,deliverable:'修改后的设计'});
+  await cmd(MANAGER,'reviewTask',{id,approve:true});
+  result=await cmd(qa,'reviewTask',{id,approve:true});
+  assert.equal(result.state.tasks.at(-1).status,'done');
+  assert.deepEqual(result.state.tasks.at(-1).reviewSignatures.map(s=>s.actorId),['u-manager','u-qa']);
+  await cmd(extra,'completeMilestone',{id:mid});
+  await cmd(extra,'completeMilestone',{id:mid},400);
+  await cmd(design,'completeMilestone',{id:mid},400);
+  assert.equal((await cmd(second,'completeMilestone',{id:mid})).state.milestones.at(-1).status,'pending');
+  assert.equal((await cmd(MANAGER,'completeMilestone',{id:mid})).state.milestones.at(-1).status,'done');
+});

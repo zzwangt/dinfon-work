@@ -1,3 +1,5 @@
+import * as rosterUI from '../public/client/node-people.js';
+import * as peopleAccess from '../public/client/approval-access.js';
 import * as planUI from '../public/client/project-plan.js';
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from '../public/client/roles.js';
 import { canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from '../public/client/approval-access.js';
@@ -43,7 +45,7 @@ function harness(fetchImpl, overrides = {}) {
     addEventListener: (name,fn) => listeners.set(`document:${name}`,fn),
   };
   const context = {
-    ...planUI, ...domain, ...times, refreshFlowFileCounts, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
+    ...rosterUI, ...peopleAccess, ...planUI, ...domain, ...times, refreshFlowFileCounts, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, ...noticeUI, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, canAccessRoute, document, location,
     window: { addEventListener:(name,fn)=>listeners.set(`window:${name}`,fn), scrollTo() {} },
     history: { replaceState(_state,_unused,url) { location.hash=url.includes('#')?url.slice(url.indexOf('#')):''; } },
     fetch: fetchImpl, FormData, Response, URL:DownloadURL, Blob, Set, console,

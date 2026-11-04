@@ -1,3 +1,5 @@
+import * as peopleAccess from '../public/client/approval-access.js';
+import * as rosterUI from '../public/client/node-people.js';
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from '../public/client/roles.js';
 import { canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
@@ -21,7 +23,7 @@ function harness(state = domain.createSeedState()) {
   const modal = { innerHTML: '', open: false, showModal() { this.open = true; }, addEventListener() {} };
   const toast = { hidden: true, classList: { toggle() {} } };
   const context = {
-    ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
+    ...rosterUI, ...peopleAccess, ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
     document: {
       querySelector: selector => ({ '#app': app, '#modal': modal, '#toast': toast }[selector]),
       querySelectorAll: () => [], addEventListener() {},

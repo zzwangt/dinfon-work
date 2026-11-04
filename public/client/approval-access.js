@@ -17,10 +17,37 @@ export function canViewProjectPlan(plan, actor) {
   return Boolean(actor?.id && (isSuperAdminRole(actor.role) || plan.applicantId === actor.id || plan.project.ownerId === actor.id));
 }
 
-export function canReviewTask(task, actor) {
-  if (!task || !actor?.id) return false;
-  return isSuperAdminRole(actor.role) || (task.reviewerId === actor.id && task.ownerId !== actor.id);
+// Single-person records use the same roster without a storage migration.
+const roster = (first, rest = []) => [...new Set([first, ...rest].filter(Boolean))];
+export const taskOwners = task => roster(task.ownerId, task.memberIds);
+export const taskReviewers = task => roster(task.reviewerId, task.extraReviewerIds);
+export const stageReviewers = stage => roster(stage.coReviewerId, stage.extraReviewerIds);
+export function stageSeats(project, stage) {
+  return [['owner',project.ownerId], ...stageReviewers(stage).map((id,index) => [index ? 'coReviewer:' + id : 'coReviewer', id])];
 }
+
+export function canSubmitTask(task, actor) {
+  if (!task || !actor) return false;
+  const owners = taskOwners(task);
+  if (owners.length === 1) return owners.includes(actor.id) || ['admin','superadmin'].includes(actor.role);
+  return owners.includes(actor.id) && !(task.deliveries || []).some(item => item.ownerId === actor.id);
+}
+
+export function personalSubmissionTime(task, ownerId) {
+  return taskOwners(task).length > 1
+    ? task.deliveries?.find(item => item.ownerId === ownerId)?.at
+    : task.submittedAt;
+}
+
+export function taskSignSeats(task, actor) {
+  if (!task || !actor?.id) return [];
+  const signatures = task.reviewSignatures || [];
+  if (signatures.some(item => item.actorId === actor.id)) return [];
+  const open = taskReviewers(task).filter(id => !signatures.some(item => item.reviewerId === id));
+  if (isSuperAdminRole(actor.role)) return open.includes(actor.id) ? [actor.id] : open;
+  return !taskOwners(task).includes(actor.id) && open.includes(actor.id) ? [actor.id] : [];
+}
+export const canReviewTask = (task, actor) => taskSignSeats(task, actor).length > 0;
 
 /** Each approval represents one actual signer in one required position. */
 export function milestoneSignSlots(project, milestone, actor, tasks = []) {
@@ -29,12 +56,11 @@ export function milestoneSignSlots(project, milestone, actor, tasks = []) {
   if (!children.length || children.some(task => task.status !== 'done')) return [];
   const signatures = milestone.signatures || [];
   if (signatures.some(signature => signature.actorId === actor.id)) return [];
-  const required = milestone.coReviewerId ? ['owner', 'coReviewer'] : ['owner'];
-  const open = required.filter(position => !signatures.some(signature => signature.as === position));
-  if (actor.id === project.ownerId) return open.filter(position => position === 'owner');
-  if (isSuperAdminRole(actor.role)) return open;
-  if (actor.role === 'admin' && actor.id === milestone.coReviewerId) return open.filter(position => position === 'coReviewer');
-  return [];
+  const open = stageSeats(project, milestone).filter(([slot]) => !signatures.some(signature => signature.as === slot));
+  if (actor.id === project.ownerId) return open.filter(([slot]) => slot === 'owner').map(([slot]) => slot);
+  if (isSuperAdminRole(actor.role)) return open.map(([slot]) => slot);
+  if (actor.role !== 'admin' || milestone.memberIds?.includes(actor.id)) return [];
+  return open.filter(([,id]) => id === actor.id).map(([slot]) => slot);
 }
 
 export function canSignMilestone(project, milestone, actor, tasks = []) {

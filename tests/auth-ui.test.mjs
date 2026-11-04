@@ -84,7 +84,7 @@ function taskBox(owners=[],signers=[]) {
 test('new tasks offer two empty checklists containing eligible active people',()=>{
   const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session(),project=data.state.projects.find(item=>item.id==='p-mower');
-  data.taskReviewerIds=['u-admin','u-manager','u-qa'];ui.acceptSession(data);ui.newTask(project.id);
+  data.taskReviewerIds=['u-admin','u-manager','u-qa'];ui.acceptSession(data);ui.newTask(project.id,'m-mower-2');
   assert.match(modal.innerHTML,/负责人（可多选）/);assert.match(modal.innerHTML,/验收人（可多选）/);
   assert.doesNotMatch(modal.innerHTML,/主负责人|协作成员|name="(?:ownerId|reviewerId)"| checked/);
   assert.match(modal.innerHTML,/data-roster="owners" value="u-qa"/);
@@ -104,18 +104,18 @@ test('checking multiple workers and reviewers disables only conflicting roles, w
   assert.doesNotMatch(box.innerHTML,/data-roster="signers" value="u-admin" disabled/);
 });
 
-test('switching task projects clears both lists and limits choices to the new project',()=>{
-  const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
-  const data=session(),project=data.state.projects.find(item=>item.id==='p-delivery');
-  project.memberIds=project.memberIds.filter(id=>id!==project.ownerId);ui.acceptSession(data);
-  const box=taskBox(['u-engineer'],['u-manager']);
-  const f={dataset:{form:'createTask'},querySelector:()=>box,elements:{projectId:{value:project.id},milestoneId:{innerHTML:''},dueDate:{value:''}}};
-  listeners.get('document:change')({target:{name:'projectId',value:project.id,dataset:{},hasAttribute:()=>false,closest:()=>f}});
-  assert.doesNotMatch(box.innerHTML,/ checked/);
-  for(const id of [...project.memberIds,project.ownerId])assert.match(box.innerHTML,new RegExp('data-roster="owners" value="'+id+'"'));
-  assert.match(box.innerHTML,/data-roster="signers" value="u-admin"/);
-  const outsider=data.state.users.find(u=>u.role==='member'&&u.id!==project.ownerId&&!project.memberIds.includes(u.id));
-  assert.doesNotMatch(box.innerHTML,new RegExp('value="'+outsider.id+'"'));
+test('the task form binds the exact open stage and never substitutes a different one',()=>{
+  const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});
+  const data=session(); ui.acceptSession(data);
+  const stage=data.state.milestones.find(m=>m.id==='m-mower-3');
+  for(const [projectId,stageId] of [[stage.projectId,undefined],['p-pcb',stage.id],['missing',stage.id],[stage.projectId,'m-mower-1']]){
+    ui.newTask(projectId,stageId);assert.equal(modal.open,false);
+  }
+  ui.newTask(stage.projectId,stage.id);
+  assert.match(modal.innerHTML,/<input type="hidden" name="projectId" value="p-mower">/);
+  assert.match(modal.innerHTML,/<input type="hidden" name="milestoneId" value="m-mower-3">/);
+  assert.doesNotMatch(modal.innerHTML,/所属项目|所属里程碑|<select[^>]*name="(?:projectId|milestoneId)"/);
+  assert.match(modal.innerHTML,new RegExp('name="dueDate"[^>]+max="'+times.toDateTimeInput(stage.dueDate,'23:00')+'"'));
 });
 
 test('only the super administrator can accept their own task, even when an ordinary owner was historically the reviewer',()=>{
@@ -504,7 +504,7 @@ test('deletion sends the reviewed revision and a conflict reloads counts with a 
 test('a late deletion preview cannot replace another modal or reopen a dismissed confirmation',async()=>{
   const pending=deferred(),{ui,modal}=harness(async()=>pending.promise);ui.acceptSession(session());
   const preview=ui.deleteProject('p-mower');assert.match(modal.innerHTML,/正在核对/);
-  ui.newTask('p-mower');const taskForm=modal.innerHTML;
+  ui.newTask('p-mower','m-mower-2');const taskForm=modal.innerHTML;
   pending.resolve(Response.json({files:[]}));await preview;
   assert.equal(modal.innerHTML,taskForm);
   await assert.rejects(ui.saveEntityDeletion('deleteProject',{confirm:true},'p-mower'),/重新打开/);
@@ -1004,20 +1004,20 @@ test('ordinary project members can create tasks for teammates without gaining pr
   const data=session();data.actor=data.state.users.find(user=>user.id==='u-engineer');data.account={...data.account,role:'member'};
   const project=data.state.projects.find(item=>item.id==='p-mower');project.reviewerId=null;
   ui.acceptSession(data);
-  assert.match(ui.tasksPage(),/data-action="new-task"/);
+  assert.doesNotMatch(ui.tasksPage(),/data-action="new-task"/);
+  assert.match(ui.tasksPage(),/href="#overview">前往项目中心/);
   const page=ui.projectWorkspace(project);
   assert.match(page,/data-action="new-task"/);
   assert.doesNotMatch(page,/data-action="(?:new-project|set-project-reviewer|add-project-member)"/);
   ui.milestoneDetail('m-mower-2');
   assert.match(modal.innerHTML,/data-action="new-task"/);
   assert.doesNotMatch(modal.innerHTML,/data-action="(?:complete-milestone|edit-milestone-content)"/);
-  ui.newTask(project.id);
+  ui.newTask(project.id,'m-mower-2');
   assert.match(modal.innerHTML,/data-form="createTask"/);
   assert.match(modal.innerHTML,/data-roster="owners" value="u-qa"/);
   assert.match(modal.innerHTML,/data-roster="owners" value="u-engineer"/);
-  const projects=modal.innerHTML.match(/<select[^>]+name="projectId"[^>]*>([\s\S]*?)<\/select>/)[1];
-  assert.match(projects,/<option value="p-mower"/);assert.match(projects,/<option value="p-pcb"/);
-  assert.doesNotMatch(projects,/<option value="p-site"/);
+  assert.match(modal.innerHTML,/<input type="hidden" name="milestoneId" value="m-mower-2">/);
+  assert.doesNotMatch(modal.innerHTML,/value="p-site"/);
   modal.close();const previous=modal.innerHTML;
   ui.newProject();assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
   assert.match(toast.textContent,/仅管理员可以创建项目/);

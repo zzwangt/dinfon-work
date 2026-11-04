@@ -82,6 +82,21 @@ test('employee without assigned projects receives empty business collections and
   for (const collection of ['projects', 'milestones', 'tasks', 'extensions', 'milestoneRequests', 'logs']) assert.deepEqual(result[collection], []);
 });
 
+test('employees see reviewers and signers of their own milestones without exposing unrelated administrators', () => {
+  const state = createSeedState();
+  const extraUsers = ['chosen-admin', 'actual-signer', 'legacy-reviewer', 'unrelated-admin'];
+  for (const id of extraUsers) state.users.push({ id, name: id, role: 'admin', email: 'hidden@example.test' });
+  const node = state.milestones.find(item => item.projectId === 'p-mower');
+  node.coReviewerId = 'chosen-admin';
+  node.signatures = [{ actorId: 'actual-signer', as: 'owner', at: '2026-11-04T04:00:00Z' }];
+  state.projects.find(item => item.id === 'p-mower').reviewerId = 'legacy-reviewer';
+  state.milestones.find(item => item.projectId === 'p-pcb').coReviewerId = 'unrelated-admin';
+  const view = sanitizeStateForActor(state, 'u-design');
+  assert.deepEqual(view.users.filter(person => extraUsers.includes(person.id)).map(person => person.id).sort(), ['actual-signer', 'chosen-admin']);
+  assert.ok(!view.users.some(person => 'email' in person));
+  assert.ok(!view.projects.some(project => project.id === 'p-pcb'));
+});
+
 test('node applications are project scoped and include only safe applicant and reviewer profiles', () => {
   const state = createSeedState();
   state.users.push(

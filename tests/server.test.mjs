@@ -535,10 +535,11 @@ test('legacy weighted node approval keeps audit fields without reactivating weig
 
 test('hour-level plans pass through server approval with exact times, scoped permissions and original dates', async (t) => {
   const f = fixture(t);
+  await provision(f, MANAGER, 'u-manager');
   const staff = await provision(f, ENGINEER, 'u-engineer');
   const created = await f.call('/api/command', ADMIN, {
     revision: staff.data.revision, action: 'createProject',
-    payload: { name: '小时排期项目', ownerId: 'u-manager', reviewerId: 'u-admin', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
+    payload: { name: '小时排期项目', ownerId: 'u-manager', memberIds: ['u-engineer'], startDate: '2099-10-25T09:00', dueDate: '2099-10-25T18:00' },
   });
   assert.equal(created.status, 200, JSON.stringify(created.data));
   const project = created.data.state.projects.at(-1);
@@ -602,7 +603,7 @@ test('submission timestamps always come from the server clock despite client-pro
   assert.ok(Date.parse(task.submittedAt) <= Date.now());
 });
 
-test('API supports an assigned owner-reviewer through delivery and acceptance while preserving scope and state checks', async (t) => {
+test('API enforces a distinct designated reviewer through delivery and acceptance while preserving scope and state checks', async (t) => {
   const f = fixture(t);
   await provision(f, ENGINEER, 'u-engineer');
   await provision(f, MANAGER, 'u-manager', 'member');
@@ -610,12 +611,12 @@ test('API supports an assigned owner-reviewer through delivery and acceptance wh
   const node = f.stored().state.milestones.find((item) => item.id === 'm-mower-2');
   const created = await command(ADMIN, 'createTask', {
     projectId: node.projectId, milestoneId: node.id, title: '本人交付并验收', ownerId: 'u-engineer',
-    reviewerId: 'u-engineer', dueDate: node.dueDate, acceptance: '提交可复核的测试报告',
+    reviewerId: 'u-manager', dueDate: node.dueDate, acceptance: '提交可复核的测试报告',
   });
   assert.equal(created.status, 200, JSON.stringify(created.data));
   const taskId = created.data.state.tasks.at(-1).id;
   const task = () => f.stored().state.tasks.find((item) => item.id === taskId);
-  const premature = await command(ENGINEER, 'reviewTask', { id: taskId, approve: true });
+  const premature = await command(MANAGER, 'reviewTask', { id: taskId, approve: true });
   assert.equal(premature.status, 400);
   assert.match(premature.data.error, /仅待验收任务/);
   assert.equal(task().status, 'todo');
@@ -627,24 +628,24 @@ test('API supports an assigned owner-reviewer through delivery and acceptance wh
   assert.equal(task().status, 'review');
   assert.ok(!submitted.data.state.projects.some((project) => project.id === 'p-site'));
   const beforeDenied = f.stored();
-  const wrongReviewer = await command(MANAGER, 'reviewTask', { id: taskId, approve: true });
+  const wrongReviewer = await command(ENGINEER, 'reviewTask', { id: taskId, approve: true });
   assert.equal(wrongReviewer.status, 400);
-  assert.match(wrongReviewer.data.error, /指定验收人/);
+  assert.match(wrongReviewer.data.error, /验收自己|指定验收人/);
   const outsideScope = await command(ENGINEER, 'reviewTask', { id: 't-13', approve: true });
   assert.equal(outsideScope.status, 404);
-  const blankReturn = await command(ENGINEER, 'reviewTask', { id: taskId, approve: false });
+  const blankReturn = await command(MANAGER, 'reviewTask', { id: taskId, approve: false });
   assert.equal(blankReturn.status, 400);
   assert.match(blankReturn.data.error, /退回原因/);
   assert.deepEqual(f.stored(), beforeDenied);
-  const returned = await command(ENGINEER, 'reviewTask', { id: taskId, approve: false, comment: '补齐复测数据' });
+  const returned = await command(MANAGER, 'reviewTask', { id: taskId, approve: false, comment: '补齐复测数据' });
   assert.equal(returned.status, 200, JSON.stringify(returned.data));
   assert.equal(task().status, 'doing');
   const resubmitted = await command(ENGINEER, 'submitTask', { id: taskId, deliverable: '测试报告 V2，附复测数据' });
   assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted.data));
-  const approved = await command(ENGINEER, 'reviewTask', { id: taskId, approve: true });
+  const approved = await command(MANAGER, 'reviewTask', { id: taskId, approve: true });
   assert.equal(approved.status, 200, JSON.stringify(approved.data));
   assert.equal(task().status, 'done');
-  assert.equal(task().ownerId, task().reviewerId);
+  assert.notEqual(task().ownerId, task().reviewerId);
   assert.equal(task().reviewCount, 2);
   assert.equal(task().firstReviewPassed, false);
   assert.ok(task().submittedAt && task().reviewedAt);

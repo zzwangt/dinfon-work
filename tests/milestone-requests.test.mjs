@@ -1,6 +1,7 @@
+import { createApprovalWorkspace as createSeedState } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, createSeedState, projectProgress, today, transact } from '../public/client/domain.js';
+import { addDays, projectProgress, today, transact } from '../public/client/domain.js';
 
 const byId = (list, id) => list.find((item) => item.id === id);
 const createInput = (overrides = {}) => ({
@@ -83,12 +84,12 @@ test('create approval adds the proposed milestone with a preserved initial date 
   assert.equal(projectProgress(approved, 'p-mower'), 25);
 });
 
-test('an administrator cannot approve their own request, which a project owner may approve', () => {
+test('a super administrator may approve their own proposal, as may its project owner', () => {
   const state = createSeedState();
-  assert.equal(state.users.filter((user) => user.role === 'admin').length, 1);
+  assert.equal(state.users.filter((user) => user.role === 'superadmin').length, 1);
   const pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
   assert.deepEqual(pending.milestones, state.milestones);
-  assert.throws(() => review(pending), /不能审批自己/);
+  assert.equal(review(pending).milestoneRequests[0].status, 'approved');
   assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
 });
 
@@ -123,7 +124,7 @@ test('rejection keeps new and changed plans untouched and processed requests can
 
 test('node reviews require project approval assignment, an explicit decision and valid optional explanation', () => {
   const pending = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
-  assert.throws(() => review(pending, true, 'u-engineer'), /仅项目负责人或项目验收人/);
+  assert.throws(() => review(pending, true, 'u-engineer'), /仅项目负责人或总管理员/);
   assert.throws(() => review(pending, true, 'u-ops'), /无权访问/);
   assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, comment: '说明' }, 'u-admin'), /请选择批准或驳回/);
@@ -134,7 +135,7 @@ test('node reviews require project approval assignment, an explicit decision and
 
 test('the old direct node creation action is closed to every role', () => {
   for (const actorId of ['u-admin', 'u-manager', 'u-engineer', 'u-ops']) {
-    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*项目验收人审批/);
+    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*总管理员审批/);
   }
 });
 
@@ -284,7 +285,7 @@ test('an owner without a member entry retains approval eligibility while a demot
   assert.equal(review(pending).milestoneRequests[0].status, 'approved');
   pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
   byId(pending.users, 'u-admin').role = 'member';
-  byId(pending.users, 'u-ops').role = 'admin';
+  byId(pending.users, 'u-ops').role = 'superadmin';
   byId(pending.projects, 'p-mower').reviewerId = 'u-ops';
   assert.throws(() => review(pending, true, 'u-ops'), /申请人已无项目访问权限/);
 });

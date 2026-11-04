@@ -76,7 +76,7 @@ test('task lifecycle notifies only relevant accounts, deduplicates roles and exc
   assert.equal(reviewer.length, 1, 'same reviewer and project owner receive one event');
   assert.deepEqual({ category: reviewer[0].category, projectId: reviewer[0].projectId, entityId: reviewer[0].entityId, target: reviewer[0].target },
     { category: 'tasks', projectId: 'p-pcb', entityId: 't-07', target: '#tasks' });
-  assert.equal((await f.session()).notifications.filter((entry) => entry.action === 'submitTask').length, 1);
+  assert.equal((await f.session()).notifications.filter((entry) => entry.action === 'submitTask').length, 0);
   assert.deepEqual((await f.session(OTHER)).notifications, []);
   assert.equal(JSON.stringify(reviewer).includes('私密交付正文'), false);
   assert.equal('accountId' in reviewer[0], false);
@@ -88,6 +88,7 @@ test('task lifecycle notifies only relevant accounts, deduplicates roles and exc
   assert.equal(JSON.stringify(owner).includes('私密退回意见'), false);
   await f.clear(ENGINEER);
   await f.command(ENGINEER, 'submitTask', { id: 't-07', deliverable: '再次交付' });
+  assert.equal((await f.session(MANAGER)).notifications.filter(entry=>entry.action==='submitTask'&&entry.entityId==='t-07').length,1);
   await f.command(MANAGER, 'reviewTask', { id: 't-07', approve: true });
   owner = (await f.session(ENGINEER)).notifications;
   assert.equal(owner.length, 1);
@@ -177,7 +178,7 @@ test('read receipts are per-account, idempotent, survive reopening and do not ch
   const dir = mkdtempSync(join(tmpdir(), 'dinfon-notifications-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const f = await fixture(t, join(dir, 'test.sqlite'));
-  await f.command(ENGINEER, 'submitTask', { id: 't-07', deliverable: '成果' });
+  await f.command(ENGINEER, 'updateTask', { id: 't-07', status: 'todo' });
   const admin = await f.session();
   const manager = await f.session(MANAGER);
   const ownId = admin.notifications[0].id;
@@ -197,15 +198,15 @@ test('read receipts are per-account, idempotent, survive reopening and do not ch
 test('read acknowledgement races safely with new events and rejected/CAS-losing commands emit nothing', async (t) => {
   const f = await fixture(t);
   await f.command(ENGINEER, 'updateTask', { id: 't-07', status: 'todo' });
-  const current = await f.session();
+  const current = await f.session(MANAGER);
   const ids = current.notifications.map((entry) => entry.id);
   const [read, write] = await Promise.all([
-    f.call('/api/notifications/read', ADMIN, { ids, revision: current.revision }),
+    f.call('/api/notifications/read', MANAGER, { ids, revision: current.revision }),
     f.call('/api/command', ENGINEER, { revision: current.revision, action: 'submitTask', payload: { id: 't-07', deliverable: '成果' } }),
   ]);
   assert.equal(read.status, 200);
   assert.equal(write.status, 200);
-  const latest = await f.session();
+  const latest = await f.session(MANAGER);
   assert.equal(latest.revision, current.revision + 1);
   assert.equal(latest.notifications.length, 1);
   assert.equal(latest.notifications[0].action, 'submitTask');
@@ -260,10 +261,10 @@ test('cookie-authenticated login/session/command return notices, while temporary
   const acknowledged = await call('/api/notifications/read', { ids: changed.data.notifications.map((entry) => entry.id), revision: 1 }, changed.cookie);
   assert.deepEqual(acknowledged.data.notifications, []);
   const before = await call('/api/session', null, changed.cookie);
-  const submitted = await call('/api/command', { revision: before.data.revision, action: 'submitTask', payload: { id: 't-07', deliverable: 'cookie workflow' } }, changed.cookie);
+  const submitted = await call('/api/command', { revision: before.data.revision, action: 'updateTask', payload: { id: 't-07', status: 'todo' } }, changed.cookie);
   assert.equal(submitted.status, 200);
   assert.deepEqual(submitted.data.notifications, []);
   const final = await call('/api/session', null, owner.cookie);
   assert.equal(final.data.notifications.length, 1);
-  assert.equal(final.data.notifications[0].action, 'submitTask');
+  assert.equal(final.data.notifications[0].action, 'updateTask');
 });

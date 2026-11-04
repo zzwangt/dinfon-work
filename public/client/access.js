@@ -63,8 +63,11 @@ export function sanitizeStateForActor(state, actorId) {
   const userIds = new Set([actorId]);
   for (const project of projects) {
     userIds.add(project.ownerId);
-    userIds.add(project.reviewerId);
     for (const id of project.memberIds || []) userIds.add(id);
+  }
+  for (const node of milestones) {
+    userIds.add(node.coReviewerId);
+    for (const signature of node.signatures || []) userIds.add(signature.actorId);
   }
   for (const task of tasks) {
     userIds.add(task.ownerId);

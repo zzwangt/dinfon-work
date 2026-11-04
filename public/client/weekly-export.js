@@ -28,6 +28,15 @@ export function buildWeeklyReport(state, { actorId, range, now = Date.now() } = 
   const done = tasks.filter(item => item.status === 'done').length;
   const late = tasks.filter(item => item.status !== 'done' && isOverdue(item.dueDate, now)).length;
   const taskRows = items => items.map(item => [item.title, projects.get(item.projectId)?.name || '—', users.get(item.ownerId)?.name || '未分配', `${STATUS[item.status] || item.status}${item.status !== 'done' && isOverdue(item.dueDate, now) ? ' · 已逾期' : ''}`, formatDateTime(item.dueDate), formatDateTime(item.submittedAt), formatDateTime(item.reviewedAt), item.deliverable || '—']);
+  const stageSignatures = milestone => {
+    if(milestone.status==='done'&&!milestone.signatures?.length)return '已达成（历史记录）';
+    const primary=projects.get(milestone.projectId)?.ownerId;
+    const seats=[['owner','主验',primary],...(milestone.coReviewerId?[['coReviewer','加验',milestone.coReviewerId]]:[])];
+    return seats.map(([position,label,expected])=>{
+      const signature=milestone.signatures?.find(item=>item.as===position);
+      return signature?`${label} ${users.get(signature.actorId)?.name||'—'} 已签 ${formatDateTime(signature.at)}`:`${label} ${users.get(expected)?.name||'—'} 待签`;
+    }).join(' / ');
+  };
   const taskColumns = ['任务', '项目', '负责人', '状态', '截止时间', '提交时间', '验收 / 审核时间', '交付成果'];
   const taskWidths = [34, 26, 14, 20, 23, 23, 23, 42];
   return {
@@ -37,7 +46,7 @@ export function buildWeeklyReport(state, { actorId, range, now = Date.now() } = 
       { title: '本周概况', headers: ['指标', '数量'], widths: [28, 20], rows: [['本周到期任务', tasks.length], ['已验收完成', done], ['未完成任务', tasks.length - done], ['逾期任务', late], ['本周大节点', milestones.length], ['已达成大节点', milestones.filter(item => item.status === 'done').length]] },
       { title: '项目进度', headers: ['项目', '负责人', '任务总数', '已验收完成', '任务完成率', '项目截止时间'], widths: [38, 16, 16, 18, 18, 24], percentColumns: [4], rows: scoped.projects.map(item => { const progress = progressAgainstPlan(scoped.tasks.filter(task => task.projectId === item.id), now); return [item.name, users.get(item.ownerId)?.name || '未分配', progress.total, progress.completed, progress.total ? progress.actual / 100 : '—', formatDateTime(item.dueDate)]; }) },
       { title: '本周任务', headers: taskColumns, widths: taskWidths, rows: taskRows(tasks) },
-      { title: '本周大节点', headers: ['节点', '项目', '状态', '截止时间', '达成时间', '已验收任务', '任务总数'], widths: [36, 30, 20, 23, 23, 18, 16], rows: milestones.map(item => { const related = scoped.tasks.filter(task => task.milestoneId === item.id); return [item.title, projects.get(item.projectId)?.name || '—', item.status === 'done' ? '已达成' : isOverdue(item.dueDate, now) ? '未达成 · 已逾期' : '未达成', formatDateTime(item.dueDate), formatDateTime(item.acceptedAt), related.filter(task => task.status === 'done').length, related.length]; }) },
+      { title: '本周大节点', headers: ['节点', '项目', '状态', '截止时间', '达成时间', '已验收任务', '任务总数', '阶段签字'], widths: [36, 30, 20, 23, 23, 18, 16, 42], rows: milestones.map(item => { const related = scoped.tasks.filter(task => task.milestoneId === item.id); return [item.title, projects.get(item.projectId)?.name || '—', item.status === 'done' ? '已达成' : isOverdue(item.dueDate, now) ? '未达成 · 已逾期' : '未达成', formatDateTime(item.dueDate), formatDateTime(item.acceptedAt), related.filter(task => task.status === 'done').length, related.length, stageSignatures(item)]; }) },
       { title: '下周计划', headers: taskColumns, widths: taskWidths, rows: taskRows(next) },
     ],
   };

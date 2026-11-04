@@ -52,7 +52,7 @@ test('unapproved new or changed nodes cannot change the current project plan or 
   assert.deepEqual(projectScheduleProgress(created, 'p-mower', now), expected);
   const changed = transact(created, 'requestMilestone', { projectId: 'p-mower', kind: 'update', milestoneId: 'm-mower-2', title: '核心场景测试', dueDate: at(16), reason: '补充检查' }, 'u-engineer');
   assert.deepEqual(projectScheduleProgress(changed, 'p-mower', now), expected);
-  const approved = transact(changed, 'reviewMilestoneRequest', { id: changed.milestoneRequests[0].id, approve: true, comment: '同意调整' }, 'u-admin');
+  const approved = transact(changed, 'reviewMilestoneRequest', { id: changed.milestoneRequests[0].id, approve: true, comment: '同意调整' }, 'u-manager');
   assert.equal(projectScheduleProgress(approved, 'p-mower', now).lag, 0);
   assert.equal(byId(approved.milestones, 'm-mower-2').originalDueDate, at(14));
 });
@@ -84,12 +84,12 @@ test('same-day extensions update explicit hours only on approval and recompute p
   const state = hourlyState();
   const now = deadlineMs(at(15));
   const before = structuredClone(state);
-  const pending = transact(state, 'requestExtension', extensionInput(), 'u-manager');
+  const pending = transact(state, 'requestExtension', extensionInput(), 'u-engineer');
   assert.deepEqual(state, before);
   assert.deepEqual(pending.tasks, state.tasks);
   assert.deepEqual(pending.milestones, state.milestones);
   assert.equal(projectScheduleProgress(pending, 'p-mower', now).lag, 34);
-  const approved = transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '同意顺延两小时' }, 'u-admin');
+  const approved = transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '同意顺延两小时' }, 'u-manager');
   assert.equal(projectScheduleProgress(approved, 'p-mower', now).lag, 0);
   assert.equal(byId(approved.projects, 'p-mower').dueDate, at(20));
   assert.equal(byId(approved.projects, 'p-mower').originalDueDate, at(18));
@@ -101,12 +101,12 @@ test('same-day extensions update explicit hours only on approval and recompute p
 
 test('extensions compare real instants so offset-only edits and earlier hours are rejected', () => {
   const state = hourlyState();
-  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: `${DAY}T10:00:00Z` }, 'u-manager'), /晚于当前截止/);
-  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: at(17) }, 'u-manager'), /晚于当前截止/);
-  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), affectedMilestones: [{ id: 'm-mower-2', newDueDate: `${DAY}T06:00:00Z` }] }, 'u-manager'), /晚于当前日期/);
+  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: `${DAY}T10:00:00Z` }, 'u-engineer'), /晚于当前截止/);
+  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: at(17) }, 'u-engineer'), /晚于当前截止/);
+  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), affectedMilestones: [{ id: 'm-mower-2', newDueDate: `${DAY}T06:00:00Z` }] }, 'u-engineer'), /晚于当前日期/);
   const legacy = hourlyState();
   byId(legacy.projects, 'p-mower').dueDate = DAY;
-  assert.throws(() => transact(legacy, 'requestExtension', { ...extensionInput(), newDueDate: at(23) }, 'u-manager'), /晚于当前截止/);
+  assert.throws(() => transact(legacy, 'requestExtension', { ...extensionInput(), newDueDate: at(23) }, 'u-engineer'), /晚于当前截止/);
 });
 
 test('old date baselines stay unchanged when an approved extension introduces exact hours', () => {
@@ -114,8 +114,8 @@ test('old date baselines stay unchanged when an approved extension introduces ex
   byId(state.projects, 'p-mower').dueDate = DAY;
   byId(state.projects, 'p-mower').originalDueDate = DAY;
   const nextDay = '2099-10-26T10:00';
-  const pending = transact(state, 'requestExtension', { ...extensionInput(), newDueDate: nextDay, affectedMilestones: [], affectedTasks: [] }, 'u-manager');
-  const approved = transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '同意' }, 'u-admin');
+  const pending = transact(state, 'requestExtension', { ...extensionInput(), newDueDate: nextDay, affectedMilestones: [], affectedTasks: [] }, 'u-engineer');
+  const approved = transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '同意' }, 'u-manager');
   assert.equal(byId(approved.projects, 'p-mower').originalDueDate, DAY);
   assert.equal(byId(approved.projects, 'p-mower').dueDate, nextDay);
   assert.equal(approved.extensions[0].originalDueDate, DAY);
@@ -127,10 +127,10 @@ test('node snapshots recognize equivalent timestamp formatting while preserving 
   assert.throws(() => transact(state, 'requestMilestone', input, 'u-engineer'), /没有实际变化/);
   const pending = transact(state, 'requestMilestone', { ...input, dueDate: at(16) }, 'u-engineer');
   byId(pending.milestones, input.milestoneId).dueDate = `${DAY}T06:00:00Z`;
-  assert.equal(transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve: true, comment: '同意' }, 'u-admin').milestoneRequests[0].status, 'approved');
+  assert.equal(transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve: true, comment: '同意' }, 'u-manager').milestoneRequests[0].status, 'approved');
   byId(pending.milestones, input.milestoneId).dueDate = at(15);
   const before = structuredClone(pending);
-  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve: true, comment: '同意' }, 'u-admin'), /计划已变化/);
+  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, approve: true, comment: '同意' }, 'u-manager'), /计划已变化/);
   assert.deepEqual(pending, before);
 });
 
@@ -163,11 +163,11 @@ test('legacy dates become due at the final millisecond of their Shanghai day', (
 test('same-day extension times are checked against the current hour again during approval', (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: deadlineMs(at(19)) });
   const state = hourlyState();
-  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: `${DAY}T18:30` }, 'u-manager'), /不能早于当前时间/);
-  const pending = transact(state, 'requestExtension', extensionInput(), 'u-manager');
+  assert.throws(() => transact(state, 'requestExtension', { ...extensionInput(), newDueDate: `${DAY}T18:30` }, 'u-engineer'), /不能早于当前时间/);
+  const pending = transact(state, 'requestExtension', extensionInput(), 'u-engineer');
   t.mock.timers.setTime(deadlineMs(at(21)));
   const before = structuredClone(pending);
-  assert.throws(() => transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '批准' }, 'u-admin'), /已经过去/);
+  assert.throws(() => transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: true, comment: '批准' }, 'u-manager'), /已经过去/);
   assert.deepEqual(pending, before);
-  assert.equal(transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: false, comment: '时间已过，请重提' }, 'u-admin').extensions[0].status, 'rejected');
+  assert.equal(transact(pending, 'reviewExtension', { id: pending.extensions[0].id, approve: false, comment: '时间已过，请重提' }, 'u-manager').extensions[0].status, 'rejected');
 });

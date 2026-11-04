@@ -1,6 +1,7 @@
+import { createApprovalWorkspace as createSeedState } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSeedState, normalizeState, transact, progressAgainstPlan } from '../public/client/domain.js';
+import { normalizeState, transact, progressAgainstPlan } from '../public/client/domain.js';
 import { openDatabase } from '../server/sqlite.mjs';
 import { initializeAuthSchema, hashPassword, issueSession } from '../server/auth.mjs';
 import { handleHttpApi, initializeLocalWorkspace } from '../server/service.mjs';
@@ -10,11 +11,11 @@ const onlyContent = ({ title, description, acceptance, ...unchanged }) => unchan
 const taskInput = (state, id = 't-02') => ({ id, title: `${item(state, 'tasks', id).title} · 补充说明`, description: '明确执行步骤与检查方式', acceptance: '提供完整结果及异常处理记录' });
 const milestoneInput = (state, id = 'm-mower-2') => ({ id, title: `${item(state, 'milestones', id).title} · 复核`, description: '覆盖本阶段的验证内容与交付范围' });
 
-test('project members edit other members task text while identity, schedule and progress stay unchanged', () => {
+test('project owners edit task text while identity, schedule and progress stay unchanged', () => {
   const state = createSeedState(), before = structuredClone(state), input = taskInput(state);
   const old = item(state, 'tasks', input.id);
   assert.notEqual(old.ownerId, 'u-engineer');
-  const next = transact(state, 'editTaskContent', input, 'u-engineer');
+  const next = transact(state, 'editTaskContent', input, 'u-manager');
   const edited = item(next, 'tasks', input.id);
   assert.equal(edited.title, input.title);
   assert.equal(edited.description, input.description);
@@ -24,7 +25,7 @@ test('project members edit other members task text while identity, schedule and 
   assert.deepEqual(next.milestones, state.milestones);
   assert.deepEqual(progressAgainstPlan(next.tasks), progressAgainstPlan(state.tasks));
   assert.deepEqual(state, before);
-  assert.equal(next.logs[0].actorId, 'u-engineer');
+  assert.equal(next.logs[0].actorId, 'u-manager');
   assert.deepEqual(next.logs[0].changes.title, { before: old.title, after: edited.title });
   assert.deepEqual(next.logs[0].changes.acceptance, { before: old.acceptance, after: edited.acceptance });
   assert.throws(() => transact(state, 'editTaskContent', input, 'u-ops'), /无权访问该项目/);
@@ -44,18 +45,18 @@ test('submitted and completed tasks keep their original acceptance criteria and 
   for (const id of ['t-04', 't-01']) {
     const state = createSeedState(), old = item(state, 'tasks', id);
     const input = { id, title: `${old.title}（文字校对）`, description: '修正说明中的文字' };
-    const next = transact(state, 'editTaskContent', input, 'u-engineer');
+    const next = transact(state, 'editTaskContent', input, 'u-manager');
     assert.deepEqual(onlyContent(item(next, 'tasks', id)), onlyContent(old));
     assert.equal(item(next, 'tasks', id).acceptance, old.acceptance);
-    assert.doesNotThrow(() => transact(state, 'editTaskContent', { ...input, acceptance: old.acceptance }, 'u-engineer'));
-    assert.throws(() => transact(state, 'editTaskContent', { ...input, acceptance: '改成更低的标准' }, 'u-engineer'), /验收标准不能修改/);
+    assert.doesNotThrow(() => transact(state, 'editTaskContent', { ...input, acceptance: old.acceptance }, 'u-manager'));
+    assert.throws(() => transact(state, 'editTaskContent', { ...input, acceptance: '改成更低的标准' }, 'u-manager'), /验收标准不能修改/);
   }
 });
 
-test('only administrators directly edit major-node text, including completed nodes without reopening them', () => {
+test('project owners and super administrators directly edit major-node text, including completed nodes without reopening them', () => {
   for (const id of ['m-mower-2', 'm-mower-1']) {
     const state = createSeedState(), input = milestoneInput(state, id), old = item(state, 'milestones', id);
-    for (const actor of ['u-manager', 'u-engineer']) assert.throws(() => transact(state, 'editMilestoneContent', input, actor), /仅管理员/);
+    for (const actor of ['u-qa', 'u-engineer']) assert.throws(() => transact(state, 'editMilestoneContent', input, actor), /仅项目负责人或总管理员/);
     const next = transact(state, 'editMilestoneContent', input, 'u-admin');
     assert.equal(item(next, 'milestones', id).description, input.description);
     assert.deepEqual(onlyContent(item(next, 'milestones', id)), onlyContent(old));
@@ -78,7 +79,7 @@ test('content commands reject hidden schedule, assignment, project and status ch
   }
   assert.throws(() => transact(state, 'editTaskContent', { ...taskInput(state), acceptance: ' ' }, 'u-admin'), /验收标准/);
   const old = item(state, 'tasks', 't-02');
-  assert.throws(() => transact(state, 'editTaskContent', { id: old.id, title: old.title }, 'u-engineer'), /没有变化/);
+  assert.throws(() => transact(state, 'editTaskContent', { id: old.id, title: old.title }, 'u-manager'), /没有变化/);
 });
 
 test('major-node descriptions survive legacy normalization and later plan approvals; renamed plans invalidate stale proposals', () => {
@@ -130,15 +131,15 @@ async function fixture(t) {
 
 test('HTTP text commands respect current project scope, administrator-only major edits and CAS conflicts', async t => {
   const f = await fixture(t), original = f.stored(), input = taskInput(original.state);
-  const saved = await f.command('editTaskContent', input);
+  const saved = await f.command('editTaskContent', input, 'u-manager');
   assert.equal(saved.status, 200, JSON.stringify(saved.data));
   assert.equal(item(saved.data.state, 'tasks', input.id).title, input.title);
   assert.equal(saved.data.actor.role, 'member');
-  assert.ok(!saved.data.state.projects.some(project => project.id === 'p-site'));
+  assert.equal(saved.data.actor.id, 'u-manager');
   const beforeDenied = f.stored();
   assert.equal((await f.command('editTaskContent', { ...input, title: '过期覆盖' }, 'u-qa', original.revision)).status, 409);
   assert.equal((await f.command('editTaskContent', { id: 't-13', title: '其他项目内容' })).status, 404);
-  assert.equal((await f.command('editTaskContent', { ...input, projectId: 'p-site' })).status, 400);
+  assert.equal((await f.command('editTaskContent', { ...input, projectId: 'p-site' }, 'u-manager')).status, 400);
   assert.equal((await f.command('editMilestoneContent', milestoneInput(original.state))).status, 403);
   assert.equal((await f.command('editMilestoneContent', { id: 'm-site-3', title: '无权项目' })).status, 404);
   assert.deepEqual(f.stored(), beforeDenied);
@@ -150,17 +151,17 @@ test('HTTP text commands respect current project scope, administrator-only major
 
 test('text-only edits produce scoped notifications and audit records without changing delivery permissions', async t => {
   const f = await fixture(t), initial = f.stored();
-  const result = await f.command('editTaskContent', taskInput(initial.state));
+  const result = await f.command('editTaskContent', taskInput(initial.state), 'u-manager');
   assert.equal(result.status, 200);
   const notifications = f.stored().notifications.filter(notice => notice.action === 'editTaskContent');
   assert.equal(notifications.length, 3, 'other current project participants and admin get one notice each');
   assert.ok(notifications.every(notice => notice.entityId === 't-02' && notice.category === 'tasks'));
-  assert.ok(!notifications.some(notice => ['account-u-engineer', 'account-u-ops'].includes(notice.accountId)));
+  assert.ok(!notifications.some(notice => ['account-u-manager', 'account-u-ops'].includes(notice.accountId)));
   assert.match((await f.call('/api/session', 'u-qa')).data.notifications[0].title, /任务内容已更新/);
   const beforeDenied = f.stored();
   assert.equal((await f.command('updateTask', { id: 't-02', status: 'doing' })).status, 400);
   assert.equal((await f.command('submitTask', { id: 't-02', deliverable: '试图提交他人的成果' })).status, 400);
-  assert.equal((await f.command('editTaskContent', { id: 't-04', title: '校对名称', acceptance: '更改已提交标准' })).status, 400);
+  assert.equal((await f.command('editTaskContent', { id: 't-04', title: '校对名称', acceptance: '更改已提交标准' }, 'u-manager')).status, 400);
   assert.deepEqual(f.stored(), beforeDenied);
   const node = item(f.stored().state, 'milestones', 'm-mower-2');
   const edited = await f.command('editMilestoneContent', { id: node.id, title: node.title, description: '只更新节点正文' }, 'u-admin');
@@ -169,4 +170,23 @@ test('text-only edits produce scoped notifications and audit records without cha
   assert.equal(notices.length, 3);
   assert.ok(notices.every(notice => notice.category === 'projects' && notice.entityId === node.id));
   assert.deepEqual(f.stored().state.logs[0].changes.description, { before: '', after: '只更新节点正文' });
+});
+
+test('local stage-reviewer options expose only minimal profiles of enabled login-capable admins to project owners',async t=>{
+  const f=await fixture(t),snapshot=f.stored();delete snapshot.revision;
+  for(const id of ['eligible','unbound','disabled']){
+    snapshot.state.users.push({id,name:id,title:'阶段验收',role:'admin',department:'不对外分享'});
+    snapshot.accounts.push({id:'acc-'+id,userId:id,login:id,status:id==='disabled'?'disabled':'active'});
+    if(id!=='unbound')f.db.sqlite.prepare('INSERT INTO auth_credentials VALUES(?,?,?,0,1,?)').run('acc-'+id,id,PASSWORD_HASH,new Date().toISOString());
+  }
+  f.db.sqlite.prepare('UPDATE workspace SET payload=?,revision=revision+1').run(JSON.stringify(snapshot));
+  const owner=await f.call('/api/session','u-manager');assert.equal(owner.status,200);
+  assert.deepEqual(owner.data.milestoneReviewerOptions,[{id:'eligible',name:'eligible',title:'阶段验收'}]);
+  assert.ok(!owner.data.state.users.some(user=>user.id==='eligible'));
+  assert.deepEqual((await f.call('/api/session','u-engineer')).data.milestoneReviewerOptions,[]);
+  for(const reviewerId of ['unbound','disabled']){
+    assert.equal((await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId},'u-manager')).status,400);
+  }
+  const saved=await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId:'eligible'},'u-manager');
+  assert.equal(saved.status,200);assert.equal(saved.data.state.milestones.find(node=>node.id==='m-mower-2').coReviewerId,'eligible');
 });

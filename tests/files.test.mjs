@@ -50,6 +50,30 @@ async function fixture(t) {
   return { db, env, stored, edit, cookies, request, call, form, upload };
 }
 
+test('changing stage or child-task attachments clears only unfinished signatures on the affected stage', async t => {
+  const f = await fixture(t);
+  const signature = { as: 'owner', actorId: 'u-manager', at: new Date().toISOString() };
+  const task = f.stored().state.tasks.find(item => item.id === 't-03');
+  const stageId = task.milestoneId;
+  const sign = () => f.edit(workspace => {
+    const stage = workspace.state.milestones.find(item => item.id === stageId);
+    stage.status = 'pending';
+    stage.coReviewerId = 'u-admin';
+    stage.signatures = [signature];
+  });
+  const currentSignatures = () => f.stored().state.milestones.find(item => item.id === stageId).signatures;
+  sign();
+  assert.equal((await f.upload({entityType:'milestone', entityId:'m-mower-1'})).status, 201);
+  assert.deepEqual(currentSignatures(), [signature]);
+  const upload = await f.upload({entityType:'task', entityId:task.id});
+  assert.equal(upload.status, 201);
+  assert.deepEqual(currentSignatures(), []);
+  sign();
+  assert.equal((await f.call('/api/files/' + upload.data.file.id, {method:'DELETE',body:{}})).status, 200);
+  assert.deepEqual(currentSignatures(), []);
+  assert.deepEqual(f.stored().state.logs[0].changes.signatures.before, [signature]);
+});
+
 test('files persist exact bytes, trusted uploader metadata and duplicate names under distinct node attachments', async t => {
   const f = await fixture(t), before = f.stored();
   const bytes = Uint8Array.from([0, 255, 128, 2, 3]);

@@ -122,3 +122,11 @@ test('unsupported format is rejected and report/export do not mutate source stat
   assert.deepEqual(state, original);
   assert.throws(() => createWeeklyExport(data, 'pdf'), /Excel 或 Word/);
 });
+
+test('weekly stage rows list the actual signer and remaining co-review without counting partial acceptance as complete',()=>{
+  const state=fixture(),m=state.milestones[0];m.coReviewerId='other';
+  m.signatures=[{as:'owner',actorId:'admin',at:'2026-11-03T10:00:00Z'}];
+  const output=buildWeeklyReport(state,{actorId:'admin',range,now}),row=output.tables[3].rows.find(item=>item[0]===m.title);
+  assert.match(row.at(-1),/主验 管理员 已签/);assert.match(row.at(-1),/加验 其他员工 待签/);
+  assert.notEqual(row[2],'已达成');
+});

@@ -1,14 +1,14 @@
 import { isAdminRole, isSuperAdminRole, ROLE_LABELS } from '../public/client/roles.js';
 import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
-import { canApproveProject } from '../public/client/approval-access.js';
+import { canApproveProject, canManageProjectPlan } from '../public/client/approval-access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
 import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
 import { handleFileApi, initializeFileSchema } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['superadmin', 'admin', 'member']);
-const COMMANDS = new Set(['createProject', 'setProjectReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const COMMANDS = new Set(['createProject', 'setMilestoneCoReviewer', 'setTaskReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
 
 class ApiError extends Error {
@@ -170,10 +170,27 @@ async function context(db, env, identity, { bind = false } = {}) {
   }
 }
 
+async function activeLoginUsers(db, workspace, identity) {
+  // Only IDs are read. An old business profile by itself has no login capability.
+  const result = identity.localAccountId
+    ? await db.prepare("SELECT COALESCE(json_group_array(account_id), '[]') AS ids FROM auth_credentials").first()
+    : null;
+  const credentialIds = result && new Set(JSON.parse(result.ids));
+  return new Set(workspace.accounts.filter(account => account.status === 'active' &&
+    (credentialIds ? credentialIds.has(account.id) : Boolean(account.email))).map(account => account.userId));
+}
+
 async function session(db, workspace, identity) {
   const { account, actor } = lookupAccount(workspace, identity);
   const state = sanitizeStateForActor(workspace.state, actor.id);
+  const activeUsers = await activeLoginUsers(db, workspace, identity);
+  const managesPlan = isSuperAdminRole(actor.role) || state.projects.some(project => project.ownerId === actor.id);
+  const milestoneReviewerOptions = managesPlan ? workspace.state.users
+    .filter(user => user.role === 'admin' && activeUsers.has(user.id))
+    .map(({id, name, title}) => ({id, name, title})) : [];
   return {
+    milestoneReviewerOptions,
+    taskReviewerIds: state.users.filter(user => activeUsers.has(user.id)).map(user => user.id),
     actor: state.users.find((user) => user.id === actor.id),
     account: { id: account.id, email: account.email || '', login: account.login || '', role: actor.role, status: account.status },
     state,
@@ -216,18 +233,23 @@ function accessibleCommand(workspace, actor, action, payload) {
   if (action === 'createProject') return;
   const scope = sanitizeStateForActor(workspace.state, actor.id);
   let projectId = payload.projectId;
-  if (action === 'setProjectReviewer' || action === 'deleteProject') projectId = payload.id;
-  if (['updateTask', 'deleteTask', 'editTaskContent', 'submitTask', 'reviewTask'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
-  if (['completeMilestone', 'editMilestoneContent', 'deleteMilestone'].includes(action)) projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
+  if (action === 'deleteProject') projectId = payload.id;
+  if (['updateTask', 'deleteTask', 'editTaskContent', 'submitTask', 'reviewTask', 'setTaskReviewer'].includes(action)) projectId = workspace.state.tasks.find((task) => task.id === payload.id)?.projectId;
+  if (['completeMilestone', 'editMilestoneContent', 'deleteMilestone', 'setMilestoneCoReviewer'].includes(action)) projectId = workspace.state.milestones.find((milestone) => milestone.id === payload.id)?.projectId;
   const approval = action === 'reviewExtension' || action === 'reviewMilestoneRequest';
   if (approval) {
     const requests = action === 'reviewExtension' ? workspace.state.extensions : workspace.state.milestoneRequests || [];
     projectId = requests.find((request) => request.id === payload.id)?.projectId;
   }
-  if (!scope.projects.some((project) => project.id === projectId)) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
-  if (approval && !canApproveProject(scope.projects.find((project) => project.id === projectId), actor.id)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅项目负责人或项目验收人可以审批申请');
-  if (action === 'editMilestoneContent' || ['deleteTask', 'deleteMilestone'].includes(action)) adminOnly(actor);
+  const project = scope.projects.find(item => item.id === projectId);
+  if (!project) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
+  if (approval && !canApproveProject(project, actor)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅项目负责人或总管理员可以审批申请');
+  const planChange = ['editMilestoneContent', 'editTaskContent', 'setTaskReviewer', 'setMilestoneCoReviewer'].includes(action)
+    || (action === 'updateTask' && Object.hasOwn(payload, 'description'));
+  if (planChange && !canManageProjectPlan(project, actor)) fail(403, 'PROJECT_PLAN_REQUIRED', '仅项目负责人或总管理员可以修改节点计划');
+  if (['deleteTask', 'deleteMilestone'].includes(action)) adminOnly(actor);
   if (action === 'deleteProject' && !isSuperAdminRole(actor.role)) fail(403, 'SUPERADMIN_REQUIRED', '仅总管理员可以删除整个项目');
+  return scope;
 }
 
 function assignAccountProjects(workspace, user, projectIds, actor) {
@@ -282,6 +304,16 @@ function provisionAccount(workspace, data, actor, local = false) {
   return account;
 }
 
+function revokePendingStageSignatures(workspace, userId, actorId) {
+  for (const node of workspace.state.milestones) {
+    if (node.status === 'done' || node.coReviewerId !== userId || !node.signatures?.length) continue;
+    const before = node.signatures;
+    node.signatures = [];
+    log(workspace, actorId, `阶段加验管理员已失效，清除“${node.title}”的未完成签字`, node.projectId);
+    workspace.state.logs[0].changes = { signatures: { before, after: [] } };
+  }
+}
+
 function changeAccount(workspace, id, data, actor, currentAccount) {
   const account = workspace.accounts.find((entry) => entry.id === id);
   if (!account) fail(404, 'NOT_FOUND', '账号不存在');
@@ -303,6 +335,7 @@ function changeAccount(workspace, id, data, actor, currentAccount) {
   if (data.title !== undefined) user.title = string(data.title, '职位', 60, true);
   if (data.department !== undefined) user.department = string(data.department, '部门', 60, true);
   if (data.projectIds !== undefined) assignAccountProjects(workspace, user, data.projectIds, actor);
+  if (user.role === 'admin' && account.status === 'active' && (role !== 'admin' || status !== 'active')) revokePendingStageSignatures(workspace, user.id, actor.id);
   user.role = role;
   account.status = status;
   account.updatedAt = new Date().toISOString();
@@ -318,6 +351,7 @@ function deleteAccount(workspace, id, actor, currentAccount) {
   if (user?.role === 'superadmin') fail(400, 'SUPERADMIN_PROTECTED', '总管理员不能删除');
   // Authentication is removed separately; business identities remain stable so
   // project ownership, deliverables, approvals and audit trails stay intact.
+  if (user?.role === 'admin') revokePendingStageSignatures(workspace, user.id, actor.id);
   workspace.accounts = workspace.accounts.filter((entry) => entry.id !== id);
   log(workspace, actor.id, `删除账号：${user?.name || '成员'}；项目、任务与审批历史保留`);
 }
@@ -358,7 +392,22 @@ export async function handleApi(request, env, authenticatedIdentity) {
       requireValue(COMMANDS.has(data.action), '不支持的业务操作');
       requireValue(data.payload == null || (typeof data.payload === 'object' && !Array.isArray(data.payload)), '操作内容格式不正确');
       const payload = data.payload || {};
-      accessibleCommand(workspace, actor, data.action, payload);
+      const scope = accessibleCommand(workspace, actor, data.action, payload);
+      if (data.action === 'createTask' || data.action === 'setTaskReviewer' || (data.action === 'setMilestoneCoReviewer' && payload.reviewerId)) {
+        const reviewerId = payload.reviewerId || (data.action === 'createTask' && workspace.state.projects.find(project => project.id === payload.projectId)?.ownerId);
+        const activeUsers = await activeLoginUsers(env.DB, workspace, identity);
+        requireValue((data.action === 'setMilestoneCoReviewer' || scope.users.some(user => user.id === reviewerId)) && activeUsers.has(reviewerId), '请选择可见且已启用登录的验收人账号');
+        if (data.action === 'setMilestoneCoReviewer') {
+          requireValue(workspace.state.users.find(user => user.id === reviewerId)?.role === 'admin', '阶段加验人必须是启用的普通管理员');
+        }
+      }
+      if (data.action === 'completeMilestone') {
+        const node = workspace.state.milestones.find(item => item.id === payload.id);
+        if (node?.coReviewerId) {
+          const available = await activeLoginUsers(env.DB, workspace, identity);
+          requireValue(available.has(node.coReviewerId) && workspace.state.users.find(user => user.id === node.coReviewerId)?.role === 'admin', '指定的阶段加验管理员已失效，请项目负责人或总管理员重新设置');
+        }
+      }
       if (data.action === 'reviewMilestoneRequest' && payload.approve === true) {
         const application = workspace.state.milestoneRequests.find((entry) => entry.id === payload.id);
         if (application && !workspace.accounts.some((entry) => entry.userId === application.applicantId && entry.status === 'active')) {

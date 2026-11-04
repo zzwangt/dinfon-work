@@ -1,5 +1,6 @@
 import { isAdminRole } from '../public/client/roles.js';
 import { createHash } from 'node:crypto';
+import { workspacePayload } from './notifications.mjs';
 
 export const MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const MAX_FILE_REQUEST_BYTES = MAX_FILE_BYTES + 64 * 1024;
@@ -71,8 +72,7 @@ function filename(value) {
   return name;
 }
 function writeGuard(context) {
-  // File writes do not advance business revisions. The guard still ensures the
-  // project permission and active session checked before this write remain valid.
+  // Use the project permission and session verified for this workspace revision.
   return {
     sql: "EXISTS (SELECT 1 FROM workspace WHERE id = 'main' AND revision = ?) AND EXISTS (SELECT 1 FROM auth_sessions s JOIN auth_credentials c ON c.account_id = s.account_id AND c.version = s.credential_version WHERE s.token_hash = ? AND c.account_id = ? AND c.version = ? AND c.must_change = 0 AND s.expires_at > ?)",
     values: [context.workspace.revision, context.credential.token_hash, context.account.id, context.credential.version, Date.now()],
@@ -80,6 +80,33 @@ function writeGuard(context) {
 }
 function assertWritten(result) {
   if (result.meta?.changes !== 1) fail(409, 'FILE_CONFLICT', '账号或项目权限已更新，请刷新后重试；本次修改尚未保存');
+}
+
+async function saveAttachment(db, context, row, statement) {
+  const { workspace, actor } = context;
+  const milestoneId = row.entity_type === 'task'
+    ? workspace.state.tasks.find(task => task.id === row.entity_id && task.projectId === row.project_id)?.milestoneId
+    : row.entity_id;
+  const milestone = workspace.state.milestones.find(node => node.id === milestoneId && node.projectId === row.project_id);
+  if (!milestone?.signatures?.length || milestone.status === 'done') {
+    assertWritten(await statement.run());
+    return;
+  }
+  // Both reviewers must sign the same evidence. Only a file change during
+  // an unfinished signed review also needs to update the business snapshot.
+  const next = structuredClone(workspace);
+  const node = next.state.milestones.find(item => item.id === milestoneId);
+  next.state.logs.unshift({
+    id: 'log-' + crypto.randomUUID(), at: new Date().toISOString(), actorId: actor.id, projectId: row.project_id,
+    message: '“' + node.title + '”的验收附件已变更，原签字失效',
+    changes: { signatures: { before: node.signatures, after: [] } },
+  });
+  node.signatures = [];
+  const updateState = db.prepare("UPDATE workspace SET payload = ?, revision = revision + 1 WHERE id = 'main' AND revision = ? AND changes() = 1")
+    .bind(workspacePayload(next), workspace.revision);
+  const [fileWrite, stateWrite] = await db.batch([statement, updateState]);
+  assertWritten(fileWrite);
+  assertWritten(stateWrite);
 }
 
 /** Called only after cookie authentication and forced-password-change checks.
@@ -126,9 +153,9 @@ export async function handleFileApi(request, { db, authorize }) {
       entityFor(context, projectId, entityType, entityId);
       const row = { id: `f-${crypto.randomUUID()}`, project_id: projectId, entity_type: entityType, entity_id: entityId, name, size: content.length, mime_type: file.type.slice(0, 150) || 'application/octet-stream', uploaded_by: context.actor.id, uploaded_at: new Date().toISOString() };
       const guard = writeGuard(context);
-      const saved = await db.prepare(`INSERT INTO project_files (${columns}, sha256, content) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`)
-        .bind(row.id, projectId, entityType, entityId, name, row.size, row.mime_type, row.uploaded_by, row.uploaded_at, createHash('sha256').update(content).digest('hex'), content, ...guard.values).run();
-      assertWritten(saved);
+      const insert = db.prepare(`INSERT INTO project_files (${columns}, sha256, content) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard.sql}`)
+        .bind(row.id, projectId, entityType, entityId, name, row.size, row.mime_type, row.uploaded_by, row.uploaded_at, createHash('sha256').update(content).digest('hex'), content, ...guard.values);
+      await saveAttachment(db, context, row, insert);
       return json({ file: metadata(context, project, row) }, 201);
     }
     const match = path.match(/^\/api\/files\/([^/]+)(\/download)?$/);
@@ -148,8 +175,8 @@ export async function handleFileApi(request, { db, authorize }) {
       if (method === 'DELETE') {
         if (!canDelete(context, project, row)) fail(403, 'FORBIDDEN', '仅上传人、项目负责人或管理员可以删除文件');
         const guard = writeGuard(context);
-        const deleted = await db.prepare(`DELETE FROM project_files WHERE id = ? AND ${guard.sql}`).bind(row.id, ...guard.values).run();
-        assertWritten(deleted);
+        const remove = db.prepare(`DELETE FROM project_files WHERE id = ? AND ${guard.sql}`).bind(row.id, ...guard.values);
+        await saveAttachment(db, context, row, remove);
         return json({ ok: true });
       }
       const guard = writeGuard(context);

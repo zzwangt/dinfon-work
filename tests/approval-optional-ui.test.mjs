@@ -1,5 +1,5 @@
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from '../public/client/roles.js';
-import { canApproveProject, canApproveRequest } from '../public/client/approval-access.js';
+import { canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from '../public/client/approval-access.js';
 import { renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy } from '../public/client/maintenance.js';
 import { hasActiveFileOperations } from '../public/client/files.js';
 import test from 'node:test';
@@ -21,7 +21,7 @@ function harness(state = domain.createSeedState()) {
   const modal = { innerHTML: '', open: false, showModal() { this.open = true; }, addEventListener() {} };
   const toast = { hidden: true, classList: { toggle() {} } };
   const context = {
-    ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
+    ...domain, ...times, isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, ...notifications, renderMaintenancePanel, bindMaintenancePanel, resetMaintenance, maintenanceIsBusy, hasActiveFileOperations, requestComparison, resetProjectFiles,
     document: {
       querySelector: selector => ({ '#app': app, '#modal': modal, '#toast': toast }[selector]),
       querySelectorAll: () => [], addEventListener() {},
@@ -29,6 +29,7 @@ function harness(state = domain.createSeedState()) {
     window: { addEventListener() {} },
     initPWA() {}, setInterval() {}, setTimeout() {}, clearTimeout() {},
   };
+  state.users.find(u=>u.id==='u-admin').role='superadmin';
   const ui = runInNewContext(`(()=>{${source}\nreturn {acceptSession,newMilestone,reviewNodeRequest,newExtension,reviewExtension,reviewTask,approvalCard};})()`, context);
   ui.acceptSession({ state, actor: state.users.find(user => user.id === 'u-admin'), account: { id: 'a-admin', role: 'admin' }, revision: 1 });
   return { ui, modal, state };

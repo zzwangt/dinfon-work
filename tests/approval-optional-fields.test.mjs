@@ -1,6 +1,7 @@
+import { createApprovalWorkspace as createSeedState } from './acceptance-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, createSeedState, transact } from '../public/client/domain.js';
+import { addDays, transact } from '../public/client/domain.js';
 
 const byId = (list, id) => list.find(item => item.id === id);
 const emptyValues = [undefined, null, '', ' \n\t '];
@@ -95,14 +96,14 @@ test('blank approval fields do not bypass permissions, decisions, schedules or t
   assert.throws(() => transact(state, 'requestMilestone', { ...node, dueDate: addDays(node.dueDate, 1) }, 'u-engineer'), /超出项目周期/);
   const pending = transact(state, 'requestMilestone', node, 'u-engineer');
   const id = pending.milestoneRequests[0].id;
-  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id, approve: true }, 'u-engineer'), /仅项目负责人或项目验收人/);
+  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id, approve: true }, 'u-engineer'), /仅项目负责人或总管理员/);
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id }, 'u-admin'), /请选择批准或驳回/);
   const extension = extensionInput(state);
-  assert.throws(() => transact(state, 'requestExtension', extension, 'u-engineer'), /仅项目负责人/);
+  assert.doesNotThrow(() => transact(state, 'requestExtension', extension, 'u-engineer'));
   assert.throws(() => transact(state, 'requestExtension', { ...extension, plan: '' }, 'u-manager'), /后续安排/);
   assert.throws(() => transact(state, 'requestExtension', { ...extension, impact: '' }, 'u-manager'), /影响范围/);
   const own = transact(state, 'requestExtension', extension, 'u-admin');
-  assert.throws(() => transact(own, 'reviewExtension', { id: own.extensions[0].id, approve: true }, 'u-admin'), /不能审批自己/);
+  assert.equal(transact(own, 'reviewExtension', { id: own.extensions[0].id, approve: true }, 'u-admin').extensions[0].status, 'approved');
   const reviewingTask = state.tasks.find(task => task.status === 'review');
   assert.ok(reviewingTask);
   assert.throws(() => transact(state, 'reviewTask', { id: reviewingTask.id, approve: false, comment: '' }, 'u-admin'), /退回原因/);

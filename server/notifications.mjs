@@ -129,7 +129,7 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     const project = state.projects.find((entry) => entry.id === request.projectId);
     const label = milestone ? '节点申请' : '延期申请';
     const subject = milestone ? request.proposed.title : project.name;
-    emit(requesting ? [project.ownerId, ...state.users.filter(user => user.role === 'superadmin').map(user => user.id)] : [request.applicantId], {
+    emit(requesting ? [project.ownerId, ...state.users.filter(user => milestone ? isAdminRole(user.role) : user.role === 'superadmin').map(user => user.id)] : [request.applicantId], {
       category: 'approvals', projectId: project.id, entityId: request.id,
       title: `${label}${requesting ? '待审批' : request.status === 'approved' ? '已批准' : '已驳回'}：${subject}`,
       target: '#approvals',
@@ -182,7 +182,7 @@ function visibleNotifications(workspace, account, actor) {
       const node = workspace.state.milestones.find(item => item.id === entry.entityId);
       const project = workspace.state.projects.find(item => item.id === node?.projectId);
       if (!node || !project || ![...stageReviewers(node), project.ownerId].includes(actor.id)) return false;
-      if (stageReviewers(node).some(id => !workspace.accounts.some(account => account.userId === id && account.status === 'active' && workspace.state.users.find(user => user.id === id)?.role === 'admin'))) return false;
+      if (stageReviewers(node).some(id => !workspace.accounts.some(account => account.userId === id && account.status === 'active' && (project.memberIds.includes(id) || isAdminRole(workspace.state.users.find(user=>user.id===id)?.role))))) return false;
       return canSignMilestone(project, node, actor, workspace.state.tasks);
     }
     if (entry.action === 'requestMilestone' || entry.action === 'requestExtension') {

@@ -192,6 +192,7 @@ async function session(db, workspace, identity) {
     .filter(user => user.role === 'admin' && activeUsers.has(user.id))
     .map(({id, name, title}) => ({id, name, title})) : [];
   return {
+    companyMembers: workspace.state.users.filter(user => activeUsers.has(user.id)).map(({id,name}) => ({id,name})),
     milestoneReviewerOptions,
     taskReviewerIds: state.users.filter(user => activeUsers.has(user.id)).map(user => user.id),
     actor: state.users.find((user) => user.id === actor.id),
@@ -241,7 +242,7 @@ function accessibleCommand(workspace, actor, action, payload) {
   if (action === 'reviewProjectPlan') {
     const plan = scope.projectPlans.find(item => item.id === payload.id);
     if (!plan) fail(404, 'NOT_FOUND', '项目计划不存在或无权查看');
-    if (!canApproveProject(plan.project, actor)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅拟任项目负责人或总管理员可以审批');
+    if (!canApproveProject(plan.project, actor)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅拟任项目负责人或管理员可以审批');
     return scope;
   }
   let projectId = payload.projectId;
@@ -255,10 +256,10 @@ function accessibleCommand(workspace, actor, action, payload) {
   }
   const project = scope.projects.find(item => item.id === projectId);
   if (!project) fail(404, 'NOT_FOUND', '项目或任务不存在，或你没有访问权限');
-  if (approval && !canApproveProject(project, actor)) fail(403, 'PROJECT_APPROVER_REQUIRED', '仅项目负责人或总管理员可以审批申请');
+  if (approval && !canApproveProject(project, actor, action === 'reviewExtension' ? 'extension' : 'plan')) fail(403, 'PROJECT_APPROVER_REQUIRED', action === 'reviewExtension' ? '仅项目负责人或总管理员可以审批延期' : '仅项目负责人或管理员可以审批大节点');
   const planChange = ['editMilestoneContent', 'editTaskContent', 'setTaskReviewer', 'setMilestoneCoReviewer'].includes(action)
     || (action === 'updateTask' && Object.hasOwn(payload, 'description'));
-  if (planChange && !canManageProjectPlan(project, actor)) fail(403, 'PROJECT_PLAN_REQUIRED', '仅项目负责人或总管理员可以修改节点计划');
+  if (planChange && !canManageProjectPlan(project, actor)) fail(403, 'PROJECT_PLAN_REQUIRED', '仅项目负责人或管理员可以修改节点计划');
   if (['deleteTask', 'deleteMilestone'].includes(action)) adminOnly(actor);
   if (action === 'deleteProject' && !isSuperAdminRole(actor.role)) fail(403, 'SUPERADMIN_REQUIRED', '仅总管理员可以删除整个项目');
   return scope;
@@ -328,7 +329,7 @@ function revokePendingSignatures(workspace, userId, actorId) {
     if (node.status === 'done' || !stageReviewers(node).includes(userId) || !node.signatures?.length) continue;
     const before = node.signatures;
     node.signatures = [];
-    log(workspace, actorId, `阶段加验管理员已失效，清除“${node.title}”的未完成签字`, node.projectId);
+    log(workspace, actorId, `阶段验收人权限已变更，清除“${node.title}”的未完成签字`, node.projectId);
     workspace.state.logs[0].changes = { signatures: { before, after: [] } };
   }
 }
@@ -413,23 +414,6 @@ export async function handleApi(request, env, authenticatedIdentity) {
       const payload = data.payload || {};
       const scope = accessibleCommand(workspace, actor, data.action, payload);
       const taskPersonnel = data.action === 'createTask' || data.action === 'setTaskReviewer';
-      const checkboxRoster = taskPersonnel && ('ownerIds' in payload || 'reviewerIds' in payload);
-      if ((taskPersonnel && !checkboxRoster) || (data.action === 'setMilestoneCoReviewer' && payload.reviewerId)) {
-        const reviewerId = payload.reviewerId || (data.action === 'createTask' && workspace.state.projects.find(project => project.id === payload.projectId)?.ownerId);
-        const activeUsers = await activeLoginUsers(env.DB, workspace, identity);
-        requireValue((data.action === 'setMilestoneCoReviewer' || scope.users.some(user => user.id === reviewerId)) && activeUsers.has(reviewerId), '请选择可见且已启用登录的验收人账号');
-        if (data.action === 'setMilestoneCoReviewer') {
-          requireValue(workspace.state.users.find(user => user.id === reviewerId)?.role === 'admin', '阶段加验人必须是启用的普通管理员');
-        }
-      }
-      if (['setTaskReviewer','setMilestoneCoReviewer','createTask'].includes(data.action)) {
-        const active = await activeLoginUsers(env.DB, workspace, identity);
-        for (const key of (checkboxRoster ? ['ownerIds','reviewerIds'] : ['memberIds','extraReviewerIds'])) {
-          if (!Object.hasOwn(payload,key)) continue;
-          requireValue(Array.isArray(payload[key]) && payload[key].every(id => active.has(id) &&
-            (data.action === 'setMilestoneCoReviewer' && key === 'extraReviewerIds' || scope.users.some(user => user.id === id))), '请选择可见且已启用登录的人员');
-        }
-      }
       if (data.action === 'reviewTask' && payload.approve === true) {
         const task = workspace.state.tasks.find(item => item.id === payload.id);
         if (task && taskReviewers(task).length > 1) {
@@ -442,7 +426,10 @@ export async function handleApi(request, env, authenticatedIdentity) {
         const node = workspace.state.milestones.find(item => item.id === payload.id);
         if (node?.coReviewerId) {
           const available = await activeLoginUsers(env.DB, workspace, identity);
-          requireValue(stageReviewers(node).every(id => available.has(id) && workspace.state.users.find(user => user.id === id)?.role === 'admin'), '指定的阶段加验管理员已失效，请项目负责人或总管理员重新设置');
+          const project = scope.projects.find(item=>item.id===node.projectId);
+          requireValue(stageReviewers(node).every(id=>available.has(id) &&
+            (project.memberIds.includes(id) || isAdminRole(workspace.state.users.find(user=>user.id===id)?.role))),
+            '有阶段验收人无法参与，请重新设置人员');
         }
       }
       if (data.action === 'reviewMilestoneRequest' && payload.approve === true) {
@@ -454,12 +441,13 @@ export async function handleApi(request, env, authenticatedIdentity) {
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
-      if (data.action === 'createTask' || data.action === 'setTaskReviewer') {
-        const item = data.action === 'createTask' ? state.tasks.at(-1) : state.tasks.find(task=>task.id===payload.id);
-        if (taskOwners(item).length>1) {
-          const active = await activeLoginUsers(env.DB,workspace,identity);
-          requireValue(taskOwners(item).every(id=>active.has(id)), '多人任务的每位执行成员都需要已启用的登录账号');
-        }
+      if (taskPersonnel || data.action === 'setMilestoneCoReviewer') {
+        const active = await activeLoginUsers(env.DB,workspace,identity);
+        const item = taskPersonnel
+          ? (data.action === 'createTask' ? state.tasks.at(-1) : state.tasks.find(task=>task.id===payload.id))
+          : state.milestones.find(stage=>stage.id===payload.id);
+        const assigned = taskPersonnel ? [...taskOwners(item), ...taskReviewers(item)] : [...item.memberIds, ...stageReviewers(item)];
+        requireValue(assigned.every(id=>active.has(id)), '请选择已启用登录的公司成员');
       }
       if (data.action === 'createProject' || (data.action === 'reviewProjectPlan' && payload.approve)) {
         const plan = data.action === 'createProject' ? state.projectPlans[0] : state.projectPlans.find(item => item.id === payload.id);
@@ -473,7 +461,6 @@ export async function handleApi(request, env, authenticatedIdentity) {
         if (roster.length) {
           const active = await activeLoginUsers(env.DB,workspace,identity);
           requireValue(roster.every(id=>active.has(id)), '阶段人员未启用登录，请更新人员名单');
-          if (data.action === 'requestMilestone') requireValue(stageReviewers(request.proposed).every(id=>scope.users.some(u=>u.id===id) || canManageProjectPlan(scope.projects.find(p=>p.id===request.projectId),actor)), '请选择可见的加验管理员');
         }
       }
       const next = appendNotifications(workspace, { ...workspace, state }, actor.id, data.action, payload);

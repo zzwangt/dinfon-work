@@ -1,20 +1,25 @@
-import { isSuperAdminRole } from './roles.js';
+import { isAdminRole, isSuperAdminRole } from './roles.js';
 
 const idOf = actor => typeof actor === 'string' ? actor : actor?.id;
 
-export function canApproveProject(project, actor) {
-  return Boolean(project && idOf(actor) && (project.ownerId === idOf(actor) || isSuperAdminRole(actor?.role)));
+export function canApproveProject(project, actor, kind = 'plan') {
+  if (!project || !idOf(actor)) return false;
+  if (project.ownerId === idOf(actor)) return true;
+  return kind === 'extension' ? isSuperAdminRole(actor?.role) : isAdminRole(actor?.role);
 }
 
 export const canManageProjectPlan = canApproveProject;
 
 export function canApproveRequest(project, request, actor) {
-  return Boolean(request && request.projectId === project?.id && request.status === 'pending'
-    && canApproveProject(project, actor) && (request.applicantId !== idOf(actor) || isSuperAdminRole(actor?.role)));
+  if (!request || request.projectId !== project?.id || request.status !== 'pending') return false;
+  const kind = Object.hasOwn(request, 'newDueDate') ? 'extension' : 'plan';
+  if (!canApproveProject(project, actor, kind)) return false;
+  if (request.applicantId !== idOf(actor)) return true;
+  return kind === 'extension' ? isSuperAdminRole(actor?.role) : isAdminRole(actor?.role);
 }
 
 export function canViewProjectPlan(plan, actor) {
-  return Boolean(actor?.id && (isSuperAdminRole(actor.role) || plan.applicantId === actor.id || plan.project.ownerId === actor.id));
+  return Boolean(actor?.id && (isAdminRole(actor.role) || plan.applicantId === actor.id || plan.project.ownerId === actor.id));
 }
 
 // Single-person records use the same roster without a storage migration.
@@ -45,7 +50,7 @@ export function taskSignSeats(task, actor) {
   if (signatures.some(item => item.actorId === actor.id)) return [];
   const open = taskReviewers(task).filter(id => !signatures.some(item => item.reviewerId === id));
   if (isSuperAdminRole(actor.role)) return open.includes(actor.id) ? [actor.id] : open;
-  return !taskOwners(task).includes(actor.id) && open.includes(actor.id) ? [actor.id] : [];
+  return open.includes(actor.id) ? [actor.id] : [];
 }
 export const canReviewTask = (task, actor) => taskSignSeats(task, actor).length > 0;
 
@@ -58,8 +63,7 @@ export function milestoneSignSlots(project, milestone, actor, tasks = []) {
   if (signatures.some(signature => signature.actorId === actor.id)) return [];
   const open = stageSeats(project, milestone).filter(([slot]) => !signatures.some(signature => signature.as === slot));
   if (actor.id === project.ownerId) return open.filter(([slot]) => slot === 'owner').map(([slot]) => slot);
-  if (isSuperAdminRole(actor.role)) return open.map(([slot]) => slot);
-  if (actor.role !== 'admin' || milestone.memberIds?.includes(actor.id)) return [];
+  if (isSuperAdminRole(actor.role)) return open.filter(([slot]) => slot !== 'owner').map(([slot]) => slot);
   return open.filter(([,id]) => id === actor.id).map(([slot]) => slot);
 }
 

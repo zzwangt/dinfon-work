@@ -21,14 +21,11 @@ function fixture() {
   return state;
 }
 
-test('dedicated co-reviewers must be ordinary administrators distinct from the owner and configured by owner or super admin', () => {
+test('project owners and administrators can appoint employee co-reviewers', () => {
   const state = fixture();
-  for (const invalid of [total, 'u-qa', owner]) assert.throws(() => assign(state, invalid), /普通管理员|同一人/);
-  for (const actor of [co, 'u-engineer']) assert.throws(() => assign(state, co, actor), /仅项目负责人或总管理员/);
-  assert.equal(node(assign(state, co, total)).coReviewerId, co);
-  const sharedRole = structuredClone(state);
-  byId(sharedRole.users, owner).role = 'admin';
-  assert.throws(() => assign(sharedRole, owner), /同一人/);
+  for (const actor of [co,owner,total]) assert.equal(node(assign(state,'u-qa',actor)).coReviewerId,'u-qa');
+  assert.throws(() => assign(state,co,'u-engineer'), /仅项目负责人或管理员/);
+  assert.throws(() => assign(state,owner), /人员没有变化/);
   assert.throws(() => transact(state, 'setMilestoneCoReviewer', { id }, owner), /明确清除/);
 });
 
@@ -53,13 +50,12 @@ test('without a co-reviewer the owner signs once, with one each actual signer mu
   }
 });
 
-test('a super administrator can substitute for either seat, including their own, but never signs both seats', () => {
+test('the owner signs personally and the super administrator can substitute for one additional seat', () => {
   const state = assign(fixture(), co);
-  for (const [slot, other] of [['owner', co], ['coReviewer', owner]]) {
-    const half = sign(state, total, slot);
-    assert.throws(() => sign(half, total, slot === 'owner' ? 'coReviewer' : 'owner'), /签字权限/);
-    assert.equal(node(sign(half, other)).status, 'done');
-  }
+  assert.throws(() => sign(state,total,'owner'), /签字权限/);
+  const delegated=sign(state,total,'coReviewer');
+  assert.throws(() => sign(delegated,total), /签字权限/);
+  assert.equal(node(sign(delegated,owner)).status,'done');
   const personal = structuredClone(state);
   byId(personal.projects, projectId).ownerId = total;
   assert.deepEqual(milestoneSignSlots(byId(personal.projects, projectId), node(personal), byId(personal.users, total), personal.tasks), ['owner']);
@@ -94,7 +90,8 @@ test('partial signatures are invalidated by changes to approver, accepted work, 
 test('old completed nodes stay completed without fabricating signatures and the updateTask route cannot bypass plan editing permissions', () => {
   const old = createSeedState();
   const task = byId(old.tasks, 't-03');
-  for (const actor of [task.ownerId, co]) assert.throws(() => transact(old, 'updateTask', { id: task.id, description: '改写工作范围' }, actor), /仅项目负责人或总管理员/);
+  assert.throws(() => transact(old, 'updateTask', { id: task.id, description: '改写工作范围' }, task.ownerId), /仅项目负责人或管理员/);
+  assert.equal(byId(transact(old, 'updateTask', {id:task.id,description:'修改工作范围'},co).tasks,task.id).description,'修改工作范围');
   const updated = transact(old, 'updateTask', { id: task.id, status: 'doing' }, task.ownerId);
   const done = byId(old.milestones, 'm-mower-1');
   assert.deepEqual(byId(updated.milestones, done.id), done);

@@ -77,21 +77,11 @@ function contentChanges(before, after) {
 
 function manageProject(actor, project) {
   requireProjectAccess(actor, project);
-  check(canApproveProject(project, actor), '仅项目负责人或总管理员可以修改项目节点');
+  check(canApproveProject(project, actor), '仅项目负责人或管理员可以修改项目节点');
 }
 
 function requireProjectAccess(actor, project) {
   check(isAdminRole(actor.role) || actor.id === project.ownerId || project.memberIds.includes(actor.id), '你已无权访问该项目，请联系项目负责人');
-}
-
-function validateTaskReviewer(project, ownerId, reviewer) {
-  check(project.memberIds.includes(reviewer.id) || reviewer.id === project.ownerId || isAdminRole(reviewer.role), '验收人必须是项目成员、项目负责人或管理员');
-  check(ownerId !== reviewer.id || reviewer.role === 'superadmin', '任务负责人不能验收自己的任务，请指定另一位验收人');
-}
-
-function validateCoReviewer(project, reviewer) {
-  check(!reviewer || reviewer.role === 'admin', '加验人必须是普通管理员');
-  check(!reviewer || reviewer.id !== project.ownerId, '加验管理员不能与项目负责人是同一人');
 }
 
 function peopleIds(list = []) {
@@ -101,25 +91,17 @@ function peopleIds(list = []) {
 
 function nodeStaff(users, project, type, memberIds, reviewers, ownerId) {
   const members = peopleIds(memberIds).filter(id => id !== ownerId);
-  const reviewIds = peopleIds(reviewers);
-  for (const id of members) {
-    find(users, id, '执行成员');
-    check(id === project.ownerId || project.memberIds.includes(id), '执行成员必须是项目组成员');
-  }
+  const reviewIds = peopleIds(reviewers).filter(id=>type === 'task' || id !== project.ownerId);
+  for (const id of [...members,...reviewIds]) find(users, id, '节点人员');
   if (type === 'task') {
     check(reviewIds.length, '请至少指定一位任务验收人');
-    for (const id of reviewIds) {
-      const reviewer = find(users, id, '验收人');
-      validateTaskReviewer(project, ownerId, reviewer);
-      check(!members.includes(id) || reviewer.role === 'superadmin', '执行成员不能验收自己的任务');
-    }
     return {memberIds:members, reviewerId:reviewIds[0], extraReviewerIds:reviewIds.slice(1)};
   }
-  for (const id of reviewIds) validateCoReviewer(project, find(users, id, '加验管理员'));
-  for (const id of [project.ownerId, ...reviewIds]) {
-    check(!members.includes(id) || find(users,id,'验收人').role === 'superadmin', '阶段执行成员不能同时验收该阶段');
-  }
   return {memberIds:members, coReviewerId:reviewIds[0] || null, extraReviewerIds:reviewIds.slice(1)};
+}
+
+function addParticipants(project, ids) {
+  project.memberIds = [...new Set([...project.memberIds, ...ids])];
 }
 
 function restartDeliveries(task, reason, at) {
@@ -257,7 +239,6 @@ function taskStaff(users, project, input, previous) {
     reviewers = [firstReviewer,...peopleIds(input.extraReviewerIds ?? previous?.extraReviewerIds)];
   }
   const owner = find(users,owners[0],'任务负责人');
-  check(owner.id === project.ownerId || project.memberIds.includes(owner.id), '任务负责人必须是项目组成员');
   return {ownerId:owner.id,...nodeStaff(users,project,'task',owners.slice(1),reviewers,owner.id)};
 }
 
@@ -284,7 +265,7 @@ export function transact(state, action, payload = {}, actorId) {
   if (action === 'createProject') {
     check(isAdminRole(actor.role), '仅管理员可以创建项目');
     const owner = find(next.users, payload.ownerId, '项目负责人');
-    check(!payload.reviewerId, '项目验收人已停用，请在大节点中设置加验管理员');
+    check(!payload.reviewerId, '项目验收人已停用，请在大节点中设置加验人');
     const memberIds = [...new Set([owner.id, ...(Array.isArray(payload.memberIds) ? payload.memberIds : [])])];
     memberIds.forEach((id) => find(next.users, id, '项目成员'));
     const project = {
@@ -312,6 +293,8 @@ export function transact(state, action, payload = {}, actorId) {
         tasks.push(buildTask(next.users, project, milestone, input, actor.id, at));
       }
     }
+    addParticipants(project, [...tasks.flatMap(taskOwners), ...tasks.flatMap(taskReviewers),
+      ...milestones.flatMap(m=>m.memberIds || []), ...milestones.flatMap(stageReviewers)]);
     validateSchedule({ milestones, tasks }, project);
     (next.projectPlans ??= []).unshift({
       id: uid('plan'), projectId: project.id, project, milestones, tasks, status: 'pending',
@@ -322,7 +305,7 @@ export function transact(state, action, payload = {}, actorId) {
     check(Object.keys(payload).every(key => ['id', 'approve', 'comment'].includes(key)) && typeof payload.approve === 'boolean', '审批内容无效');
     const plan = find(next.projectPlans || [], payload.id, '项目计划');
     check(plan.status === 'pending', '这份计划已处理');
-    check(canApproveRequest(plan.project, plan, actor), '仅拟任项目负责人或总管理员可以审批，总管理员以外不能自批');
+    check(canApproveRequest(plan.project, plan, actor), '仅拟任项目负责人或管理员可以审批，员工不能自批');
     plan.comment = optionalText(payload.comment);
     if (payload.approve) {
       const { project, milestones, tasks } = plan;
@@ -341,9 +324,9 @@ export function transact(state, action, payload = {}, actorId) {
     plan.reviewedAt = at;
     record(payload.approve ? plan.projectId : null, `${payload.approve ? '批准' : '驳回'}整份新建项目计划“${plan.project.name}”`);
   } else if (action === 'setProjectReviewer') {
-    throw new Error('项目验收人已停用，请在大节点中设置加验管理员');
+    throw new Error('项目验收人已停用，请在大节点中设置加验人');
   } else if (action === 'setMilestoneCoReviewer') {
-    check(Object.keys(payload).every(key => ['id', 'reviewerId', 'memberIds', 'extraReviewerIds'].includes(key)) && Object.hasOwn(payload, 'reviewerId'), '请指定加验管理员或明确清除');
+    check(Object.keys(payload).every(key => ['id', 'reviewerId', 'memberIds', 'extraReviewerIds'].includes(key)) && Object.hasOwn(payload, 'reviewerId'), '请指定加验人或明确清除');
     const milestone = find(next.milestones, payload.id, '节点');
     const project = find(next.projects, milestone.projectId, '项目');
     manageProject(actor, project);
@@ -354,7 +337,8 @@ export function transact(state, action, payload = {}, actorId) {
     });
     check(JSON.stringify([milestone.memberIds || [],stageReviewers(milestone)]) !== JSON.stringify([staffing.memberIds,stageReviewers(staffing)]), '人员没有变化');
     Object.assign(milestone, staffing);
-    record(project.id, `更新“${milestone.title}”的执行成员和加验管理员`, staffing);
+    addParticipants(project,[...milestone.memberIds,...stageReviewers(milestone)]);
+    record(project.id, `更新“${milestone.title}”的负责人和验收人`, staffing);
   } else if (action === 'setTaskReviewer') {
     check(Object.keys(payload).every(key => ['id', 'ownerIds', 'reviewerIds', 'reviewerId', 'memberIds', 'extraReviewerIds'].includes(key)), '此操作只能调整任务负责人和验收人');
     const task = find(next.tasks, payload.id, '任务');
@@ -370,6 +354,7 @@ export function transact(state, action, payload = {}, actorId) {
     if (!staffing.memberIds.length && !Object.hasOwn(task,'memberIds')) delete staffing.memberIds;
     if (!staffing.extraReviewerIds.length && !Object.hasOwn(task,'extraReviewerIds')) delete staffing.extraReviewerIds;
     Object.assign(task, staffing);
+    addParticipants(project,[...taskOwners(task),...taskReviewers(task)]);
     if (task.reviewSignatures?.length) task.reviewSignatures=[];
     record(project.id, `更新“${task.title}”的负责人和验收人`, staffing);
   } else if (action === 'createTask') {
@@ -381,6 +366,7 @@ export function transact(state, action, payload = {}, actorId) {
     check(milestone.status !== 'done', '已验收节点不能添加任务');
     const task = buildTask(next.users, project, milestone, payload, actor.id, at);
     next.tasks.push(task);
+    addParticipants(project,[...taskOwners(task),...taskReviewers(task)]);
     validateSchedule(next, project);
     record(project.id, `创建任务“${task.title}”，由 ${taskOwners(task).map(id=>find(next.users,id,'任务负责人').name).join('、')} 负责`);
   } else if (['deleteTask', 'deleteMilestone', 'deleteProject'].includes(action)) {
@@ -474,7 +460,6 @@ export function transact(state, action, payload = {}, actorId) {
   } else if (action === 'reviewTask') {
     const task = find(next.tasks, payload.id, '任务');
     requireProjectAccess(actor, find(next.projects, task.projectId, '项目'));
-    check(!taskOwners(task).includes(actor.id) || actor.role === 'superadmin', '不能验收自己负责的任务');
     check(task.status === 'review', '仅待验收任务可以进行验收');
     check(canReviewTask(task, actor), '仅尚未签字的指定验收人或总管理员可以验收任务');
     check(typeof payload.approve === 'boolean', '请选择通过或退回');
@@ -512,7 +497,7 @@ export function transact(state, action, payload = {}, actorId) {
     Object.assign(milestone, content);
     record(project.id, `编辑大节点“${milestone.title}”的文字内容`, changes);
   } else if (action === 'createMilestone') {
-    throw new Error('节点新增或修改需要先提交申请并由项目负责人或总管理员审批');
+    throw new Error('节点新增或修改需要先提交申请并由项目负责人或管理员审批');
   } else if (action === 'requestMilestone') {
     const project = find(next.projects, payload.projectId, '项目');
     requireProjectAccess(actor, project);
@@ -547,8 +532,8 @@ export function transact(state, action, payload = {}, actorId) {
     const request = find(next.milestoneRequests, payload.id, '节点申请');
     const project = find(next.projects, request.projectId, '项目');
     requireProjectAccess(actor, project);
-    check(canApproveProject(project, actor), '仅项目负责人或总管理员可以审批申请');
-    check(actor.id !== request.applicantId || actor.role === 'superadmin', '不能审批自己提交的申请，请由总管理员处理');
+    check(canApproveProject(project, actor), '仅项目负责人或管理员可以审批申请');
+    check(actor.id !== request.applicantId || isAdminRole(actor.role), '不能审批自己提交的申请，请由管理员处理');
     check(request.status === 'pending', '该节点申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');
     const comment = optionalText(payload.comment);
@@ -580,6 +565,7 @@ export function transact(state, action, payload = {}, actorId) {
           id: uid('m'), projectId: project.id, ...proposed, description: '',
           originalDueDate: proposed.dueDate, status: 'pending', acceptedAt: null,
         });
+        addParticipants(project,[...(proposed.memberIds || []),...stageReviewers(proposed)]);
         planChanged = true;
       }
     }
@@ -608,7 +594,7 @@ export function transact(state, action, payload = {}, actorId) {
       milestone.status = 'done';
       milestone.acceptedAt = at;
     }
-    record(project.id, `在“${milestone.title}”签署${position === 'owner' ? '负责人' : '加验管理员'}意见，${complete ? '节点验收完成' : '等待其余人员验收'}`);
+    record(project.id, `在“${milestone.title}”签署${position === 'owner' ? '负责人' : '加验人'}意见，${complete ? '节点验收完成' : '等待其余人员验收'}`);
   } else if (action === 'requestExtension') {
     const project = find(next.projects, payload.projectId, '项目');
     requireProjectAccess(actor, project);
@@ -651,7 +637,7 @@ export function transact(state, action, payload = {}, actorId) {
     const extension = find(next.extensions, payload.id, '延期申请');
     const project = find(next.projects, extension.projectId, '项目');
     requireProjectAccess(actor, project);
-    check(canApproveProject(project, actor), '仅项目负责人或总管理员可以审批申请');
+    check(canApproveProject(project, actor, 'extension'), '仅项目负责人或总管理员可以审批申请');
     check(actor.id !== extension.applicantId || actor.role === 'superadmin', '不能审批自己提交的延期申请，请由总管理员处理');
     check(extension.status === 'pending', '该延期申请已处理');
     check(typeof payload.approve === 'boolean', '请选择批准或驳回');

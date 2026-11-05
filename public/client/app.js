@@ -28,7 +28,7 @@ const currentDay = () => today();
 const shift = (date, days) => addDays(datePart(date), days);
 let state = null, actorId = '', revision = 0, accountInfo = null, accountsData = null, accountsLoading = false;
 let renderedTiming = '', sessionEpoch = 0, authBusy = false, sessionRenderPending = false, deletionReview = null;
-let milestoneReviewerOptions = [], taskReviewerIds = [];
+let companyMembers = [];
 let notifications = [], notificationReads = new Set(), acknowledgedNotifications = new Set();
 let storageIssue = '', toastTimer, weekOffset = 0, taskFilter = 'mine', projectFilter = 'active', approvalFilter = 'pending', approvalKind = 'nodes', searchTerm = '', flowProjectId = '', projectView = 'flow', flowScope = 'all', expandedFlowIds = new Set(), saving = false;
 async function api(path, options = {}) {
@@ -41,13 +41,13 @@ function acceptSession(data) {
   if(accountInfo?.id !== data.account?.id){acknowledgedNotifications.clear();notificationReads.clear();resetProjectFiles();resetMaintenance();}
   notifications=(data.notifications||[]).filter(item=>!acknowledgedNotifications.has(item.id));
   accountInfo=data.account; actorId=data.actor.id; revision=data.revision;
-  milestoneReviewerOptions=data.milestoneReviewerOptions||[];taskReviewerIds=data.taskReviewerIds||[];
+  companyMembers=data.companyMembers || (data.state?.users || []).filter(u=>data.taskReviewerIds?.includes(u.id));
   if(data.mustChangePassword||data.account?.mustChangePassword){state=null;accountsData=null;notifications=[];passwordChangeScreen();return false;}
   state=data.state; state.milestoneRequests ||= []; return true;
 }
 function clearLocalSession() {
   resetProjectFiles();resetMaintenance();
-  milestoneReviewerOptions=[];taskReviewerIds=[];notifications=[];notificationReads.clear();acknowledgedNotifications.clear();
+  companyMembers=[];notifications=[];notificationReads.clear();acknowledgedNotifications.clear();
   sessionEpoch++;state=null;actorId='';revision=0;accountInfo=null;accountsData=null;accountsLoading=false;sessionRenderPending=false;deletionReview=null;
   searchTerm='';projectFilter='active';flowProjectId='';projectView='flow';flowScope='all';expandedFlowIds.clear();storageIssue='';
   modal.close();modal.innerHTML='';clearTimeout(toastTimer);toastEl.hidden=true;
@@ -379,7 +379,7 @@ function nodeApprovalBanner(p) {
 }
 function projectNodeRequests(p) {
   const list=visibleNodeRequests().filter(x=>x.projectId===p.id).slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
-  return `<section class="project-node-requests"><div class="section-heading"><div><h2>大节点申请</h2><p class="panel-subtitle">新增节点与计划调整由项目负责人或总管理员审批。</p></div>${button('申请新增大节点','new-milestone',p.id,'secondary','plus')}</div><div class="approval-list">${list.map(x=>renderMilestoneRequestCard(state,x,{admin:canReviewApplication(x),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})})).join('')||empty('还没有大节点申请','新增节点可在此提交；修改节点请点击流程图中的大节点，再选择“申请调整计划”。')}</div></section>`;
+  return `<section class="project-node-requests"><div class="section-heading"><div><h2>大节点申请</h2><p class="panel-subtitle">新增节点与计划调整由项目负责人或管理员审批。</p></div>${button('申请新增大节点','new-milestone',p.id,'secondary','plus')}</div><div class="approval-list">${list.map(x=>renderMilestoneRequestCard(state,x,{admin:canReviewApplication(x),unreadMarkup:approvalReminder(x)+unreadSlot({category:'approvals',entityId:x.id})})).join('')||empty('还没有大节点申请','新增节点可在此提交；修改节点请点击流程图中的大节点，再选择“申请调整计划”。')}</div></section>`;
 }
 function approvalsPage() {
   const nodes=visibleNodeRequests(),extensions=visibleExtensions(),plans=state.projectPlans || [];
@@ -428,7 +428,7 @@ const rate=(pct,n,d)=>`<span class="rate ${pct!==null&&pct>=80?'positive':''}">$
 function settingsPage() {
   if(!isSuperAdmin())return empty('仅总管理员可访问平台设置','请联系总管理员管理备份与升级。');
   let hasLegacy=false;try{hasLegacy=!!localStorage.getItem(LEGACY_KEY);}catch{}
-  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+renderMaintenancePanel()+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>独立账号与密码</dd></div><div><dt>数据存储</dt><dd>服务器数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>项目数据导出</h2><p>导出项目、任务、成员和审批记录，不包含账号登录信息和上传文件。完整备份请使用上方入口。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到服务器。可先导出备份，避免覆盖服务器记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部任务验收通过，任务完成率达到 100%；全部大节点确认后，项目标记为已完成。</li><li>新增节点和计划调整由项目负责人或总管理员审批，节点文字由项目负责人或总管理员维护。</li><li>项目延期批准后调整日期。总管理员可以审批本人申请。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>在账号管理中开通员工账号，再从项目内添加成员。员工首次登录时设置自己的密码，之后即可使用电脑或手机处理工作。</p><p class="cell-subtext">账号、初始密码和平台网址需由管理员通过公司内部渠道告知员工。忘记密码时由管理员重置。</p></section></div>`;
+  return heading('平台设置','账号权限和业务数据由服务器统一管理。')+renderMaintenancePanel()+`<div class="settings-grid"><section class="settings-card"><div class="settings-icon">${icon('grid')}</div><h2>工作空间</h2><dl class="settings-details"><div><dt>空间名称</dt><dd>鼎峰工作空间</dd></div><div><dt>身份认证</dt><dd>独立账号与密码</dd></div><div><dt>数据存储</dt><dd>服务器数据库</dd></div><div><dt>当前数据版本</dt><dd>${revision}</dd></div></dl><p>管理员查看全局并分配权限，员工仅访问参与项目。所有变更均由服务器校验并保存。</p><a class="text-link" href="#accounts">管理账号 ${icon('arrow')}</a></section><section class="settings-card"><div class="settings-icon">${icon('download')}</div><h2>项目数据导出</h2><p>导出项目、任务、成员和审批记录，不包含账号登录信息和上传文件。完整备份请使用上方入口。</p><div class="settings-actions">${button('导出项目数据','export-data','','secondary','download')}</div><p class="cell-subtext">${visibleProjects().length} 个项目 · ${visibleTasks().length} 项任务</p>${hasLegacy?`<div class="legacy-data-note"><strong>检测到旧版浏览器数据</strong><p>这些数据仍保留在此浏览器，尚未合并到服务器。可先导出备份，避免覆盖服务器记录。</p>${button('导出旧版备份','export-legacy','','secondary','download')}</div>`:''}</section><section class="settings-card"><div class="settings-icon">${icon('approval')}</div><h2>执行规则</h2><ul class="plain-list"><li>提交成果并通过验收后，任务才计为完成。</li><li>全部任务验收通过，任务完成率达到 100%；全部大节点确认后，项目标记为已完成。</li><li>新增节点和计划调整由项目负责人或管理员审批，管理员可以编辑节点文字。</li><li>项目延期批准后调整日期。总管理员可以审批本人申请。</li><li>多人同时修改时会提示刷新，避免覆盖他人更新。</li></ul></section><section class="settings-card"><div class="settings-icon">${icon('users')}</div><h2>员工进入平台</h2><p>在账号管理中开通员工账号，再从项目内添加成员。员工首次登录时设置自己的密码，之后即可使用电脑或手机处理工作。</p><p class="cell-subtext">账号、初始密码和平台网址需由管理员通过公司内部渠道告知员工。忘记密码时由管理员重置。</p></section></div>`;
 }
 function myAccountPage() {
   const a=actor(),w=weekRange(currentDay()),s=memberStats(state,a.id,w.start,w.end);
@@ -589,24 +589,19 @@ const projectOptions=(selected,ps=visibleProjects())=>ps.map(p=>`<option value="
 function newProject(prior) {
   if (!isAdmin()) { toast('仅管理员可以创建项目。',true); return; }
   const p = prior?.project || {};
-  const people = state.users.filter(person => taskReviewerIds.includes(person.id));
-  const members = p.memberIds || [actorId];
-  const team = people.map(person => `<label class="checkbox-label"><input type="checkbox" name="memberIds" value="${e(person.id)}" ${members.includes(person.id)?'checked':''}>${e(person.name)}</label>`).join('');
+  const people = companyMembers;
   showModal('新建项目',`<p class="form-intro">填好项目和节点后一起提交。整份计划获批后，成员会收到任务。</p><div class="form-grid">
     ${field('项目名称','name',p.name,'text','required maxlength="80" placeholder="例如：新产品上市计划"')}
     ${field('项目类别','category',p.category,'text','maxlength="40"')}
     ${selectField('项目负责人','ownerId',userOptions(p.ownerId || actorId,people))}
-    <div class="field"><label>项目成员</label><div class="member-checks">${team}</div></div>
     ${scheduleField('开始时间','startDate',p.startDate?scheduleInput(p.startDate):`${currentDay()}T09:00`,'required')}
     ${scheduleField('计划截止时间','dueDate',p.dueDate?scheduleInput(p.dueDate):`${shift(currentDay(),30)}T18:00`,'required')}
     ${textarea('项目目标与说明（选填）','description','项目最终交付什么？',false,p.description)}</div>${planEditor}`,
     '提交整份计划','createProject');
   bindPlanEditor(modal.querySelector('form'),people,prior);
 }
-function personnelOptions(p, stage, owner, reviewer, selection={}, locked=false) {
-  const members=state.users.filter(u=>taskReviewerIds.includes(u.id) && (p.memberIds.includes(u.id)||u.id===p.ownerId));
-  const reviewers=stage?[...new Map([...state.users.filter(u=>u.role==='admin' && taskReviewerIds.includes(u.id)), ...milestoneReviewerOptions.map(u=>({...u,role:'admin'}))].map(u=>[u.id,u])).values()]:state.users.filter(u=>taskReviewerIds.includes(u.id)&&(members.includes(u)||isAdminRole(u.role)));
-  return { ...selection, stage, owner, reviewer, members, reviewers, locked };
+function personnelOptions(project, stage, selection={}, locked=false) {
+  return { ...selection, stage, owner:project.ownerId, members:companyMembers, reviewers:companyMembers, locked };
 }
 function rosterBox(options) {
   return `<div class="node-people" data-personnel>${peopleFields(options)}</div>`;
@@ -619,22 +614,19 @@ function syncPersonnel(form) {
   const p=project(target?.projectId || form.elements.projectId?.value || form.dataset.id);
   if(!p)return;
   const selection=stage ? readPeople(box) : readTaskPeople(box);
-  updatePeopleBox(box,personnelOptions(p,stage,p.ownerId,form.elements.reviewerId?.value || '',selection,target?.status==='review'));
+  updatePeopleBox(box,personnelOptions(p,stage,selection,target?.status==='review'));
 }
 function setTaskReviewer(id) {
   const t=visibleTasks().find(item=>item.id===id),p=t&&project(t.projectId);
   if(!t||t.status==='done'||!canManage(p))return;
   const selection={ownerIds:taskOwners(t),reviewerIds:taskReviewers(t)};
-  showModal('设置负责人和验收人',`<p class="form-intro">${e(t.title)}</p>${rosterBox(personnelOptions(p,false,null,null,selection,t.status==='review'))}${t.status==='review'?'<p class="field-help">成果已交齐，负责人名单已锁定。变更验收人后需重新签字。</p>':t.deliveries?.length?'<p class="field-help">调整负责人后，已有成果将存入历史，每位负责人需重新提交。</p>':''}`,'保存','setTaskReviewer',id);
+  showModal('设置负责人和验收人',`<p class="form-intro">${e(t.title)}</p>${rosterBox(personnelOptions(p,false,selection,t.status==='review'))}${t.status==='review'?'<p class="field-help">成果已交齐，负责人名单已锁定。变更验收人后需重新签字。</p>':t.deliveries?.length?'<p class="field-help">调整负责人后，已有成果将存入历史，每位负责人需重新提交。</p>':''}`,'保存','setTaskReviewer',id);
 }
 function setMilestoneCoReviewer(id) {
   const m=visibleMilestones().find(item=>item.id===id),p=m&&project(m.projectId);
   if(!m||m.status==='done'||!canManage(p))return;
-  const candidates=milestoneReviewerOptions.filter(u=>u.id!==p.ownerId);
-  const previousUnavailable=m.coReviewerId&&!candidates.some(u=>u.id===m.coReviewerId);
-  const options='<option value="">仅主验</option>'+(previousUnavailable?`<option value="${e(m.coReviewerId)}" selected disabled>原加验人已不可选</option>`:'')+userOptions(m.coReviewerId||'',candidates);
-  const help=m.signatures?.length?'变更加验人将清空已有签字，需要重新验收。':'由项目负责人和选中的加验管理员分别签字。';
-  showModal('设置阶段成员与验收人',`<p class="form-intro">${e(m.title)}</p>${selectField('加验管理员','reviewerId',options,false)}${rosterBox(personnelOptions(p,true,p.ownerId,m.coReviewerId,m))}<p class="field-help">${help}</p>`,'保存','setMilestoneCoReviewer',id);
+  const selection={memberIds:m.memberIds || [],extraReviewerIds:stageReviewers(m)};
+  showModal('设置大节点人员',`<p class="form-intro">${e(m.title)} · 项目负责人 ${e(user(p.ownerId)?.name)} 必签</p>${rosterBox(personnelOptions(p,true,selection))}`, '保存','setMilestoneCoReviewer',id);
 }
 function signatureProgress(m) {
   if(m.status==='done'&&!m.signatures?.length)return '已达成';
@@ -685,7 +677,7 @@ function newMilestone(projectId, milestoneId) {
   if(m&&(m.projectId!==p.id||m.status==='done')){toast('已完成的大节点不能修改。',true);return;}
   if(m&&visibleNodeRequests().some(x=>x.milestoneId===m.id&&x.status==='pending')){toast('此节点已有待审批申请，请等待处理。',true);return;}
   const kind=m?'update':'create',legacyDue=!!m&&/^\d{4}-\d{2}-\d{2}$/.test(m.dueDate);
-  showModal(m?'申请修改大节点':'申请新增大节点',`<p class="form-intro">${e(p.name)} · 项目负责人或总管理员批准后更新正式计划。</p><input type="hidden" name="kind" value="${kind}"><input type="hidden" name="milestoneId" value="${e(m?.id||'')}">${m?`<p class="node-approval-help">当前节点：${e(m.title)} · ${fullDate(m.dueDate)} 截止</p>`:''}<div class="form-grid"><div class="field full">${field('节点交付成果','title',m?.title||'','text','required maxlength="100" placeholder="例如：样机方案通过评审"')}</div>${scheduleField('节点截止时间','dueDate',scheduleInput(m?.dueDate||p.dueDate),`required ${legacyDue?'disabled':''} min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(p.dueDate))}"`)}${legacyDue?`<label class="checkbox-label field full"><input type="checkbox" name="preserveAllDay" checked data-preserve-all-day>保留原截止日（全天）；取消勾选后设置具体小时</label>`:''}${m?'':rosterBox(personnelOptions(p,true,p.ownerId,''))}${textarea('申请原因（选填）','reason',m?'可补充调整节点或日期的原因。':'可补充新增阶段的原因和预期交付。',false)}</div><p class="field-help">节点日期须在项目周期内，且不得早于其下属任务的截止时间。超过项目截止时间时，请先申请项目延期。批准不会自动调整小任务时间。</p>${scheduleHelp}`,'提交申请','requestMilestone',p.id);
+  showModal(m?'申请修改大节点':'申请新增大节点',`<p class="form-intro">${e(p.name)} · 项目负责人或管理员批准后更新正式计划。</p><input type="hidden" name="kind" value="${kind}"><input type="hidden" name="milestoneId" value="${e(m?.id||'')}">${m?`<p class="node-approval-help">当前节点：${e(m.title)} · ${fullDate(m.dueDate)} 截止</p>`:''}<div class="form-grid"><div class="field full">${field('节点交付成果','title',m?.title||'','text','required maxlength="100" placeholder="例如：样机方案通过评审"')}</div>${scheduleField('节点截止时间','dueDate',scheduleInput(m?.dueDate||p.dueDate),`required ${legacyDue?'disabled':''} min="${e(toDateTimeInput(p.startDate,'00:00'))}" max="${e(scheduleInput(p.dueDate))}"`)}${legacyDue?`<label class="checkbox-label field full"><input type="checkbox" name="preserveAllDay" checked data-preserve-all-day>保留原截止日（全天）；取消勾选后设置具体小时</label>`:''}${m?'':'<span class="field-help full">项目负责人必签，可加选其他验收人。</span>'+rosterBox(personnelOptions(p,true))}${textarea('申请原因（选填）','reason',m?'可补充调整节点或日期的原因。':'可补充新增阶段的原因和预期交付。',false)}</div><p class="field-help">节点日期须在项目周期内，且不得早于其下属任务的截止时间。超过项目截止时间时，请先申请项目延期。批准不会自动调整小任务时间。</p>${scheduleHelp}`,'提交申请','requestMilestone',p.id);
 }
 function reviewNodeRequest(id, approve) {
   readEntityNotifications('approvals',id);
@@ -867,7 +859,7 @@ document.addEventListener('submit',async event=>{
     if(action==='delete-account')return await saveAccountDeletion(id);
     if(action==='add-project-member')return await saveProjectMember(form,payload,id);
     if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
-    if(action==='createProject')return await commit(action,{...payload,memberIds:data.getAll('memberIds'),stages:readPlanStages(form)},'整份项目计划已提交，等待审批。');
+    if(action==='createProject')return await commit(action,{...payload,stages:readPlanStages(form)},'整份项目计划已提交，等待审批。');
     if(action==='approvePlan'||action==='rejectPlan')return await commit('reviewProjectPlan',{id,approve:action==='approvePlan',comment:payload.comment},action==='approvePlan'?'整份计划已批准，项目和任务已生效。':'项目计划已驳回。');
     if(action==='createTask'){
       return await commit(action,{...payload,...readTaskPeople(form.querySelector('[data-personnel]'),true)},'任务已创建并分配。');
@@ -876,19 +868,15 @@ document.addEventListener('submit',async event=>{
       const target=action==='setTaskReviewer'?task(id):milestone(id),p=target&&project(target.projectId);
       if(!target||!canManage(p)||target.status==='done')throw new Error('当前无法更改此节点的人员。');
       if(action==='setTaskReviewer')return await commit(action,{id,...readTaskPeople(form.querySelector('[data-personnel]'),true)},'负责人和验收人已更新。');
-      if(!Object.hasOwn(payload,'reviewerId'))throw new Error('请选择验收人。');
-      const chosen=payload.reviewerId;
-      if(chosen&&(chosen===p.ownerId||!milestoneReviewerOptions.some(u=>u.id===chosen)))throw new Error('请选择与项目负责人不同的启用管理员。');
-      const box=form.querySelector('[data-personnel]');
-      return await commit(action,{id,reviewerId:chosen||null,...(box?readPeople(box):{})},'节点人员已更新。');
+      return await commit(action,{id,reviewerId:null,...readPeople(form.querySelector('[data-personnel]'))},'节点人员已更新。');
     }
     if(action==='editMilestoneContent'||action==='editTaskContent'){
       const target=action==='editTaskContent'?task(id):milestone(id);
-      if(!target||!canManage(project(target.projectId)))throw new Error('仅项目负责人或总管理员可修改节点。');
+      if(!target||!canManage(project(target.projectId)))throw new Error('仅项目负责人或管理员可修改节点。');
       return await commit(action,{...payload,id},'节点内容已更新。');
     }
     if(Object.hasOwn(deletionCommands,action))return await saveEntityDeletion(action,payload,id);
-    if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id,...(form.querySelector('[data-personnel]')?readPeople(form):{})},'申请已提交，项目负责人或总管理员批准后才生效。');}
+    if(action==='requestMilestone'){if(payload.preserveAllDay==='on'){const current=milestone(payload.milestoneId);if(current)payload.dueDate=current.dueDate;}delete payload.preserveAllDay;return await commit(action,{...payload,projectId:id,...(form.querySelector('[data-personnel]')?readPeople(form):{})},'申请已提交，项目负责人或管理员批准后才生效。');}
     if(['approveMilestoneRequest','rejectMilestoneRequest','approveExtension','rejectExtension'].includes(action)){
       const requests=action.endsWith('Extension')?visibleExtensions():visibleNodeRequests();
       const request=requests.find(item=>item.id===id);

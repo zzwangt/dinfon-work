@@ -245,7 +245,7 @@ test('an administrator who owns a task cannot override its different assigned re
   const state = seed();
   byId(state.users, 'u-admin').role = 'admin';
   byId(state.tasks, 't-04').ownerId = 'u-admin';
-  assert.throws(() => transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-admin'), /不能验收自己/);
+  assert.throws(() => transact(state, 'reviewTask', { id: 't-04', approve: true }, 'u-admin'), /指定验收人/);
 });
 
 test('project progress counts completed live milestones and ignores task count or historical weights', () => {
@@ -319,8 +319,8 @@ test('create-task enforces membership, assigned reviewer, acceptance and schedul
   const next = transact(state, 'createTask', input, 'u-manager');
   assert.equal(next.tasks.at(-1).status, 'todo');
   assert.equal(Object.hasOwn(next.tasks.at(-1), 'blocker'), false);
-  assert.throws(() => transact(state, 'createTask', { ...input, reviewerId: 'u-ops' }, 'u-manager'), /验收人必须是项目成员/);
-  assert.throws(() => transact(state, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-manager'), /必须是项目组成员/);
+  assert.ok(transact(state, 'createTask', { ...input, reviewerId: 'u-ops' }, 'u-manager').projects.find(p=>p.id===input.projectId).memberIds.includes('u-ops'));
+  assert.ok(transact(state, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-manager').projects.find(p=>p.id===input.projectId).memberIds.includes('u-ops'));
   assert.throws(() => transact(state, 'createTask', { ...input, acceptance: '' }, 'u-manager'), /验收标准/);
   assert.throws(() => transact(state, 'createTask', { ...input, milestoneId: '' }, 'u-manager'), /选择任务所属的里程碑/);
   assert.throws(() => transact(state, 'createTask', { ...input, milestoneId: undefined }, 'u-manager'), /选择任务所属的里程碑/);
@@ -363,14 +363,14 @@ test('an explicitly assigned owner-reviewer can start, submit and accept a task 
   }
 });
 
-test('a legacy employee self assignment cannot be accepted, but the project owner can reassign without losing delivery data', () => {
+test('a legacy employee self assignment can be accepted, but the project owner can reassign without losing delivery data', () => {
   let state = seed();
   const task = byId(state.tasks, 't-03');
   task.reviewerId = task.ownerId;
   state = transact(state, 'submitTask', { id: task.id, deliverable: '初次检查记录' }, task.ownerId);
   const submitted = byId(state.tasks, task.id);
-  assert.throws(() => transact(state, 'reviewTask', { id: task.id, approve: true }, task.ownerId), /不能验收自己/);
-  assert.throws(() => transact(state, 'setTaskReviewer', { id: task.id, reviewerId: 'u-qa' }, task.ownerId), /仅项目负责人或总管理员/);
+  assert.equal(byId(transact(state,'reviewTask',{id:task.id,approve:true},task.ownerId).tasks,task.id).status,'done');
+  assert.throws(() => transact(state, 'setTaskReviewer', { id: task.id, reviewerId: 'u-qa' }, task.ownerId), /仅项目负责人或管理员/);
   state = transact(state, 'setTaskReviewer', { id: task.id, reviewerId: 'u-qa' }, 'u-manager');
   assert.deepEqual(byId(state.tasks, task.id), { ...submitted, reviewerId: 'u-qa' });
   assert.equal(byId(transact(state, 'reviewTask', { id: task.id, approve: true }, 'u-qa').tasks, task.id).status, 'done');

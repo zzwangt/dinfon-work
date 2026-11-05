@@ -747,7 +747,7 @@ test('one project plan defers every node and assignment until an authorized revi
   for (const key of ['projects','milestones','tasks']) assert.deepEqual(f.stored().state[key],previous.state[key]);
   assert.equal((await f.call('/api/session', ENGINEER)).data.state.projectPlans.length,0);
   assert.equal((await f.call('/api/session', MANAGER)).data.notifications.some(n=>n.entityId===id),true);
-  assert.equal((await cmd(other,'reviewProjectPlan',{id,approve:true})).status,404);
+  assert.ok((await f.call('/api/session',other)).data.state.projectPlans.some(plan=>plan.id===id));
   assert.equal((await cmd(ENGINEER,'reviewProjectPlan',{id,approve:true})).status,404);
   const decisions=await Promise.all([1,2].map(()=>cmd(MANAGER,'reviewProjectPlan',{id,approve:true},submission.data.revision)));
   assert.deepEqual(decisions.map(r=>r.status).sort(),[200,409]);
@@ -779,7 +779,7 @@ test('a collaborative plan notifies both workers and requires each task and stag
   const task={title:'联调',ownerId:'u-engineer',memberIds:['u-design'],reviewerId:'u-qa',extraReviewerIds:['u-manager'],dueDate:'2099-04-10',acceptance:'实现预期'};
   const stage={title:'阶段甲',dueDate:'2099-04-12',memberIds:['u-design','u-engineer'],coReviewerId:'u-ops',extraReviewerIds:[secondId],tasks:[task]};
   const body={name:'多人验证',ownerId:'u-manager',memberIds:['u-engineer','u-qa','u-design'],startDate:'2099-04-01',dueDate:'2099-04-30',stages:[stage]};
-  await cmd(ADMIN,'createProject',{...body,stages:[{...stage,tasks:[{...task,extraReviewerIds:['u-design']}]}]},400);
+  await cmd(ADMIN,'createProject',{...body,stages:[{...stage,tasks:[{...task,extraReviewerIds:['missing']}]}]},400);
   const pending=(await cmd(ADMIN,'createProject',body)).state.projectPlans[0];
   const live=await cmd(MANAGER,'reviewProjectPlan',{id:pending.id,approve:true});
   const id=live.state.tasks.at(-1).id,mid=live.state.milestones.at(-1).id;

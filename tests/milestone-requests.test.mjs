@@ -124,7 +124,7 @@ test('rejection keeps new and changed plans untouched and processed requests can
 
 test('node reviews require project approval assignment, an explicit decision and valid optional explanation', () => {
   const pending = transact(createSeedState(), 'requestMilestone', createInput(), 'u-engineer');
-  assert.throws(() => review(pending, true, 'u-engineer'), /仅项目负责人或总管理员/);
+  assert.throws(() => review(pending, true, 'u-engineer'), /仅项目负责人或管理员/);
   assert.throws(() => review(pending, true, 'u-ops'), /无权访问/);
   assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id: pending.milestoneRequests[0].id, comment: '说明' }, 'u-admin'), /请选择批准或驳回/);
@@ -135,7 +135,7 @@ test('node reviews require project approval assignment, an explicit decision and
 
 test('the old direct node creation action is closed to every role', () => {
   for (const actorId of ['u-admin', 'u-manager', 'u-engineer', 'u-ops']) {
-    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*总管理员审批/);
+    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*管理员审批/);
   }
 });
 

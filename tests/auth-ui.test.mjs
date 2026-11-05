@@ -92,7 +92,7 @@ test('new tasks offer two empty checklists containing eligible active people',()
   assert.doesNotMatch(modal.innerHTML,/value="u-design"|value="u-ops"/);
 });
 
-test('checking multiple workers and reviewers disables only conflicting roles, with the superadmin exception',()=>{
+test('checking multiple workers and reviewers allows the same person in both roles',()=>{
   const {ui,listeners}=harness(async()=>{throw new Error('Unexpected request');});
   const data=session();data.state.projects[0].memberIds.push('u-admin');ui.acceptSession(data);
   const box=taskBox(['u-qa','u-admin'],['u-engineer','u-manager']);
@@ -100,7 +100,7 @@ test('checking multiple workers and reviewers disables only conflicting roles, w
   listeners.get('document:change')({target:{dataset:{roster:'owners'},hasAttribute:()=>false,closest:()=>f}});
   for(const id of ['u-qa','u-admin'])assert.match(box.innerHTML,new RegExp('data-roster="owners" value="'+id+'" checked'));
   for(const id of ['u-engineer','u-manager'])assert.match(box.innerHTML,new RegExp('data-roster="signers" value="'+id+'" checked'));
-  assert.match(box.innerHTML,/data-roster="signers" value="u-qa" disabled/);
+  assert.doesNotMatch(box.innerHTML,/data-roster="signers" value="u-qa" disabled/);
   assert.doesNotMatch(box.innerHTML,/data-roster="signers" value="u-admin" disabled/);
 });
 
@@ -118,14 +118,14 @@ test('the task form binds the exact open stage and never substitutes a different
   assert.match(modal.innerHTML,new RegExp('name="dueDate"[^>]+max="'+times.toDateTimeInput(stage.dueDate,'23:00')+'"'));
 });
 
-test('only the super administrator can accept their own task, even when an ordinary owner was historically the reviewer',()=>{
+test('designated reviewers can accept their own tasks',()=>{
   for(const role of ['superadmin','admin','member']){
     const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});const data=session();
     data.actor.role=role;data.account.role=role;const t=data.state.tasks[0];data.state.projects[0].memberIds.push(data.actor.id);
     Object.assign(t,{ownerId:data.actor.id,reviewerId:data.actor.id,status:'review'});ui.acceptSession(data);ui.taskDetail(t.id);
-    assert.equal(modal.innerHTML.includes('data-action="approve-task"'),role==='superadmin');
-    assert.equal(ui.taskRow(t).includes('>验收</button>'),role==='superadmin');
-    modal.close();ui.reviewTask(t.id,true);assert.equal(modal.open,role==='superadmin');
+    assert.equal(modal.innerHTML.includes('data-action="approve-task"'),true);
+    assert.equal(ui.taskRow(t).includes('>验收</button>'),true);
+    modal.close();ui.reviewTask(t.id,true);assert.equal(modal.open,true);
   }
 });
 
@@ -968,34 +968,31 @@ test('the project owner can approve both application kinds but not their own req
   }
 });
 
-test('an administrator without a project approval role sees records but cannot open their approval actions',async()=>{
+test('an administrator may approve nodes but cannot approve another project’s extension',async()=>{
   const {ui,modal,listeners}=harness(async()=>{throw new Error('Unexpected request');});
   const data=approvalFixture();data.notifications=[];data.actor.role='admin';data.account.role='admin';
   data.state.projects.find(item=>item.id==='p-mower').reviewerId='u-engineer';
   ui.acceptSession(data);
   assert.match(ui.approvalsPage(),/待审批的新节点/);
-  assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-node-request"/);
+  assert.match(ui.approvalsPage(),/data-action="(?:approve|reject)-node-request"/);
   await clickUiAction(listeners,'approval-kind','extensions');
   assert.match(ui.approvalsPage(),/完成交付/);
   assert.doesNotMatch(ui.approvalsPage(),/data-action="(?:approve|reject)-extension"/);
-  const previous=modal.innerHTML;
-  for(const approve of [true,false]){ui.reviewNodeRequest('node-pending',approve);ui.reviewExtension('extension-pending',approve);}
-  await clickUiAction(listeners,'approve-node-request','node-pending');
-  await clickUiAction(listeners,'reject-extension','extension-pending');
-  assert.equal(modal.open,false);assert.equal(modal.innerHTML,previous);
+  ui.reviewNodeRequest('node-pending',true);assert.equal(modal.open,true);modal.close();
+  ui.reviewExtension('extension-pending',true);assert.equal(modal.open,false);
 });
 
-test('only project owner and super admin can manage stage co-reviewer and task reviewer',()=>{
+test('project owners and administrators can manage node staff',()=>{
   for(const [actorId,role] of [['u-admin','superadmin'],['u-admin','admin'],['u-manager','member'],['u-engineer','member']]){
     const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});const data=session();
     data.actor=data.state.users.find(u=>u.id===actorId);data.actor.role=role;data.account.role=role;
     data.state.projects[0].reviewerId='u-engineer';
-    data.milestoneReviewerOptions=[{id:'u-manager',name:'项目负责人'},{id:'second-admin',name:'管理员乙'}];ui.acceptSession(data);
-    const allowed=role==='superadmin'||actorId==='u-manager';
+    data.companyMembers=[...data.state.users,{id:'second-admin',name:'管理员乙'}];ui.acceptSession(data);
+    const allowed=role!=='member'||actorId==='u-manager';
     ui.setMilestoneCoReviewer('m-mower-2');assert.equal(modal.open,allowed);
-    if(allowed){assert.match(modal.innerHTML,/value="second-admin"/);assert.doesNotMatch(modal.innerHTML,/value="u-manager"/);assert.match(modal.innerHTML,/仅主验/);modal.close();}
+    if(allowed){assert.match(modal.innerHTML,/value="second-admin"/);assert.doesNotMatch(modal.innerHTML,/data-roster="reviewers" value="u-manager"/);assert.match(modal.innerHTML,/必签/);modal.close();}
     ui.setTaskReviewer('t-02');assert.equal(modal.open,allowed);
-    if(allowed){assert.match(modal.innerHTML,/data-form="setTaskReviewer"/);assert.match(modal.innerHTML,/data-roster="owners" value="u-qa" checked/);assert.match(modal.innerHTML,/data-roster="signers" value="u-qa" disabled/);}
+    if(allowed){assert.match(modal.innerHTML,/data-form="setTaskReviewer"/);assert.match(modal.innerHTML,/data-roster="owners" value="u-qa" checked/);assert.doesNotMatch(modal.innerHTML,/data-roster="signers" value="u-qa" disabled/);}
   }
 });
 
@@ -1037,11 +1034,9 @@ test('disabled co-reviewer options cannot silently remove the second signature r
   data.milestoneReviewerOptions=[];let sent;
   const {ui,modal,listeners}=harness(async(_path,options)=>{sent=JSON.parse(options.body);return Response.json(data);},{FormData:ReviewFormData});
   ui.acceptSession(data);ui.setMilestoneCoReviewer(m.id);
-  assert.match(modal.innerHTML,/value="inactive" selected disabled/);
-  assert.match(await submitReviewForm(listeners,'setMilestoneCoReviewer',m.id,{}),/请选择验收人/);
+  assert.match(modal.innerHTML,/data-roster="reviewers" value="inactive" checked/);
+  assert.match(modal.innerHTML,/原选人员已不可用（可取消）/);
   assert.equal(sent,undefined);
-  assert.equal(await submitReviewForm(listeners,'setMilestoneCoReviewer',m.id,{reviewerId:''}),'');
-  assert.deepEqual(sent.payload,{id:m.id,reviewerId:null});
 });
 
 test('the stage detail, canvas and confirmation enforce distinct signatures even after all child tasks pass',async()=>{
@@ -1079,9 +1074,9 @@ test('super administrator can approve their own applications and sign one curren
   const {ui,modal}=harness(async()=>{throw new Error('Unexpected request');});ui.acceptSession(data);
   ui.reviewNodeRequest('node-pending',true);assert.match(modal.innerHTML,/data-form="approveMilestoneRequest"/);
   ui.reviewExtension('extension-pending',false);assert.match(modal.innerHTML,/data-form="rejectExtension"/);
-  ui.signMilestone(m.id);assert.match(modal.innerHTML,/<select[^>]+name="as"/);
-  assert.match(modal.innerHTML,/value="owner"/);assert.match(modal.innerHTML,/value="coReviewer"/);
-  m.signatures=[{as:'owner',actorId:id,at:new Date().toISOString()}];modal.close();ui.signMilestone(m.id);
+  ui.signMilestone(m.id);assert.match(modal.innerHTML,/<input type="hidden" name="as"/);
+  assert.doesNotMatch(modal.innerHTML,/value="owner"/);assert.match(modal.innerHTML,/value="coReviewer"/);
+  m.signatures=[{as:'coReviewer',actorId:id,at:new Date().toISOString()}];modal.close();ui.signMilestone(m.id);
   assert.equal(modal.open,false);
   data.actor=data.state.users.find(u=>u.id==='u-engineer');data.account.role=data.actor.role;ui.acceptSession(data);
   ui.reviewNodeRequest('node-pending',true);ui.reviewExtension('extension-pending',false);assert.equal(modal.open,false);

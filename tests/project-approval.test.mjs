@@ -12,13 +12,13 @@ const pendingNode = (state = createSeedState(), actor = 'u-engineer') => transac
 const review = (state, actor, approve = true) => transact(state, 'reviewMilestoneRequest', { id: state.milestoneRequests[0].id, approve }, actor);
 const assign = (state, reviewerId, actor = 'u-manager') => transact(state, 'setProjectReviewer', { id: 'p-mower', reviewerId }, actor);
 
-test('only project owners and super administrators approve project requests, and only super administrators approve their own', () => {
+test('administrators and the project owner approve project requests; staff owners need a second person for their own requests', () => {
   const state = createSeedState(), project = get(state, 'projects', 'p-mower');
   project.reviewerId = 'u-qa';
   state.users.push({ id: 'u-total', role: 'superadmin' });
   for (const actor of state.users) {
     const pending = pendingNode(state);
-    const allowed = actor.role === 'superadmin' || actor.id === project.ownerId;
+    const allowed = ['superadmin','admin'].includes(actor.role) || actor.id === project.ownerId;
     assert.equal(canApproveProject(project, actor), allowed);
     assert.equal(canApproveRequest(project, pending.milestoneRequests[0], actor), allowed);
     if (allowed) assert.equal(review(pending, actor.id).milestoneRequests[0].status, 'approved');
@@ -52,8 +52,8 @@ test('a current project member may create a task for another member without gain
   assert.throws(() => transact(state, 'submitTask', { id: task.id, deliverable: '代交' }, 'u-engineer'), /仅任务负责人/);
   const submitted = transact(state, 'submitTask', { id: task.id, deliverable: '正式成果' }, 'u-qa');
   assert.throws(() => transact(submitted, 'reviewTask', { id: task.id, approve: true }, 'u-engineer'), /指定验收人/);
-  assert.throws(() => review(pendingNode(state, 'u-qa'), 'u-engineer'), /仅项目负责人或总管理员/);
-  assert.throws(() => transact(original, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-engineer'), /项目组成员/);
+  assert.throws(() => review(pendingNode(state, 'u-qa'), 'u-engineer'), /仅项目负责人或管理员/);
+  assert.ok(transact(original, 'createTask', { ...input, ownerId: 'u-ops' }, 'u-engineer').projects.find(p=>p.id===input.projectId).memberIds.includes('u-ops'));
   assert.throws(() => transact(original, 'createTask', { ...input, milestoneId: 'm-site-3' }, 'u-engineer'), /不属于该项目/);
   assert.throws(() => transact(original, 'createTask', { ...input, milestoneId: 'm-mower-1' }, 'u-engineer'), /已验收节点/);
   assert.throws(() => transact(original, 'createTask', { ...input, dueDate: '2100-01-01' }, 'u-engineer'), /项目周期/);
@@ -93,12 +93,12 @@ test('API authorizes requests only for the actual project owner or super adminis
   const request = await f.command('requestMilestone', proposal(f.stored().state), 'u-engineer');
   assert.equal(request.status, 200);
   const decision = {id:request.data.state.milestoneRequests[0].id,approve:true};
-  for (const actor of ['u-qa','u-engineer']) assert.equal((await f.command('reviewMilestoneRequest',decision,actor)).status,403);
+  assert.equal((await f.command('reviewMilestoneRequest',decision,'u-engineer')).status,403);
   assert.equal((await f.command('reviewMilestoneRequest',decision,'u-ops')).status,404);
   assert.equal((await f.command('reviewMilestoneRequest',decision,'u-manager',f.stored().revision-1)).status,409);
   const noticeAccounts = f.stored().notifications.filter(n=>n.action==='requestMilestone'&&n.entityId===decision.id).map(n=>f.stored().accounts.find(a=>a.id===n.accountId).userId).sort();
-  assert.deepEqual(noticeAccounts,['u-admin','u-manager']);
-  assert.equal((await f.command('reviewMilestoneRequest',decision,'u-manager')).status,200);
+  assert.deepEqual(noticeAccounts,['u-admin','u-manager','u-qa']);
+  assert.equal((await f.command('reviewMilestoneRequest',decision,'u-qa')).status,200);
   assert.equal((await f.command('reviewExtension',{id:'e-pending',approve:true},'u-manager')).status,400);
   assert.equal((await f.command('reviewExtension',{id:'e-pending',approve:true},'u-admin')).status,200);
   const own=await f.command('requestMilestone',proposal(f.stored().state),'u-admin');assert.equal(own.status,200);
@@ -114,12 +114,13 @@ test('stage reviewers are selected from active administrators and two people sig
   assert.deepEqual(member.milestoneReviewerOptions,[]);
   assert.ok(!member.state.projects.some(p=>p.id==='p-site'));
   const id='m-mower-2',assignment={id,reviewerId:'u-qa'};
-  assert.equal((await f.command('setMilestoneCoReviewer',assignment,'u-qa')).status,403);
+  assert.equal((await f.command('setMilestoneCoReviewer',assignment,'u-engineer')).status,403);
   assert.equal((await f.command('setMilestoneCoReviewer',{id,reviewerId:'u-design'})).status,400);
   assert.equal((await f.command('setMilestoneCoReviewer',assignment)).status,200);
-  const one=await f.command('completeMilestone',{id,as:'owner'},'u-admin');assert.equal(one.status,200,JSON.stringify(one.data));
+  assert.equal((await f.command('completeMilestone',{id,as:'owner'},'u-admin')).status,400);
+  const one=await f.command('completeMilestone',{id,as:'owner'},'u-manager');assert.equal(one.status,200,JSON.stringify(one.data));
   assert.notEqual(get(one.data.state,'milestones',id).status,'done');
-  assert.equal((await f.command('completeMilestone',{id,as:'coReviewer'},'u-admin')).status,400);
+  assert.equal((await f.command('completeMilestone',{id,as:'coReviewer'},'u-manager')).status,400);
   const second=await f.command('completeMilestone',{id,as:'coReviewer'},'u-qa');assert.equal(second.status,200);
   assert.equal(get(second.data.state,'milestones',id).status,'done');
   const other='m-pcb-2';assert.equal((await f.command('setMilestoneCoReviewer',{id:other,reviewerId:'u-qa'})).status,200);
@@ -137,7 +138,7 @@ test('stage reviewers are selected from active administrators and two people sig
 test('old conflicting task reviewers can be repaired by a project owner without changing delivery history',async t=>{
   const f=await fixture(t),id='t-02';
   arrange(f,state=>{const task=get(state,'tasks',id);Object.assign(task,{reviewerId:task.ownerId,status:'review',deliverable:'已提交成果',submittedAt:'2026-11-03T12:00:00Z'});});
-  const before=get(f.stored().state,'tasks',id);assert.equal((await f.command('reviewTask',{id,approve:true},before.ownerId)).status,400);
+  const before=get(f.stored().state,'tasks',id);
   assert.equal((await f.command('setTaskReviewer',{id,reviewerId:'u-engineer'},'u-engineer')).status,403);
   assert.equal((await f.command('setTaskReviewer',{id,reviewerId:'u-design'},'u-manager')).status,400,'unprovisioned accounts cannot accept');
   const fixed=await f.command('setTaskReviewer',{id,reviewerId:'u-engineer'});assert.equal(fixed.status,200);
@@ -167,7 +168,7 @@ test('checkbox assignments replace the former first owner, protect pending work 
   const f=await fixture(t);
   const {ownerId,reviewerId,...base}=taskPayload(f.stored().state);
   const roster={ownerIds:['u-qa','u-engineer'],reviewerIds:['u-manager','u-admin']};
-  for(const bad of [{ownerIds:[]},{reviewerIds:[]},{ownerIds:['u-ops']},{ownerIds:['u-design']},{reviewerIds:['u-qa']}]){
+  for(const bad of [{ownerIds:[]},{reviewerIds:[]},{ownerIds:['u-design']},{reviewerIds:['missing']}]){
     assert.equal((await f.command('createTask',{...base,...roster,...bad})).status,400);
   }
   const created=await f.command('createTask',{...base,...roster});
@@ -186,4 +187,38 @@ test('checkbox assignments replace the former first owner, protect pending work 
     const signed=await cmd('reviewTask',{approve:true},actor);assert.equal(signed.status,200);
     assert.equal(get(signed.data.state,'tasks',id).status,status);
   }
+});
+
+test('an administrator self-approves a plan without a roster; assigned employees deliver, self-review and co-sign', async t => {
+  const f = await fixture(t);
+  await setRole(f,'u-qa','admin');
+  const title='跨部门校对';
+  const cmd=async(actor,action,payload)=>{
+    const result=await f.command(action,payload,actor);
+    assert.equal(result.status,200,JSON.stringify(result.data));
+    return result.data.state;
+  };
+  const directory=(await f.call('/api/session','u-ops')).data;
+  assert.ok(directory.companyMembers.some(user=>user.id==='u-engineer'));
+  assert.ok(directory.companyMembers.every(user=>Object.keys(user).sort().join(',')==='id,name'));
+  const input={name:title,ownerId:'u-manager',startDate:'2099-01-01',dueDate:'2099-01-30',stages:[
+    {title:'联调阶段',dueDate:'2099-01-20',memberIds:['u-ops'],extraReviewerIds:['u-ops'],tasks:[
+      {title,ownerIds:['u-ops'],reviewerIds:['u-ops'],acceptance:'交付记录',dueDate:'2099-01-15'}]}]};
+  const plan=(await cmd('u-qa','createProject',input)).projectPlans[0];
+  const live=await cmd('u-qa','reviewProjectPlan',{id:plan.id,approve:true});
+  const stage=live.milestones.at(-1),task=live.tasks.at(-1),pid=plan.projectId;
+  assert.ok((await f.call('/api/session','u-ops')).data.state.projects.some(p=>p.id===pid));
+  assert.ok(!(await f.call('/api/session','u-engineer')).data.state.projects.some(p=>p.id===pid));
+  await cmd('u-qa','editTaskContent',{id:task.id,title:'更新名称',description:'新说明'});
+  await cmd('u-qa','editMilestoneContent',{id:stage.id,title:'更新阶段',description:'新阶段说明'});
+  const change=await cmd('u-qa','requestMilestone',{projectId:pid,kind:'create',title:'下一阶段',dueDate:'2099-01-29',memberIds:['u-engineer'],extraReviewerIds:['u-engineer']});
+  assert.ok(!(await f.call('/api/session','u-engineer')).data.state.projects.some(p=>p.id===pid));
+  await cmd('u-qa','reviewMilestoneRequest',{id:change.milestoneRequests[0].id,approve:true});
+  assert.ok((await f.call('/api/session','u-engineer')).data.state.projects.some(p=>p.id===pid));
+  await cmd('u-ops','submitTask',{id:task.id,deliverable:'已提交'});
+  await cmd('u-ops','reviewTask',{id:task.id,approve:true});
+  const half=await cmd('u-ops','completeMilestone',{id:stage.id});
+  assert.notEqual(get(half,'milestones',stage.id).status,'done');
+  assert.equal((await f.command('completeMilestone',{id:stage.id,as:'owner'},'u-admin')).status,400);
+  assert.equal(get(await cmd('u-manager','completeMilestone',{id:stage.id}),'milestones',stage.id).status,'done');
 });

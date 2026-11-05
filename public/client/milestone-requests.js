@@ -8,7 +8,7 @@ export function requestComparison(request, users=[]) {
   if (request.kind === 'create') {
     const stage = request.proposed || {};
     const names = ids => ids.map(id => escape(users.find(u=>u.id===id)?.name || '成员')).join('、');
-    const roles = [['执行成员',stage.memberIds || []],['加验管理员',[stage.coReviewerId,...(stage.extraReviewerIds || [])].filter(Boolean)]];
+    const roles = [['执行成员',stage.memberIds || []],['其他验收人',[stage.coReviewerId,...(stage.extraReviewerIds || [])].filter(Boolean)]];
     return `<dl class="node-proposed-details">${rows.map(([label,key])=>`<div><dt>${label}</dt><dd>${escape(value(key,request.proposed?.[key]))}</dd></div>`).join('')}${roles.filter(([,ids])=>ids.length).map(([role,ids])=>`<div><dt>${role}</dt><dd>${names(ids)}</dd></div>`).join('')}</dl>`;
   }
   return `<div class="node-change-table"><table><caption class="sr-only">大节点申请变更对照</caption><thead><tr><th scope="col">调整内容</th><th scope="col">当前计划</th><th scope="col">申请方案</th></tr></thead><tbody>${rows.map(([label,key])=>{const before=request.before?.[key],after=request.proposed?.[key];return `<tr><th scope="row">${label}</th><td>${escape(value(key,before))}</td><td class="${before!==after?'is-changed':''}">${escape(value(key,after))}</td></tr>`;}).join('')}</tbody></table></div>`;

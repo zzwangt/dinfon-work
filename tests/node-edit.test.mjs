@@ -56,7 +56,7 @@ test('submitted and completed tasks keep their original acceptance criteria and 
 test('project owners and super administrators directly edit major-node text, including completed nodes without reopening them', () => {
   for (const id of ['m-mower-2', 'm-mower-1']) {
     const state = createSeedState(), input = milestoneInput(state, id), old = item(state, 'milestones', id);
-    for (const actor of ['u-qa', 'u-engineer']) assert.throws(() => transact(state, 'editMilestoneContent', input, actor), /仅项目负责人或总管理员/);
+    for (const actor of ['u-qa', 'u-engineer']) assert.throws(() => transact(state, 'editMilestoneContent', input, actor), /仅项目负责人或管理员/);
     const next = transact(state, 'editMilestoneContent', input, 'u-admin');
     assert.equal(item(next, 'milestones', id).description, input.description);
     assert.deepEqual(onlyContent(item(next, 'milestones', id)), onlyContent(old));

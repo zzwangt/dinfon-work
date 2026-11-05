@@ -96,7 +96,7 @@ test('blank approval fields do not bypass permissions, decisions, schedules or t
   assert.throws(() => transact(state, 'requestMilestone', { ...node, dueDate: addDays(node.dueDate, 1) }, 'u-engineer'), /超出项目周期/);
   const pending = transact(state, 'requestMilestone', node, 'u-engineer');
   const id = pending.milestoneRequests[0].id;
-  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id, approve: true }, 'u-engineer'), /仅项目负责人或总管理员/);
+  assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id, approve: true }, 'u-engineer'), /仅项目负责人或管理员/);
   assert.throws(() => transact(pending, 'reviewMilestoneRequest', { id }, 'u-admin'), /请选择批准或驳回/);
   const extension = extensionInput(state);
   assert.doesNotThrow(() => transact(state, 'requestExtension', extension, 'u-engineer'));

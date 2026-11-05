@@ -88,7 +88,7 @@ export function sanitizeStateForActor(state, actorId) {
     userIds.add(extension.reviewerId);
   }
   for (const request of milestoneRequests) {
-    stageReviewers(request.proposed || {}).forEach(id=>userIds.add(id));
+    for (const id of [...(request.proposed?.memberIds || []), ...stageReviewers(request.proposed || {})]) userIds.add(id);
     userIds.add(request.applicantId);
     userIds.add(request.reviewerId);
   }

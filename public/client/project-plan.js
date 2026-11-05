@@ -1,6 +1,5 @@
 import { readPeople, readTaskPeople, updatePeopleBox } from './node-people.js';
 import { taskOwners, taskReviewers, stageReviewers } from './approval-access.js';
-import { isAdminRole } from './roles.js';
 import { formatDateTime, toDateTimeInput } from './time.js';
 
 const html = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -8,7 +7,6 @@ const input = (label, key, type, required = true, value = '') =>
   `<label class="field"><span>${label}</span><input data-key="${key}" type="${type}" value="${html(value)}" ${required ? 'required' : ''} ${type === 'datetime-local' ? 'step="3600"' : 'maxlength="100"'}></label>`;
 const note = (label, key, required, value) =>
   `<label class="field full"><span>${label}</span><textarea data-key="${key}" rows="2" maxlength="2000" ${required ? 'required' : ''}>${html(value)}</textarea></label>`;
-const select = (label, key, required = true) => `<label class="field"><span>${label}</span><select data-key="${key}" ${required ? 'required' : ''}></select></label>`;
 const control = (name, label) => `<button type="button" class="button secondary small" data-plan-control="${name}">${label}</button>`;
 const part = (parent, key) => parent.querySelector(`[data-key="${key}"]`);
 const values = row => {
@@ -25,36 +23,20 @@ export function readPlanStages(form) {
   }));
 }
 
-function choices(field, users, selected, placeholder) {
-  field.innerHTML = `<option value="">${placeholder}</option>` + users.map(user =>
-    `<option value="${html(user.id)}"${user.id === selected ? ' selected' : ''}>${html(user.name)}</option>`).join('');
-}
-
 export function bindPlanEditor(form, users, prior) {
   if (!form) return;
   const stages = form.querySelector('[data-plan-stages]');
   const projectEnd = () => form.elements.dueDate.value;
   const dueInput = date => toDateTimeInput(date, '18:00');
-  const people = () => {
-    const owner = form.elements.ownerId.value;
-    const ids = new Set([owner, ...new FormData(form).getAll('memberIds')]);
-    return { owner, members: users.filter(user => ids.has(user.id)) };
-  };
-  function updateStage(stage, stored = {}) {
-    const {owner, members} = people();
-    const extra = part(stage, 'coReviewerId');
-    choices(extra, users.filter(user => user.role === 'admin' && user.id !== owner), stored.coReviewerId ?? extra.value, '仅项目负责人');
-    const stageBox=stage.querySelector(':scope > .form-grid .node-people');
-    const admins=users.filter(user=>user.role==='admin');
-    updatePeopleBox(stageBox,{...readPeople(stageBox),...stored,stage:true,owner,reviewer:extra.value,members,reviewers:admins});
+  function updateStage(stage, stored) {
+    const owner=form.elements.ownerId.value;
+    const box=stage.querySelector(':scope > .form-grid .node-people');
+    const selection=stored ? {memberIds:stored.memberIds || [],extraReviewerIds:stageReviewers(stored)} : readPeople(box);
+    updatePeopleBox(box,{...selection,stage:true,owner,members:users,reviewers:users});
     const due = part(stage, 'dueDate');
     due.min = form.elements.startDate.value;
     due.max = projectEnd();
     for (const task of stage.querySelectorAll('[data-plan-task]')) {
-      const box=task.querySelector('.node-people'), selected=readTaskPeople(box);
-      const reviewers=users.filter(u=>members.includes(u)||isAdminRole(u.role));
-      updatePeopleBox(box,{members,reviewers,ownerIds:selected.ownerIds.filter(id=>members.some(u=>u.id===id)),
-        reviewerIds:selected.reviewerIds.filter(id=>reviewers.some(u=>u.id===id))});
       part(task, 'dueDate').min = due.min;
       part(task, 'dueDate').max = due.value || due.max;
     }
@@ -79,14 +61,13 @@ export function bindPlanEditor(form, users, prior) {
       </div>${control('remove-task','移除小任务')}</fieldset>`);
     const row = list.lastElementChild;
     updateStage(stage);
-    const {members}=people();
-    updatePeopleBox(row.querySelector('.node-people'),{ownerIds:taskOwners(task),reviewerIds:taskReviewers(task),members,reviewers:users.filter(u=>members.includes(u)||isAdminRole(u.role))});
+    updatePeopleBox(row.querySelector('.node-people'),{ownerIds:taskOwners(task),reviewerIds:taskReviewers(task),members:users,reviewers:users});
     return row;
   }
   function addStage(stage = {}) {
     stages.insertAdjacentHTML('beforeend', `<fieldset data-plan-stage><legend></legend><div class="form-grid">
       ${input('大节点名称','title','text',true,stage.title)}${input('节点截止时间','dueDate','datetime-local',true,dueInput(stage.dueDate) || projectEnd())}
-      ${select('加验管理员（选填）','coReviewerId',false)}<div class="node-people"></div>${note('阶段交付说明（选填）','description',false,stage.description)}
+      <span class="field-help full">项目负责人必签，可加选其他验收人。</span><div class="node-people"></div>${note('阶段交付说明（选填）','description',false,stage.description)}
       </div><div data-plan-tasks></div><div class="plan-controls">${control('add-task','＋ 添加小任务')}${control('remove-stage','移除大节点')}</div></fieldset>`);
     const card = stages.lastElementChild;
     updateStage(card, stage);
@@ -113,9 +94,12 @@ export function bindPlanEditor(form, users, prior) {
   });
   form.addEventListener('change', event => {
     const el = event.target;
-    if (['ownerId','memberIds','startDate','dueDate'].includes(el.name)) {
+    if (['ownerId','startDate','dueDate'].includes(el.name)) {
       for (const stage of stages.children) updateStage(stage);
-    } else if ((['ownerId','dueDate','reviewerId','coReviewerId'].includes(el.dataset.key) || el.dataset.roster)) {
+    } else if (el.dataset.roster && el.closest('[data-plan-task]')) {
+      const box=el.closest('.node-people');
+      updatePeopleBox(box,{...readTaskPeople(box),members:users,reviewers:users});
+    } else if (el.dataset.key === 'dueDate' || el.dataset.roster) {
       updateStage(el.closest('[data-plan-stage]'));
     }
   });

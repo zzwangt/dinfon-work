@@ -8,7 +8,7 @@ import { handleFileApi, initializeFileSchema } from './files.mjs';
 
 const WORKSPACE_ID = 'main';
 const ROLES = new Set(['superadmin', 'admin', 'member']);
-const COMMANDS = new Set(['createProject', 'reviewProjectPlan', 'setMilestoneCoReviewer', 'setTaskReviewer', 'createTask', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
+const COMMANDS = new Set(['createProject', 'reviewProjectPlan', 'setMilestoneCoReviewer', 'setTaskReviewer', 'createTask', 'createMilestone', 'deleteTask', 'deleteMilestone', 'deleteProject', 'updateTask', 'editTaskContent', 'submitTask', 'reviewTask', 'editMilestoneContent', 'requestMilestone', 'reviewMilestoneRequest', 'completeMilestone', 'requestExtension', 'reviewExtension']);
 const MAX_BODY_BYTES = 65536;
 export const MAX_PLAN_BYTES = 2 * 1024 * 1024;
 
@@ -413,6 +413,7 @@ export async function handleApi(request, env, authenticatedIdentity) {
       requireValue(data.payload == null || (typeof data.payload === 'object' && !Array.isArray(data.payload)), '操作内容格式不正确');
       const payload = data.payload || {};
       const scope = accessibleCommand(workspace, actor, data.action, payload);
+      const directStage = data.action === 'createMilestone' || data.action === 'requestMilestone' && payload.kind === 'create' && isAdminRole(actor.role);
       const taskPersonnel = data.action === 'createTask' || data.action === 'setTaskReviewer';
       if (data.action === 'reviewTask' && payload.approve === true) {
         const task = workspace.state.tasks.find(item => item.id === payload.id);
@@ -441,11 +442,11 @@ export async function handleApi(request, env, authenticatedIdentity) {
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
-      if (taskPersonnel || data.action === 'setMilestoneCoReviewer') {
+      if (taskPersonnel || directStage || data.action === 'setMilestoneCoReviewer') {
         const active = await activeLoginUsers(env.DB,workspace,identity);
         const item = taskPersonnel
           ? (data.action === 'createTask' ? state.tasks.at(-1) : state.tasks.find(task=>task.id===payload.id))
-          : state.milestones.find(stage=>stage.id===payload.id);
+          : directStage ? state.milestones.at(-1) : state.milestones.find(stage=>stage.id===payload.id);
         const assigned = taskPersonnel ? [...taskOwners(item), ...taskReviewers(item)] : [...item.memberIds, ...stageReviewers(item)];
         requireValue(assigned.every(id=>active.has(id)), '请选择已启用登录的公司成员');
       }
@@ -455,7 +456,7 @@ export async function handleApi(request, env, authenticatedIdentity) {
         const people = [plan.applicantId, ...plan.project.memberIds, ...plan.tasks.flatMap(taskReviewers), ...plan.milestones.flatMap(stageReviewers)];
         requireValue(people.every(id => active.has(id)), '计划中包含未启用登录的人员，请调整人员后重新提交');
       }
-      if (data.action === 'requestMilestone' || data.action === 'reviewMilestoneRequest' && payload.approve) {
+      if (!directStage && (data.action === 'requestMilestone' || data.action === 'reviewMilestoneRequest' && payload.approve)) {
         const request = data.action === 'requestMilestone' ? state.milestoneRequests[0] : state.milestoneRequests.find(item=>item.id===payload.id);
         const roster = [...(request.proposed.memberIds || []), ...stageReviewers(request.proposed)];
         if (roster.length) {

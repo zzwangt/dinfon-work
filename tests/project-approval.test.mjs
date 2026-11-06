@@ -25,7 +25,7 @@ test('administrators and the project owner approve project requests; staff owner
     else assert.throws(() => review(pending, actor.id));
   }
   assert.throws(() => review(pendingNode(state, project.ownerId), project.ownerId), /不能审批自己/);
-  assert.equal(review(pendingNode(state, 'u-total'), 'u-total').milestoneRequests[0].status, 'approved');
+  assert.equal(pendingNode(state,'u-total').milestones.length,state.milestones.length+1);
 });
 
 test('legacy project reviewer assignments stay historical and cannot be configured on new projects', () => {
@@ -102,7 +102,8 @@ test('API authorizes requests only for the actual project owner or super adminis
   assert.equal((await f.command('reviewExtension',{id:'e-pending',approve:true},'u-manager')).status,400);
   assert.equal((await f.command('reviewExtension',{id:'e-pending',approve:true},'u-admin')).status,200);
   const own=await f.command('requestMilestone',proposal(f.stored().state),'u-admin');assert.equal(own.status,200);
-  assert.equal((await f.command('reviewMilestoneRequest',{id:own.data.state.milestoneRequests[0].id,approve:true},'u-admin')).status,200);
+  assert.equal(own.data.state.milestones.at(-1).createdBy,'u-admin');
+  assert.ok(!own.data.state.milestoneRequests.some(r=>r.applicantId==='u-admin'&&r.status==='pending'));
 });
 
 test('stage reviewers are selected from active administrators and two people sign separate positions',async t=>{
@@ -212,8 +213,8 @@ test('an administrator self-approves a plan without a roster; assigned employees
   await cmd('u-qa','editTaskContent',{id:task.id,title:'更新名称',description:'新说明'});
   await cmd('u-qa','editMilestoneContent',{id:stage.id,title:'更新阶段',description:'新阶段说明'});
   const change=await cmd('u-qa','requestMilestone',{projectId:pid,kind:'create',title:'下一阶段',dueDate:'2099-01-29',memberIds:['u-engineer'],extraReviewerIds:['u-engineer']});
-  assert.ok(!(await f.call('/api/session','u-engineer')).data.state.projects.some(p=>p.id===pid));
-  await cmd('u-qa','reviewMilestoneRequest',{id:change.milestoneRequests[0].id,approve:true});
+  assert.equal(change.milestones.at(-1).createdBy,'u-qa');
+  assert.ok(!change.milestoneRequests.some(r=>r.projectId===pid));
   assert.ok((await f.call('/api/session','u-engineer')).data.state.projects.some(p=>p.id===pid));
   await cmd('u-ops','submitTask',{id:task.id,deliverable:'已提交'});
   await cmd('u-ops','reviewTask',{id:task.id,approve:true});

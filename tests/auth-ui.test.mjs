@@ -56,7 +56,7 @@ function harness(fetchImpl, overrides = {}) {
     renderProjectFlow, renderProjectPeopleSummary, renderNodeFiles, bindProjectFiles, resetProjectFiles, bindFlowCanvas() {},
     ...overrides,
   };
-  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,myAccountPage,settingsPage,projectsPage,resetPassword,deleteAccount,saveAccountDeletion,savePasswordReset,saveAccount,projectRow,projectWorkspace,newProject,newTask,setTaskReviewer,setMilestoneCoReviewer,signMilestone,reviewTask,reviewNodeRequest,reviewExtension,tasksPage,milestoneDetail,editMilestoneContent,editTaskContent,deleteTask,deleteMilestone,deleteProject,saveEntityDeletion,saveTaskDeletion,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
+  const ui=runInNewContext(`(()=>{${source}\nreturn {acceptSession,loadSession,submitAuth,logout,render,authScreen,getState:()=>state,getAccount:()=>accountInfo,getActor:()=>actorId,newAccount,editAccount,accountRowActions,accountsPage,myAccountPage,settingsPage,projectsPage,resetPassword,deleteAccount,saveAccountDeletion,savePasswordReset,saveAccount,projectRow,projectWorkspace,newProject,newTask,setTaskReviewer,setMilestoneCoReviewer,signMilestone,reviewTask,reviewNodeRequest,reviewExtension,tasksPage,milestoneDetail,newMilestone,newExtension,newNodeExtension,editMilestoneContent,editTaskContent,deleteTask,deleteMilestone,deleteProject,saveEntityDeletion,saveTaskDeletion,taskDetail,taskRow,weeklyPage,approvalsPage,notificationCenter,markNotificationsRead,readEntityNotifications,openNotification,loadAccounts,addProjectMember,saveProjectMember,availableProjectAccounts,getNotifications:()=>notifications};})()`,context);
   return {ui,app,content,toast,modal,location,listeners,downloads};
 }
 function session(overrides={}) {
@@ -1080,4 +1080,39 @@ test('super administrator can approve their own applications and sign one curren
   assert.equal(modal.open,false);
   data.actor=data.state.users.find(u=>u.id==='u-engineer');data.account.role=data.actor.role;ui.acceptSession(data);
   ui.reviewNodeRequest('node-pending',true);ui.reviewExtension('extension-pending',false);assert.equal(modal.open,false);
+});
+
+test('node details expose a scoped extension form and completed nodes do not offer postponement',async()=>{
+  const {ui,modal,listeners}=harness(async()=>Response.json({})),data=session();data.state.extensions=[];ui.acceptSession(data);
+  ui.taskDetail('t-03');assert.match(modal.innerHTML,/data-action="extend-task" data-id="t-03"/);
+  await clickUiAction(listeners,'extend-task','t-03');
+  assert.match(modal.innerHTML,/申请小节点延期/);assert.match(modal.innerHTML,/name="targetId" value="t-03"/);
+  assert.match(modal.innerHTML,/name="targetType" value="task"/);assert.doesNotMatch(modal.innerHTML,/<select|name="taskIds"|name="milestoneIds"/);
+  assert.match(modal.innerHTML,/id="extension-preview"/);
+  ui.milestoneDetail('m-mower-2');assert.match(modal.innerHTML,/data-action="extend-milestone"/);
+  await clickUiAction(listeners,'extend-milestone','m-mower-2');assert.match(modal.innerHTML,/申请大节点延期/);
+  assert.match(modal.innerHTML,/name="targetId" value="m-mower-2"/);
+  data.state.tasks.find(t=>t.id==='t-03').status='done';ui.taskDetail('t-03');assert.doesNotMatch(modal.innerHTML,/data-action="extend-task"/);
+  ui.milestoneDetail('m-mower-1');assert.doesNotMatch(modal.innerHTML,/data-action="extend-milestone"/);
+});
+
+test('administrator creation has a direct command and project extension is outside the more menu',()=>{
+  for(const role of ['admin','superadmin','member']){
+    const {ui,modal}=harness(async()=>Response.json({})),data=session();data.actor.role=role;data.account.role=role;data.state.projects.find(p=>p.id==='p-mower').memberIds.push(data.actor.id);ui.acceptSession(data);
+    const page=ui.projectWorkspace(data.state.projects[0]);
+    assert.match(page,/data-action="new-extension"/);
+    const more=page.match(/<details class="project-more">[\s\S]*?<\/details>/)?.[0]||'';
+    assert.doesNotMatch(more,/new-extension/);
+    ui.newMilestone('p-mower');
+    assert.match(modal.innerHTML,new RegExp(`data-form="${role==='member'?'requestMilestone':'createMilestone'}"`));
+    if(role!=='member'){assert.match(modal.innerHTML,/创建大节点/);assert.doesNotMatch(modal.innerHTML,/name="reason"/);}
+  }
+});
+
+test('pending extensions show a persistent link in node details and block duplicate applications',()=>{
+  const {ui,modal,toast}=harness(async()=>Response.json({})),data=session();
+  data.state.extensions.push({id:'node-delay',projectId:'p-mower',targetType:'task',targetId:'t-03',status:'pending',applicantId:'u-engineer'});
+  ui.acceptSession(data);ui.taskDetail('t-03');assert.match(modal.innerHTML,/查看待审批的延期/);
+  assert.doesNotMatch(modal.innerHTML,/data-action="extend-task"/);
+  const before=modal.innerHTML;ui.newNodeExtension('task','t-03');assert.equal(modal.innerHTML,before);assert.match(toast.textContent,/已有待审批/);
 });

@@ -119,6 +119,10 @@ export function appendNotifications(previous, next, actorId, action, payload = {
       category: 'tasks', projectId: task.projectId, entityId: task.id,
       title: `${label}：${task.title}`, target: '#tasks',
     });
+  } else if (action === 'createMilestone' || action === 'requestMilestone' && newEntry(previous.state.milestones, state.milestones)) {
+    const node = newEntry(previous.state.milestones, state.milestones);
+    const project = state.projects.find(item => item.id === node?.projectId);
+    if (node && project) projectNotice(project, `新增大节点：${node.title}`, node.id);
   } else if (['requestMilestone', 'requestExtension', 'reviewMilestoneRequest', 'reviewExtension'].includes(action)) {
     const milestone = action.includes('Milestone');
     const before = milestone ? previous.state.milestoneRequests || [] : previous.state.extensions;
@@ -128,14 +132,14 @@ export function appendNotifications(previous, next, actorId, action, payload = {
     if (!request) return next;
     const project = state.projects.find((entry) => entry.id === request.projectId);
     const label = milestone ? '节点申请' : '延期申请';
-    const subject = milestone ? request.proposed.title : project.name;
+    const subject = milestone ? request.proposed.title : request.targetTitle || project.name;
     emit(requesting ? [project.ownerId, ...state.users.filter(user => milestone ? isAdminRole(user.role) : user.role === 'superadmin').map(user => user.id)] : [request.applicantId], {
       category: 'approvals', projectId: project.id, entityId: request.id,
       title: `${label}${requesting ? '待审批' : request.status === 'approved' ? '已批准' : '已驳回'}：${subject}`,
       target: '#approvals',
     });
     if (!requesting && request.status === 'approved') {
-      projectNotice(project, `${milestone ? '节点计划已更新' : '项目截止时间已调整'}：${subject}`, request.id);
+      projectNotice(project, `${milestone ? '节点计划已更新' : request.targetTitle ? '节点截止时间已调整' : '项目截止时间已调整'}：${subject}`, request.id);
     }
   } else if (action === 'completeMilestone' || action === 'editMilestoneContent') {
     const node = state.milestones.find((entry) => entry.id === payload.id);

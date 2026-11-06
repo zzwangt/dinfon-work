@@ -60,7 +60,9 @@ function nodeRequest(state, reason = '') {
 }
 
 test('new and edited major nodes accept an optional reason while title and date remain required', () => {
-  const { ui, modal } = harness();
+  const { ui, modal, state } = harness();
+  state.users.find(u=>u.id==='u-admin').role='member';
+  state.projects.find(p=>p.id==='p-mower').memberIds.push('u-admin');
   for (const milestoneId of [undefined, 'm-mower-2']) {
     ui.newMilestone('p-mower', milestoneId);
     optionalTextarea(modal.innerHTML, 'reason', '申请原因');

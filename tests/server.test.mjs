@@ -368,18 +368,25 @@ test('nonmembers cannot request nodes and forged admin identity cannot approve a
   assert.deepEqual(f.stored(), pending);
 });
 
-test('no role can bypass node approval through the former direct-create command', async (t) => {
+test('direct node creation requires an admin and atomically validates the company roster', async (t) => {
   const f = fixture(t);
   await provision(f, ENGINEER, 'u-engineer');
   await provision(f, MANAGER, 'u-manager', 'member');
   const before = f.stored();
-  for (const identity of [ADMIN, ENGINEER, MANAGER]) {
-    const session = await f.call('/api/session', identity);
-    const denied = await f.call('/api/command', identity, { revision: session.data.revision, action: 'createMilestone', payload: nodeProposal(session.data) });
-    assert.equal(denied.status, 400);
-    assert.equal(denied.data.code, 'INVALID_INPUT');
+  for (const identity of [ENGINEER, MANAGER]) {
+    const session=await f.call('/api/session',identity);
+    const denied=await f.call('/api/command',identity,{revision:session.data.revision,action:'createMilestone',payload:nodeProposal(session.data)});
+    assert.equal(denied.status,400);assert.match(denied.data.error,/仅管理员/);
   }
-  assert.deepEqual(f.stored(), before);
+  assert.deepEqual(f.stored(),before);
+  let session=await f.call('/api/session');
+  const invalid=await f.call('/api/command',ADMIN,{revision:session.data.revision,action:'createMilestone',payload:nodeProposal(session.data,{memberIds:['u-design']})});
+  assert.equal(invalid.status,400);assert.deepEqual(f.stored(),before);
+  const added=await f.call('/api/command',ADMIN,{revision:session.data.revision,action:'createMilestone',payload:nodeProposal(session.data,{memberIds:['u-engineer'],extraReviewerIds:['u-manager']})});
+  assert.equal(added.status,200,JSON.stringify(added.data));
+  assert.equal(f.stored().state.milestones.length,before.state.milestones.length+1);
+  assert.deepEqual(f.stored().state.milestoneRequests,before.state.milestoneRequests);
+  assert.ok(f.stored().notifications.some(n=>n.action==='createMilestone'&&n.category==='projects'));
 });
 
 test('disabled employees cannot submit nodes and their pending requests cannot be approved', async (t) => {
@@ -812,4 +819,19 @@ test('a collaborative plan notifies both workers and requires each task and stag
   await cmd(design,'completeMilestone',{id:mid},400);
   assert.equal((await cmd(second,'completeMilestone',{id:mid})).state.milestones.at(-1).status,'pending');
   assert.equal((await cmd(MANAGER,'completeMilestone',{id:mid})).state.milestones.at(-1).status,'done');
+});
+
+test('node extension persists its scope and dates atomically through the API',async t=>{
+  const f=fixture(t);await provision(f,ENGINEER,'u-engineer');await provision(f,MANAGER,'u-manager','member');
+  const s=await f.call('/api/session',ENGINEER),p=s.data.state.projects.find(p=>p.id==='p-mower');
+  const before=f.stored().state;
+  const requested=await f.call('/api/command',ENGINEER,{revision:s.data.revision,action:'requestExtension',payload:{projectId:p.id,targetType:'task',targetId:'t-03',newDueDate:p.dueDate,plan:'补充验证',impact:'阶段内调整'}});
+  assert.equal(requested.status,200,JSON.stringify(requested.data));
+  const x=requested.data.state.extensions[0];assert.equal(x.targetType,'task');
+  assert.deepEqual(f.stored().state.tasks,before.tasks);assert.deepEqual(f.stored().state.projects,before.projects);
+  const approved=await f.call('/api/command',MANAGER,{revision:requested.data.revision,action:'reviewExtension',payload:{id:x.id,approve:true}});
+  assert.equal(approved.status,200,JSON.stringify(approved.data));
+  assert.equal(f.stored().state.tasks.find(t=>t.id==='t-03').dueDate,p.dueDate);
+  assert.deepEqual(f.stored().state.projects,before.projects);
+  assert.ok(f.stored().notifications.some(n=>n.entityId===x.id&&n.title.includes(x.targetTitle)));
 });

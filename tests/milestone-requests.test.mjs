@@ -49,7 +49,7 @@ test('new requests retain an exact audit record while every live plan and progre
 
 test('only project members, project owners and administrators can request a node change', () => {
   const state = createSeedState();
-  for (const actorId of ['u-engineer', 'u-manager', 'u-admin']) {
+  for (const actorId of ['u-engineer', 'u-manager']) {
     assert.equal(transact(state, 'requestMilestone', createInput(), actorId).milestoneRequests.length, 1);
   }
   assert.throws(() => transact(state, 'requestMilestone', createInput(), 'u-ops'), /无权访问该项目/);
@@ -87,7 +87,7 @@ test('create approval adds the proposed milestone with a preserved initial date 
 test('a super administrator may approve their own proposal, as may its project owner', () => {
   const state = createSeedState();
   assert.equal(state.users.filter((user) => user.role === 'superadmin').length, 1);
-  const pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
+  const pending = transact(state, 'requestMilestone', updateInput(state), 'u-admin');
   assert.deepEqual(pending.milestones, state.milestones);
   assert.equal(review(pending).milestoneRequests[0].status, 'approved');
   assert.equal(review(pending, true, 'u-manager').milestoneRequests[0].status, 'approved');
@@ -133,10 +133,20 @@ test('node reviews require project approval assignment, an explicit decision and
   }
 });
 
-test('the old direct node creation action is closed to every role', () => {
-  for (const actorId of ['u-admin', 'u-manager', 'u-engineer', 'u-ops']) {
-    assert.throws(() => transact(createSeedState(), 'createMilestone', createInput(), actorId), /先提交申请.*管理员审批/);
+test('admins create nodes immediately and employees must submit an application', () => {
+  for (const role of ['admin','superadmin']) {
+    const state=createSeedState();state.users.find(u=>u.id==='u-admin').role=role;
+    for (const command of ['createMilestone','requestMilestone']) {
+      const next=transact(state,command,createInput({memberIds:['u-engineer'],extraReviewerIds:['u-qa'],description:'阶段工作'}),'u-admin');
+      assert.equal(next.milestoneRequests.length,0);
+      assert.equal(next.milestones.length,state.milestones.length+1);
+      assert.equal(next.milestones.at(-1).createdBy,'u-admin');
+      assert.equal(next.milestones.at(-1).description,'阶段工作');
+      assert.equal(next.milestones.at(-1).status,'pending');
+      assert.deepEqual(next.tasks,state.tasks);
+    }
   }
+  for (const id of ['u-manager','u-engineer','u-ops']) assert.throws(()=>transact(createSeedState(),'createMilestone',createInput(),id),/仅管理员/);
 });
 
 test('request validation rejects bad fields, nonexistent dates and out-of-project dates', () => {
@@ -283,7 +293,7 @@ test('an owner without a member entry retains approval eligibility while a demot
   let pending = transact(state, 'requestMilestone', createInput(), 'u-manager');
   byId(pending.projects, 'p-mower').memberIds = byId(pending.projects, 'p-mower').memberIds.filter((id) => id !== 'u-manager');
   assert.equal(review(pending).milestoneRequests[0].status, 'approved');
-  pending = transact(state, 'requestMilestone', createInput(), 'u-admin');
+  pending = transact(state, 'requestMilestone', updateInput(state), 'u-admin');
   byId(pending.users, 'u-admin').role = 'member';
   byId(pending.users, 'u-ops').role = 'superadmin';
   byId(pending.projects, 'p-mower').reviewerId = 'u-ops';

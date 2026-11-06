@@ -199,3 +199,9 @@
 .task-roster input[type=checkbox] {width:16px;height:16px;margin:0;accent-color:var(--accent,#0071e3)}
 .task-roster label:has(:disabled) {color:var(--secondary);cursor:default}
 @media(max-width:600px){.node-roster-group.task-roster label{min-height:44px}}
+
+.participant-picker .task-roster label {display:flex;min-height:44px;margin:0;padding:8px 0;gap:10px;border-bottom:1px solid var(--line)}
+.participant-picker .task-roster label:last-child {border-bottom:0}
+.participant-picker label>span {display:grid;gap:3px;min-width:0;overflow-wrap:anywhere}
+.participant-picker label strong {font-size:13px;font-weight:500}
+.participant-picker label small {font-size:12px}

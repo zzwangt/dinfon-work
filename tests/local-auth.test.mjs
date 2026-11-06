@@ -719,3 +719,62 @@ test('employee project owners cannot add participants and nonparticipating admin
   const removed=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,projectIds:['p-mower','p-pcb']},{cookie:peer.cookie,method:'PATCH'});
   assert.equal(removed.status,403);assert.equal(removed.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');assert.deepEqual(f.stored(),snapshot);
 });
+
+test('batch project participants commit once, preserve other projects and revoke every selected employee session', async t => {
+  const f=await fixture(t),owner=await f.signIn();
+  const first=await f.add(owner.cookie,'batch-first','u-engineer'),second=await f.add(owner.cookie,'batch-second','u-qa');
+  const other=await f.add(owner.cookie,'batch-other','u-design');
+  const firstSession=await f.signIn('batch-first',TEMP_PASSWORD),secondSession=await f.signIn('batch-second',TEMP_PASSWORD),otherSession=await f.signIn('batch-other',TEMP_PASSWORD);
+  const current=await f.call('/api/accounts',null,{cookie:owner.cookie}),before=f.stored();
+  const credentials=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  const response=await f.call('/api/projects/p-site/participants',{revision:current.data.revision,accountIds:[first.id,second.id]},{cookie:owner.cookie});
+  assert.equal(response.status,200,JSON.stringify(response.data));assert.equal(response.data.revision,current.data.revision+1);
+  const project=response.data.state.projects.find(p=>p.id==='p-site');assert.ok([first.userId,second.userId].every(id=>project.memberIds.includes(id)));
+  for(const p of before.state.projects.filter(p=>p.id!=='p-site'))assert.deepEqual(f.stored().state.projects.find(next=>next.id===p.id),p);
+  for(const target of [first,second]){
+    const old=credentials.find(c=>c.account_id===target.id),now=f.db.sqlite.prepare('SELECT * FROM auth_credentials WHERE account_id=?').get(target.id);
+    assert.equal(now.version,old.version+1);assert.equal(now.password_hash,old.password_hash);
+    assert.equal(f.db.sqlite.prepare('SELECT count(*) AS count FROM auth_sessions WHERE account_id=?').get(target.id).count,0);
+  }
+  assert.equal((await f.call('/api/session',null,{cookie:firstSession.cookie})).status,401);
+  assert.equal((await f.call('/api/session',null,{cookie:secondSession.cookie})).status,401);
+  assert.equal((await f.call('/api/session',null,{cookie:otherSession.cookie})).status,200);
+  assert.equal(f.db.sqlite.prepare('SELECT version FROM auth_credentials WHERE account_id=?').get(other.id).version,credentials.find(c=>c.account_id===other.id).version);
+  assert.ok(response.data.accounts.find(a=>a.id===first.id));
+});
+
+test('batch participants reject every invalid or forbidden selection before any member or credential changes', async t => {
+  const f=await fixture(t),owner=await f.signIn(),peer=await addAdmin(f,owner);
+  const first=await f.add(owner.cookie,'batch-valid','u-engineer'),disabled=await f.add(owner.cookie,'batch-disabled','u-qa'),joined=await f.add(owner.cookie,'batch-joined','u-design');
+  let current=await f.call('/api/session',null,{cookie:owner.cookie});
+  const stopped=await f.call(`/api/accounts/${disabled.id}`,{revision:current.data.revision,status:'disabled'},{cookie:owner.cookie,method:'PATCH'});assert.equal(stopped.status,200);
+  const before=f.stored(),creds=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  for(const accountIds of [[],[first.id,first.id],[first.id,'unknown'],[first.id,disabled.id],[first.id,joined.id],['x'.repeat(101)]]){
+    current=await f.call('/api/session',null,{cookie:owner.cookie});
+    const denied=await f.call('/api/projects/p-site/participants',{revision:current.data.revision,accountIds},{cookie:owner.cookie});
+    assert.equal(denied.status,400,JSON.stringify(denied.data));assert.deepEqual(f.stored(),before);assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),creds);
+  }
+  current=await f.call('/api/session',null,{cookie:peer.cookie});
+  const outsider=await f.call('/api/projects/p-site/participants',{revision:current.data.revision,accountIds:[first.id]},{cookie:peer.cookie});assert.equal(outsider.status,403);
+  const grant=await f.call(`/api/accounts/${peer.data.account.id}`,{revision:current.data.revision,projectIds:['p-site']},{cookie:owner.cookie,method:'PATCH'});assert.equal(grant.status,200);
+  const participant=await f.signIn('peer-admin',NEW_PASSWORD),snapshot=f.stored();
+  const peerTarget=await f.call('/api/projects/p-site/participants',{revision:participant.data.revision,accountIds:[first.id,owner.data.account.id]},{cookie:participant.cookie});
+  assert.equal(peerTarget.status,403);assert.equal(peerTarget.data.code,'ACCOUNT_MANAGER_REQUIRED');assert.deepEqual(f.stored(),snapshot);
+  const added=await f.call('/api/projects/p-site/participants',{revision:participant.data.revision,accountIds:[first.id]},{cookie:participant.cookie});assert.equal(added.status,200,JSON.stringify(added.data));
+});
+
+test('a batch participant CAS race cannot revoke sessions or partly add selected members', async t => {
+  const f=await fixture(t),owner=await f.signIn();
+  const first=await f.add(owner.cookie,'race-first','u-engineer'),second=await f.add(owner.cookie,'race-second','u-qa');
+  const login=await f.signIn('race-first',TEMP_PASSWORD);
+  const current=await f.call('/api/session',null,{cookie:owner.cookie}),before=f.stored();
+  const creds=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),sessions=f.db.sqlite.prepare('SELECT * FROM auth_sessions ORDER BY token_hash').all();
+  const original=f.db.batch.bind(f.db);
+  f.db.batch=async statements=>{f.db.batch=original;f.db.sqlite.prepare('UPDATE workspace SET revision=revision+1').run();return original(statements);};
+  const conflict=await f.call('/api/projects/p-site/participants',{revision:current.data.revision,accountIds:[first.id,second.id]},{cookie:owner.cookie});
+  assert.equal(conflict.status,409);assert.deepEqual(f.stored(),before);
+  assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),creds);
+  assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_sessions ORDER BY token_hash').all(),sessions);
+  assert.equal((await f.call('/api/session',null,{cookie:login.cookie})).status,200);
+  const stale=await f.call('/api/projects/p-site/participants',{revision:current.data.revision,accountIds:[first.id,second.id]},{cookie:owner.cookie});assert.equal(stale.status,409);assert.deepEqual(f.stored(),before);
+});

@@ -873,3 +873,32 @@ test('outside admins cannot add themselves or others through node assignments; e
   assert.equal(approved.status,200,JSON.stringify(approved.data));
   assert.ok(f.stored().state.projects.find(p=>p.id==='p-site').memberIds.includes('u-engineer'));
 });
+
+test('hosted batch project participants use one revision and preserve all other memberships without auth tables', async t => {
+  const f=fixture(t),qa={userId:'batch-qa',email:'batch-qa@example.com',displayName:'验收员'};
+  await provision(f,ENGINEER,'u-engineer');await provision(f,qa,'u-qa');
+  const current=await f.call('/api/accounts'),before=f.stored();
+  const selected=current.data.accounts.filter(a=>['u-engineer','u-qa'].includes(a.userId));
+  const added=await f.call('/api/projects/p-site/participants',ADMIN,{revision:current.data.revision,accountIds:selected.map(a=>a.id)});
+  assert.equal(added.status,200,JSON.stringify(added.data));assert.equal(added.data.revision,current.data.revision+1);
+  assert.ok(selected.every(a=>added.data.state.projects.find(p=>p.id==='p-site').memberIds.includes(a.userId)));
+  for(const p of before.state.projects.filter(p=>p.id!=='p-site'))assert.deepEqual(f.stored().state.projects.find(next=>next.id===p.id),p);
+  assert.equal(f.db.sqlite.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='auth_credentials'").get().count,0);
+  const snapshot=f.stored();
+  const invalid=await f.call('/api/projects/p-delivery/participants',ADMIN,{revision:added.data.revision,accountIds:[selected.find(a=>a.userId==='u-engineer').id,'missing']});
+  assert.equal(invalid.status,400);assert.deepEqual(f.stored(),snapshot);
+  const stale=await f.call('/api/projects/p-delivery/participants',ADMIN,{revision:current.data.revision,accountIds:[selected[0].id]});assert.equal(stale.status,409);assert.deepEqual(f.stored(),snapshot);
+});
+
+test('hosted participant batches retain project admin scope and ordinary admin target restrictions', async t => {
+  const f=fixture(t);await provision(f,ENGINEER,'u-engineer','admin');await provision(f,MANAGER,'u-manager','member');
+  const qa={userId:'batch-target',email:'batch-target@example.com',displayName:'测试员工'};await provision(f,qa,'u-qa');
+  const current=await f.call('/api/accounts'),target=current.data.accounts.find(a=>a.userId==='u-qa'),before=f.stored();
+  const outsider=await f.call('/api/projects/p-site/participants',ENGINEER,{revision:current.data.revision,accountIds:[target.id]});
+  assert.equal(outsider.status,403);assert.deepEqual(f.stored(),before);
+  const employeeOwner=await f.call('/api/projects/p-site/participants',MANAGER,{revision:current.data.revision,accountIds:[target.id]});assert.equal(employeeOwner.status,403);assert.deepEqual(f.stored(),before);
+  const grant=await f.call(`/api/accounts/${current.data.accounts.find(a=>a.userId==='u-engineer').id}`,ADMIN,{revision:current.data.revision,projectIds:['p-mower','p-pcb','p-site']},'PATCH');assert.equal(grant.status,200);
+  const snapshot=f.stored();
+  const forbidden=await f.call('/api/projects/p-site/participants',ENGINEER,{revision:grant.data.revision,accountIds:[target.id,current.data.account.id]});assert.equal(forbidden.status,403);assert.equal(forbidden.data.code,'ACCOUNT_MANAGER_REQUIRED');assert.deepEqual(f.stored(),snapshot);
+  const valid=await f.call('/api/projects/p-site/participants',ENGINEER,{revision:grant.data.revision,accountIds:[target.id]});assert.equal(valid.status,200,JSON.stringify(valid.data));
+});

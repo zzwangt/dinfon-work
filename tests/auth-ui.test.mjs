@@ -254,7 +254,7 @@ test('account refresh retains project context from the same revision snapshot',a
   assert.equal(ui.getState().projects.find(p=>p.id==='p-fresh').name,'另一管理员刚建立的项目');
 });
 
-test('adding a member keeps their other memberships and sends the account snapshot revision',async()=>{
+test('adding participants sends one batch with the account snapshot revision',async()=>{
   const fresh=session({revision:12});
   const employee={id:'u-member-qa',name:'测试成员',role:'member'};fresh.state.users.push(employee);
   fresh.state.projects[0].memberIds.push(employee.id);
@@ -267,8 +267,8 @@ test('adding a member keeps their other memberships and sends the account snapsh
     const result=structuredClone(fresh);result.revision++;result.state.projects[1].memberIds.push(employee.id);return Response.json(result);
   });
   ui.acceptSession(session());await ui.loadAccounts();
-  const input=form();await ui.saveProjectMember(input,{accountId:'a-member-qa'},target.id);
-  assert.deepEqual(sent,{path:'/api/accounts/a-member-qa',body:{projectIds:[fresh.state.projects[0].id,target.id],revision:12}});
+  const input=form();await ui.saveProjectMember(input,{accountIds:['a-member-qa']},target.id);
+  assert.deepEqual(sent,{path:`/api/projects/${target.id}/participants`,body:{accountIds:['a-member-qa'],revision:12}});
   assert.ok(ui.getState().projects[1].memberIds.includes(employee.id));assert.match(toast.textContent,/已加入项目/);
   assert.equal(input.button.disabled,false);assert.equal(input.attributes.has('aria-busy'),false);
 });
@@ -348,7 +348,7 @@ test('ordinary administrators manage only employees and direct calls cannot targ
   }
   const candidates=ui.availableProjectAccounts({ownerId:'none',memberIds:[]});
   assert.deepEqual(Array.from(candidates,a=>a.id),['a-engineer']);
-  await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-admin'},'p-mower'),/无权|仅总管理员或已参与/);
+  await assert.rejects(ui.saveProjectMember(form(),{accountIds:['a-admin']},'p-mower'),/无权|仅总管理员或已参与/);
   ui.resetPassword('a-peer-admin');assert.match(modal.innerHTML,/data-form="change-password"/);
   assert.equal(requests,1,'all forbidden operations stop before any mutation');
 });
@@ -1136,7 +1136,7 @@ test('project participant management is limited to super admins and participatin
       assert.doesNotMatch(modal.innerHTML,/开通新成员|name="password"/);
     } else {
       assert.equal(modal.open,false);assert.equal(requests,role==='member'?0:1);
-      await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-engineer'},p.id),/仅总管理员或已参与该项目/);
+      await assert.rejects(ui.saveProjectMember(form(),{accountIds:['a-engineer']},p.id),/仅总管理员或已参与该项目/);
       ui.newAccount(p.id);assert.equal(modal.open,false);
       await assert.rejects(ui.saveAccount('create-account',{login:'not-sent',role:'member'},p.id),/仅管理员|仅总管理员或已参与该项目/);
     }
@@ -1154,4 +1154,50 @@ test('node staffing cannot offer new project participants to an outside admin or
     assert.equal(modal.innerHTML.includes('data-roster="owners" value="u-ops"'),canAdd);
     assert.match(modal.innerHTML,/data-roster="owners" value="u-engineer"/);
   }
+});
+
+test('participant selection renders checkboxes and sends all selected accounts in one request',async()=>{
+  const data=accountsSession(),target=data.state.projects.find(p=>p.id==='p-site');
+  const extra={id:'a-new-member',userId:'u-new-member',name:'新成员',role:'member',status:'active'};
+  data.accounts.push(extra);data.state.users.push({id:extra.userId,name:extra.name,role:'member'});
+  let sent;
+  const {ui,modal,toast}=harness(async(path,options)=>{
+    if(!options?.method)return Response.json(data);
+    sent={path,body:JSON.parse(options.body)};
+    const after=structuredClone(data);after.revision++;after.state.projects.find(p=>p.id===target.id).memberIds.push('u-engineer',extra.userId);return Response.json(after);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();await ui.addProjectMember(target.id);
+  assert.match(modal.innerHTML,/name="accountIds" value="a-engineer"/);
+  assert.match(modal.innerHTML,/name="accountIds" value="a-new-member"/);
+  assert.match(modal.innerHTML,/可多选|已选 0 人/);assert.doesNotMatch(modal.innerHTML,/<select|name="accountId"/);
+  await ui.saveProjectMember(form(),{accountIds:['a-engineer','a-new-member']},target.id);
+  assert.deepEqual(sent,{path:`/api/projects/${target.id}/participants`,body:{accountIds:['a-engineer','a-new-member'],revision:data.revision}});
+  assert.match(toast.textContent,/2 位参与人已加入项目/);
+});
+
+test('empty duplicate unavailable and unauthorized participant selections stop before a mutation',async()=>{
+  const data=accountsSession(),target=data.state.projects.find(p=>p.id==='p-site');let mutations=0;
+  const {ui}=harness(async(_path,options)=>{if(options?.method)mutations++;return Response.json(data);});
+  ui.acceptSession(data);await ui.loadAccounts();
+  for(const ids of [[],['a-engineer','a-engineer'],['missing'],['a-engineer','missing']])await assert.rejects(ui.saveProjectMember(form(),{accountIds:ids},target.id),/至少|无效|启用/);
+  data.accounts.find(a=>a.id==='a-engineer').status='disabled';await ui.loadAccounts();await assert.rejects(ui.saveProjectMember(form(),{accountIds:['a-engineer']},target.id),/启用/);
+  assert.equal(mutations,0);
+});
+
+test('a stale participant batch refreshes the checklist and preserves only still available selections',async()=>{
+  const data=accountsSession(),target=data.state.projects.find(p=>p.id==='p-site');
+  const extra={id:'a-new-member',userId:'u-new-member',name:'新成员',role:'member',status:'active'};data.accounts.push(extra);data.state.users.push({id:extra.userId,name:extra.name,role:'member'});
+  const fresh=structuredClone(data);fresh.revision++;fresh.state.projects.find(p=>p.id===target.id).memberIds.push('u-engineer');
+  let reads=0,mutations=0;
+  const {ui}=harness(async(_path,options)=>{
+    if(options?.method==='POST'){mutations++;return Response.json({error:'数据已更新，请刷新后重试'},{status:409});}
+    return Response.json(reads++?fresh:data);
+  });
+  ui.acceptSession(data);await ui.loadAccounts();
+  const input=form(),choices={innerHTML:''},status={textContent:''};input.isConnected=true;
+  input.querySelector=selector=>selector==='[data-participant-options]'?choices:selector==='[data-participant-count]'?status:selector==='[type="submit"]'?input.button:null;
+  input.querySelectorAll=()=>[...choices.innerHTML.matchAll(/name="accountIds" value="([^"]+)" checked/g)].map(match=>({value:match[1]}));
+  await assert.rejects(ui.saveProjectMember(input,{accountIds:['a-engineer','a-new-member']},target.id),/勾选已保留/);
+  assert.doesNotMatch(choices.innerHTML,/value="a-engineer"/);assert.match(choices.innerHTML,/value="a-new-member" checked/);
+  assert.equal(status.textContent,'已选 1 人');assert.equal(input.button.disabled,false);assert.equal(mutations,1);
 });

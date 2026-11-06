@@ -405,6 +405,52 @@ export async function handleApi(request, env, authenticatedIdentity) {
       const snapshot = await session(env.DB, workspace, identity);
       return json({ ...snapshot, accounts: accountList(workspace), users: snapshot.state.users });
     }
+    const participantProjectId = path.match(/^\/api\/projects\/([^/]+)\/participants$/)?.[1];
+    if (participantProjectId && method === 'POST') {
+      adminOnly(actor);
+      const project = workspace.state.projects.find(project => project.id === participantProjectId);
+      if (!project) fail(404, 'NOT_FOUND', '项目不存在，请刷新后重试');
+      if (!canManageProjectParticipants(project, actor)) fail(403, 'PROJECT_PARTICIPANT_MANAGER_REQUIRED', '仅总管理员或已参与该项目的管理员可以添加项目参与人');
+      const data = await body(request);
+      revisionMatches(data.revision, workspace.revision);
+      requireValue(Array.isArray(data.accountIds) && data.accountIds.length > 0 && data.accountIds.length <= 200
+        && data.accountIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 100)
+        && new Set(data.accountIds).size === data.accountIds.length, '请勾选 1–200 位不同的公司成员');
+      const active = await activeLoginUsers(env.DB, workspace, identity);
+      const targets = data.accountIds.map(id => {
+        const target = workspace.accounts.find(account => account.id === id);
+        requireValue(target?.status === 'active', '所选成员不存在或已停用，请刷新后重试');
+        const user = workspace.state.users.find(user => user.id === target.userId);
+        requireValue(user && active.has(user.id), '请选择已启用登录的公司成员');
+        manageAccountTarget(actor, user);
+        requireValue(user.id !== project.ownerId && !project.memberIds.includes(user.id), '所选成员已参与该项目，请刷新后重新勾选');
+        return { account: target, user };
+      });
+      const next = structuredClone(workspace);
+      for (const target of targets) {
+        const projectIds = workspace.state.projects.filter(project => project.ownerId === target.user.id || project.memberIds.includes(target.user.id)).map(project => project.id);
+        changeAccount(next, target.account.id, { projectIds: [...projectIds, participantProjectId] }, actor, account);
+      }
+      appendNotifications(workspace, next, actor.id, 'accountMemberships');
+      let saved;
+      if (identity.localAccountId) {
+        const revoked = targets.filter(target => !isAdminRole(target.user.role) && target.account.id !== account.id).map(target => target.account.id);
+        const statements = [workspaceUpdate(env.DB, next, workspace.revision)];
+        if (revoked.length) {
+          // A batch may change several credentials. Do not chain changes() = 1,
+          // whose value becomes the number of credential rows after the update.
+          // The unique audit ID ties both auth changes to this successful CAS.
+          const gate = "EXISTS (SELECT 1 FROM workspace WHERE id = ? AND revision = ? AND json_extract(payload, '$.state.logs[0].id') = ?)";
+          const ids = JSON.stringify(revoked), marker = next.state.logs[0].id;
+          statements.push(env.DB.prepare(`UPDATE auth_credentials SET version = version + 1 WHERE account_id IN (SELECT value FROM json_each(?)) AND ${gate}`).bind(ids, WORKSPACE_ID, workspace.revision + 1, marker));
+          statements.push(env.DB.prepare(`DELETE FROM auth_sessions WHERE account_id IN (SELECT value FROM json_each(?)) AND ${gate}`).bind(ids, WORKSPACE_ID, workspace.revision + 1, marker));
+        }
+        const results = await env.DB.batch(statements);
+        assertChanged(results[0]);
+        saved = { ...next, revision: workspace.revision + 1 };
+      } else saved = await saveWorkspace(env.DB, next, workspace.revision);
+      return json({ ...await session(env.DB, saved, identity), accounts: identity.localAccountId ? await localAccountList(env.DB, saved) : accountList(saved) });
+    }
     if (path === '/api/notifications/read' && method === 'POST') {
       const data = await body(request);
       requireValue(Array.isArray(data.ids) && data.ids.length <= 1000 && data.ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 100), '通知列表格式不正确');

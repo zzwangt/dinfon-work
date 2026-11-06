@@ -465,8 +465,16 @@ function jobTitleField(value='') {
 function availableProjectAccounts(p) {
   return (accountsData?.accounts||[]).filter(a=>a.status==='active'&&canManageAccountSecurity(a)&&a.userId!==p.ownerId&&!p.memberIds.includes(a.userId));
 }
-function projectMemberOptions(p,selected='') {
-  return '<option value="">请选择项目参与人</option>'+availableProjectAccounts(p).map(a=>`<option value="${e(a.id)}" ${a.id===selected?'selected':''}>${e(a.name)}${a.title?' · '+e(a.title):''} · ${e(a.login||a.email||roleLabel(a.role))}</option>`).join('');
+function projectMemberChecks(p,selected=[]) {
+  const ids=new Set(selected);
+  return `<div class="node-people participant-picker"><fieldset class="node-roster-group task-roster"><legend>选择公司成员（可多选） <small data-participant-count role="status" aria-live="polite">已选 0 人</small></legend>${availableProjectAccounts(p).map(a=>`<label><input type="checkbox" name="accountIds" value="${e(a.id)}" ${ids.has(a.id)?'checked':''}><span><strong>${e(a.name)}</strong><small>${e([a.title,a.department].filter(Boolean).join(' · ')||roleLabel(a.role))}</small></span></label>`).join('')}</fieldset></div>`;
+}
+function updateParticipantSelection(form) {
+  if(!form?.querySelectorAll)return;
+  const count=form.querySelectorAll('input[name="accountIds"]:checked').length;
+  const status=form.querySelector('[data-participant-count]'),submit=form.querySelector('[type="submit"]');
+  if(status)status.textContent=`已选 ${count} 人`;
+  if(submit&&!saving){submit.disabled=count===0;submit.textContent=count?`加入项目（${count}）`:'加入项目';}
 }
 async function addProjectMember(projectId) {
   if(saving||!canManageProjectParticipants(project(projectId),actor()))return;
@@ -479,31 +487,39 @@ async function addProjectMember(projectId) {
     const p=snapshot.state.projects.find(item=>item.id===projectId);
     if(!canManageProjectParticipants(p,actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
     if(!availableProjectAccounts(p).length){showModal('添加项目参与人',`<p class="form-intro"><strong>${e(p.name)}</strong></p><p>暂无可添加的已注册公司成员。</p>`,'','',projectId);return;}
-    showModal('添加项目参与人',`<p class="form-intro"><strong>${e(p.name)}</strong></p>${selectField('选择公司成员','accountId',projectMemberOptions(p))}<p class="field-help">加入后即可查看并参与该项目。</p>`,'加入项目','add-project-member',projectId);
+    showModal('添加项目参与人',`<p class="form-intro"><strong>${e(p.name)}</strong></p><div data-participant-options>${projectMemberChecks(p)}</div><p class="field-help">加入后即可查看并参与该项目。</p>`,'加入项目','add-project-member',projectId);
+    updateParticipantSelection(modal.querySelector('form'));
   }catch(error){if(epoch===sessionEpoch&&modal.open&&modal.querySelector('form')===loadingForm)showModal('添加项目参与人',`<p class="form-error" role="alert">${e(error.message)}</p>`,'','',projectId,button('重新加载','add-project-member',projectId,'primary'));}
 }
 async function saveProjectMember(form,payload,projectId) {
   if(saving)return;
   if(!canManageProjectParticipants(project(projectId),actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
-  const snapshot=accountsData,p=snapshot?.state?.projects.find(item=>item.id===projectId),account=snapshot?.accounts.find(item=>item.id===payload.accountId);
+  const snapshot=accountsData,p=snapshot?.state?.projects.find(item=>item.id===projectId),ids=payload.accountIds;
   if(!p)throw new Error('项目数据已更新，请关闭窗口后重新添加。');
   if(!canManageProjectParticipants(p,actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
-  if(!account||account.status!=='active')throw new Error('请选择一个已启用的公司成员账号。');
-  if(!canManageAccountSecurity(account))throw new Error('当前账号无权调整该账号的项目成员关系。');
-  if(p.ownerId===account.userId||p.memberIds.includes(account.userId))throw new Error('该成员已参与项目，请选择其他成员。');
-  const projectIds=[...new Set([...snapshot.state.projects.filter(item=>item.ownerId===account.userId||item.memberIds.includes(account.userId)).map(item=>item.id),projectId])];
+  if(!Array.isArray(ids)||!ids.length)throw new Error('请至少勾选一位项目参与人。');
+  if(ids.some(id=>typeof id!=='string')||new Set(ids).size!==ids.length)throw new Error('所选参与人无效，请重新勾选。');
+  const accounts=ids.map(id=>snapshot.accounts.find(a=>a.id===id));
+  if(accounts.some(a=>!a||a.status!=='active'))throw new Error('请选择已启用的公司成员账号。');
+  if(accounts.some(a=>!canManageAccountSecurity(a)))throw new Error('当前账号无权调整所选账号的项目成员关系。');
+  if(accounts.some(a=>p.ownerId===a.userId||p.memberIds.includes(a.userId)))throw new Error('有成员已参与项目，请刷新后重新勾选。');
   const epoch=sessionEpoch,submit=form.querySelector('[type="submit"]'),label=submit?.textContent;
   saving=true;form.setAttribute('aria-busy','true');if(submit){submit.disabled=true;submit.textContent='正在添加…';}
   try{
-    const data=await api(`/api/accounts/${encodeURIComponent(account.id)}`,{method:'PATCH',body:JSON.stringify({projectIds,revision:snapshot.revision})});
+    const data=await api(`/api/projects/${encodeURIComponent(projectId)}/participants`,{method:'POST',body:JSON.stringify({accountIds:ids,revision:snapshot.revision})});
     if(epoch!==sessionEpoch||!acceptSession(data))return;
-    accountsData={...data,users:state.users};storageIssue='';modal.close();modal.innerHTML='';render();toast(`${account.name} 已加入项目。`);
+    accountsData={...data,users:state.users};storageIssue='';modal.close();modal.innerHTML='';render();toast(`${ids.length} 位参与人已加入项目。`);
   }catch(error){
     if(epoch!==sessionEpoch)return;
-    if(error.status===409){const refreshed=await loadAccounts(),current=refreshed?.state?.projects.find(item=>item.id===projectId);if(current&&form.isConnected&&form.elements.accountId)form.elements.accountId.innerHTML=projectMemberOptions(current,payload.accountId);error.message+=refreshed?' 已刷新最新数据，请核对后重试。':' 暂时无法刷新，请关闭窗口后重试。';}
+    if(error.status===409){
+      const refreshed=await loadAccounts(),current=refreshed?.state?.projects.find(item=>item.id===projectId);
+      const options=form.querySelector('[data-participant-options]');
+      if(current&&form.isConnected&&options){options.innerHTML=projectMemberChecks(current,ids);updateParticipantSelection(form);}
+      error.message+=refreshed?' 已刷新最新名单，仍可添加的勾选已保留，请核对后重试。':' 暂时无法刷新，请关闭窗口后重试。';
+    }
     if(error.status===401||error.status===403)await loadSession(true);
     throw error;
-  }finally{saving=false;form.removeAttribute('aria-busy');if(submit){submit.disabled=false;submit.textContent=label;}}
+  }finally{saving=false;form.removeAttribute('aria-busy');if(submit){submit.disabled=false;submit.textContent=label;}updateParticipantSelection(form);}
 }
 function newAccount(projectId='') {
   if(!isAdmin()||(projectId&&!canManageProjectParticipants(project(projectId),actor())))return;
@@ -891,7 +907,7 @@ document.addEventListener('submit',async event=>{
     if(!state)return;
     if(action==='reset-password')return await savePasswordReset(payload,id);
     if(action==='delete-account')return await saveAccountDeletion(id);
-    if(action==='add-project-member')return await saveProjectMember(form,payload,id);
+    if(action==='add-project-member')return await saveProjectMember(form,{accountIds:data.getAll('accountIds')},id);
     if(action==='create-account'||action==='edit-account')return await saveAccount(action,payload,id);
     if(action==='createProject')return await commit(action,{...payload,stages:readPlanStages(form)},'整份项目计划已提交，等待审批。');
     if(action==='approvePlan'||action==='rejectPlan')return await commit('reviewProjectPlan',{id,approve:action==='approvePlan',comment:payload.comment},action==='approvePlan'?'整份计划已批准，项目和任务已生效。':'项目计划已驳回。');
@@ -943,6 +959,7 @@ document.addEventListener('change',event=>{
   if(el.hasAttribute('data-preserve-all-day')){const input=el.closest('form').elements.dueDate;input.disabled=el.checked;input.required=!el.checked;return;}
   if(el.dataset.reschedule){const input=modal.querySelector(`[data-reschedule-date="${CSS.escape(el.dataset.reschedule)}"]`);if(input){input.disabled=!el.checked;input.required=el.checked;}return;}
   const form=el.closest('form');if(!form)return;
+  if(el.name==='accountIds'&&form.dataset.form==='add-project-member'){updateParticipantSelection(form);return;}
   if(el.name==='projectId'&&form.dataset.form==='requestExtension'){document.querySelector('#extension-dates').innerHTML=extensionFields(el.value);return;}
   if(el.name==='reviewerId'||el.dataset.roster)syncPersonnel(form);
 });

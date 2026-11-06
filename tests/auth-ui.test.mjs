@@ -348,7 +348,7 @@ test('ordinary administrators manage only employees and direct calls cannot targ
   }
   const candidates=ui.availableProjectAccounts({ownerId:'none',memberIds:[]});
   assert.deepEqual(Array.from(candidates,a=>a.id),['a-engineer']);
-  await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-admin'},'p-mower'),/无权/);
+  await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-admin'},'p-mower'),/无权|仅总管理员或已参与/);
   ui.resetPassword('a-peer-admin');assert.match(modal.innerHTML,/data-form="change-password"/);
   assert.equal(requests,1,'all forbidden operations stop before any mutation');
 });
@@ -990,7 +990,7 @@ test('project owners and administrators can manage node staff',()=>{
     data.companyMembers=[...data.state.users,{id:'second-admin',name:'管理员乙'}];ui.acceptSession(data);
     const allowed=role!=='member'||actorId==='u-manager';
     ui.setMilestoneCoReviewer('m-mower-2');assert.equal(modal.open,allowed);
-    if(allowed){assert.match(modal.innerHTML,/value="second-admin"/);assert.doesNotMatch(modal.innerHTML,/data-roster="reviewers" value="u-manager"/);assert.match(modal.innerHTML,/必签/);modal.close();}
+    if(allowed){assert.equal(modal.innerHTML.includes('value="second-admin"'),role==='superadmin');assert.doesNotMatch(modal.innerHTML,/data-roster="reviewers" value="u-manager"/);assert.match(modal.innerHTML,/必签/);modal.close();}
     ui.setTaskReviewer('t-02');assert.equal(modal.open,allowed);
     if(allowed){assert.match(modal.innerHTML,/data-form="setTaskReviewer"/);assert.match(modal.innerHTML,/data-roster="owners" value="u-qa" checked/);assert.doesNotMatch(modal.innerHTML,/data-roster="signers" value="u-qa" disabled/);}
   }
@@ -1115,4 +1115,43 @@ test('pending extensions show a persistent link in node details and block duplic
   ui.acceptSession(data);ui.taskDetail('t-03');assert.match(modal.innerHTML,/查看待审批的延期/);
   assert.doesNotMatch(modal.innerHTML,/data-action="extend-task"/);
   const before=modal.innerHTML;ui.newNodeExtension('task','t-03');assert.equal(modal.innerHTML,before);assert.match(toast.textContent,/已有待审批/);
+});
+
+test('project participant management is limited to super admins and participating admins',async()=>{
+  for(const [role,participation,allowed] of [['superadmin','outside',true],['admin','member',true],['admin','owner',true],['admin','outside',false],['member','owner',false],['member','member',false]]) {
+    const data=accountsSession(),p=data.state.projects.find(p=>p.id==='p-site');
+    data.actor.role=data.account.role=role;
+    p.ownerId=participation==='owner'?data.actor.id:'u-ops';
+    p.memberIds=p.memberIds.filter(id=>![data.actor.id,'u-engineer'].includes(id));
+    if(participation==='member')p.memberIds.push(data.actor.id);
+    let mutations=0,requests=0;
+    const {ui,modal}=harness(async(path,options)=>{requests++;if(options?.method==='PATCH')mutations++;return Response.json(data);});
+    ui.acceptSession(data);await ui.loadAccounts();
+    const page=ui.projectWorkspace(p);
+    assert.equal(page.includes('data-action="add-project-member"'),allowed,`${role} ${participation}`);
+    await ui.addProjectMember(p.id);
+    if(allowed){
+      assert.match(modal.innerHTML,/添加项目参与人|加入项目/);
+      assert.match(modal.innerHTML,/选择公司成员/);
+      assert.doesNotMatch(modal.innerHTML,/开通新成员|name="password"/);
+    } else {
+      assert.equal(modal.open,false);assert.equal(requests,role==='member'?0:1);
+      await assert.rejects(ui.saveProjectMember(form(),{accountId:'a-engineer'},p.id),/仅总管理员或已参与该项目/);
+      ui.newAccount(p.id);assert.equal(modal.open,false);
+      await assert.rejects(ui.saveAccount('create-account',{login:'not-sent',role:'member'},p.id),/仅管理员|仅总管理员或已参与该项目/);
+    }
+    assert.equal(mutations,0);
+  }
+});
+
+test('node staffing cannot offer new project participants to an outside admin or employee',()=>{
+  for(const [role,participating,canAdd] of [['superadmin',false,true],['admin',true,true],['admin',false,false],['member',true,false]]) {
+    const data=session(),p=data.state.projects.find(p=>p.id==='p-mower');
+    data.actor.role=data.account.role=role;p.memberIds=p.memberIds.filter(id=>id!==data.actor.id&&id!=='u-ops');
+    if(participating)p.memberIds.push(data.actor.id);
+    const {ui,modal}=harness(async()=>Response.json(data));ui.acceptSession(data);
+    ui.newTask(p.id,'m-mower-2');
+    assert.equal(modal.innerHTML.includes('data-roster="owners" value="u-ops"'),canAdd);
+    assert.match(modal.innerHTML,/data-roster="owners" value="u-engineer"/);
+  }
 });

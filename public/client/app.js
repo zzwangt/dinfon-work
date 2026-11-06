@@ -1,6 +1,6 @@
 import { isAdminRole, isSuperAdminRole, normalizeRole, ROLE_LABELS } from './roles.js';
 import { peopleFields, readPeople, readTaskPeople, updatePeopleBox } from './node-people.js';
-import { canSubmitTask, taskOwners, taskReviewers, taskSignSeats, stageSeats, stageReviewers, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots } from './approval-access.js';
+import { canSubmitTask, taskOwners, taskReviewers, taskSignSeats, stageSeats, stageReviewers, canApproveProject, canApproveRequest, canReviewTask, canManageProjectPlan, canSignMilestone, milestoneSignSlots, canManageProjectParticipants } from './approval-access.js';
 import { planEditor, bindPlanEditor, readPlanStages, planContents } from './project-plan.js';
 import { renderProjectFlow, bindFlowCanvas } from './flow.js';
 import { renderNodeFiles, bindProjectFiles, resetProjectFiles, refreshFlowFileCounts, hasActiveFileOperations } from './files.js';
@@ -332,7 +332,7 @@ function projectWorkspace(p) {
   const xs=state.extensions.filter(x=>x.projectId===p.id),pending=xs.find(x=>x.status==='pending'),approved=xs.filter(x=>x.status==='approved');
   const logs=state.logs.filter(l=>l.projectId===p.id).slice().sort((a,b)=>b.at.localeCompare(a.at)).slice(0,20);
   const taskMetrics=progressAgainstPlan(ts),done=taskMetrics.completed;
-  const memberActions=isAdmin()?button('添加成员','add-project-member',p.id,'secondary','plus'):'';
+  const memberActions=canManageProjectParticipants(p,actor())?button('添加项目参与人','add-project-member',p.id,'secondary','plus'):'';
   const actions=button(isAdmin()?'添加大节点':'申请大节点','new-milestone',p.id,'secondary','plus')+button('申请项目延期','new-extension',p.id,'secondary','clock')+(isSuperAdmin()?`<details class="project-more"><summary class="button secondary">更多 ${icon('chevron')}</summary><div class="project-more-menu">${button('删除整个项目','delete-project',p.id,'danger')}</div></details>`:'');
   const projectHeader=`<div class="flow-project-heading"><div><div class="flow-project-label">${projectStatus(p)}<span>${e(p.code)} · ${e(p.category)}</span></div><h1 class="sr-only">项目中心 · ${e(p.name)}</h1><label class="flow-inline-selector"><span class="sr-only">当前项目</span><select id="flow-project-select" aria-label="当前项目">${visibleProjects().map(item=>`<option value="${e(item.id)}" ${item.id===p.id?'selected':''}>${e(item.name)}</option>`).join('')}</select></label></div><div class="heading-actions"><a class="button secondary" href="#projects">${icon('grid')}全部项目</a>${isAdmin()?button('新建项目','new-project','','primary','plus'):''}</div></div>`;
   const taskCompletion=ts.length?`${taskMetrics.actual}%`:'—';
@@ -466,30 +466,31 @@ function availableProjectAccounts(p) {
   return (accountsData?.accounts||[]).filter(a=>a.status==='active'&&canManageAccountSecurity(a)&&a.userId!==p.ownerId&&!p.memberIds.includes(a.userId));
 }
 function projectMemberOptions(p,selected='') {
-  return '<option value="">请选择员工</option>'+availableProjectAccounts(p).map(a=>`<option value="${e(a.id)}" ${a.id===selected?'selected':''}>${e(a.name)}${a.title?' · '+e(a.title):''} · ${e(a.login||a.email||roleLabel(a.role))}</option>`).join('');
+  return '<option value="">请选择项目参与人</option>'+availableProjectAccounts(p).map(a=>`<option value="${e(a.id)}" ${a.id===selected?'selected':''}>${e(a.name)}${a.title?' · '+e(a.title):''} · ${e(a.login||a.email||roleLabel(a.role))}</option>`).join('');
 }
 async function addProjectMember(projectId) {
-  if(!isAdmin()||saving)return;
+  if(saving||!canManageProjectParticipants(project(projectId),actor()))return;
   const epoch=sessionEpoch;
-  showModal('添加成员','<p class="form-intro" role="status">正在加载可添加的员工…</p>','','',projectId);
+  showModal('添加项目参与人','<p class="form-intro" role="status">正在加载公司成员…</p>','','',projectId);
   const loadingForm=modal.querySelector('form');
   try{
     const snapshot=await loadAccounts({throwOnError:true});
     if(!snapshot||epoch!==sessionEpoch||!modal.open||modal.querySelector('form')!==loadingForm)return;
     const p=snapshot.state.projects.find(item=>item.id===projectId);
-    if(!p)throw new Error('项目不存在，请刷新后重试。');
-    if(!availableProjectAccounts(p).length){showModal('添加成员',`<p class="form-intro"><strong>${e(p.name)}</strong></p><p>暂无可添加的账号，可开通新成员。</p>${button('开通新成员','new-account',p.id,'primary','plus')}`,'','',projectId);return;}
-    showModal('添加成员',`<p class="form-intro"><strong>${e(p.name)}</strong></p>${selectField('已有员工','accountId',projectMemberOptions(p))}<p class="field-help">加入后即可查看本项目。</p><div class="member-create-option"><span>还没有账号？</span>${button('开通新成员','new-account',p.id,'secondary','plus')}</div>`,'添加成员','add-project-member',projectId);
-  }catch(error){if(epoch===sessionEpoch&&modal.open&&modal.querySelector('form')===loadingForm)showModal('添加成员',`<p class="form-error" role="alert">${e(error.message)}</p>`,'','',projectId,button('重新加载','add-project-member',projectId,'primary'));}
+    if(!canManageProjectParticipants(p,actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
+    if(!availableProjectAccounts(p).length){showModal('添加项目参与人',`<p class="form-intro"><strong>${e(p.name)}</strong></p><p>暂无可添加的已注册公司成员。</p>`,'','',projectId);return;}
+    showModal('添加项目参与人',`<p class="form-intro"><strong>${e(p.name)}</strong></p>${selectField('选择公司成员','accountId',projectMemberOptions(p))}<p class="field-help">加入后即可查看并参与该项目。</p>`,'加入项目','add-project-member',projectId);
+  }catch(error){if(epoch===sessionEpoch&&modal.open&&modal.querySelector('form')===loadingForm)showModal('添加项目参与人',`<p class="form-error" role="alert">${e(error.message)}</p>`,'','',projectId,button('重新加载','add-project-member',projectId,'primary'));}
 }
 async function saveProjectMember(form,payload,projectId) {
   if(saving)return;
-  if(!isAdmin())throw new Error('仅管理员可以添加项目成员。');
+  if(!canManageProjectParticipants(project(projectId),actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
   const snapshot=accountsData,p=snapshot?.state?.projects.find(item=>item.id===projectId),account=snapshot?.accounts.find(item=>item.id===payload.accountId);
   if(!p)throw new Error('项目数据已更新，请关闭窗口后重新添加。');
-  if(!account||account.status!=='active')throw new Error('请选择一个已启用的员工账号。');
+  if(!canManageProjectParticipants(p,actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');
+  if(!account||account.status!=='active')throw new Error('请选择一个已启用的公司成员账号。');
   if(!canManageAccountSecurity(account))throw new Error('当前账号无权调整该账号的项目成员关系。');
-  if(p.ownerId===account.userId||p.memberIds.includes(account.userId))throw new Error('该员工已在项目中，请选择其他员工。');
+  if(p.ownerId===account.userId||p.memberIds.includes(account.userId))throw new Error('该成员已参与项目，请选择其他成员。');
   const projectIds=[...new Set([...snapshot.state.projects.filter(item=>item.ownerId===account.userId||item.memberIds.includes(account.userId)).map(item=>item.id),projectId])];
   const epoch=sessionEpoch,submit=form.querySelector('[type="submit"]'),label=submit?.textContent;
   saving=true;form.setAttribute('aria-busy','true');if(submit){submit.disabled=true;submit.textContent='正在添加…';}
@@ -505,7 +506,7 @@ async function saveProjectMember(form,payload,projectId) {
   }finally{saving=false;form.removeAttribute('aria-busy');if(submit){submit.disabled=false;submit.textContent=label;}}
 }
 function newAccount(projectId='') {
-  if(!isAdmin())return;
+  if(!isAdmin()||(projectId&&!canManageProjectParticipants(project(projectId),actor())))return;
   showModal(projectId?'开通新成员':'开通独立账号',`<p class="form-intro">${projectId?`开通后加入 ${e(project(projectId)?.name)}。 `:''}首次登录需设置新密码。</p><div class="form-grid">${field('登录账号','login','','text','required minlength="3" maxlength="64" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[A-Za-z0-9._@\\-]{3,64}" aria-describedby="account-login-help"')}${field('初始密码','password','','password','required minlength="12" maxlength="128" autocomplete="new-password"')}${field('姓名','name','','text','required maxlength="30"')}${selectField('账号权限','role',accountRoleOptions())}${jobTitleField()}${field('部门','department','','text','maxlength="60"')}</div><p id="account-login-help" class="field-help">账号支持 3–64 个英文字母、数字、点、下划线、短横线或 @。密码需为 12–128 个字符。</p>` ,projectId?'开通并加入项目':'开通账号','create-account',projectId);
 }
 function editAccount(id) {
@@ -564,7 +565,7 @@ async function saveAccount(action,payload,id) {
   if(saving)return;saving=true;const epoch=sessionEpoch,submit=modal.querySelector('[type="submit"]');if(submit)submit.disabled=true;
   try{
     delete payload.existingUserId;delete payload.projectIds;
-    if(action==='create-account'&&id){if(!project(id))throw new Error('项目已不存在，请返回项目中心后重试。');payload.projectIds=[id];}
+    if(action==='create-account'&&id){if(!canManageProjectParticipants(project(id),actor()))throw new Error('仅总管理员或已参与该项目的管理员可以添加项目参与人。');payload.projectIds=[id];}
     const data=await api(action==='create-account'?'/api/accounts':`/api/accounts/${encodeURIComponent(id)}`,{method:action==='create-account'?'POST':'PATCH',body:JSON.stringify({...payload,revision:accountsData?.revision??revision})});
     if(epoch!==sessionEpoch)return;acceptSession(data);accountsData={accounts:data.accounts,users:state.users,revision:data.revision};modal.close();modal.innerHTML='';render();toast(action==='create-account'?'账号已开通；请向员工告知账号、初始密码和平台网址。':'账号设置已保存。');
   }catch(error){if(error.status===409){const refreshed=await loadAccounts();if(refreshed)error.message+=' 账号信息已刷新，请核对后重试。';}throw error;}finally{saving=false;if(submit)submit.disabled=false;}
@@ -601,7 +602,8 @@ function newProject(prior) {
   bindPlanEditor(modal.querySelector('form'),people,prior);
 }
 function personnelOptions(project, stage, selection={}, locked=false) {
-  return { ...selection, stage, owner:project.ownerId, members:companyMembers, reviewers:companyMembers, locked };
+  const members=canManageProjectParticipants(project,actor())?companyMembers:companyMembers.filter(person=>person.id===project.ownerId||project.memberIds.includes(person.id));
+  return { ...selection, stage, owner:project.ownerId, members, reviewers:members, locked };
 }
 function rosterBox(options) {
   return `<div class="node-people" data-personnel>${peopleFields(options)}</div>`;
@@ -609,7 +611,7 @@ function rosterBox(options) {
 function syncPersonnel(form) {
   const box=form.querySelector?.('[data-personnel]');
   if(!box)return;
-  const type=form.dataset.form,stage=type==='setMilestoneCoReviewer'||type==='requestMilestone';
+  const type=form.dataset.form,stage=['setMilestoneCoReviewer','requestMilestone','createMilestone'].includes(type);
   const target=type==='setTaskReviewer'?task(form.dataset.id):stage?milestone(form.dataset.id):null;
   const p=project(target?.projectId || form.elements.projectId?.value || form.dataset.id);
   if(!p)return;

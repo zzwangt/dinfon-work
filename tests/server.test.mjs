@@ -835,3 +835,41 @@ test('node extension persists its scope and dates atomically through the API',as
   assert.deepEqual(f.stored().state.projects,before.projects);
   assert.ok(f.stored().notifications.some(n=>n.entityId===x.id&&n.title.includes(x.targetTitle)));
 });
+
+test('outside admins cannot add themselves or others through node assignments; existing-project edits still work', async t => {
+  const f=fixture(t);
+  await provision(f,ENGINEER,'u-engineer','admin');
+  await provision(f,MANAGER,'u-manager','member');
+  const DESIGN={userId:'auth-design-participant',email:'design-participant@example.com',displayName:'设计师'};
+  await provision(f,DESIGN,'u-design','member');
+  const current=await f.call('/api/session',ENGINEER),p=current.data.state.projects.find(p=>p.id==='p-site');
+  assert.ok(!p.memberIds.includes('u-engineer'));
+  const before=f.stored();
+  const task={projectId:p.id,milestoneId:'m-site-3',title:'越权加入任务',dueDate:p.dueDate,ownerIds:['u-engineer'],reviewerIds:['u-manager'],acceptance:'交付记录'};
+  const commands=[
+    ['createTask',task],
+    ['createMilestone',{projectId:p.id,title:'越权加入阶段',dueDate:p.dueDate,memberIds:['u-engineer']}],
+    ['requestMilestone',{projectId:p.id,kind:'create',title:'旧客户端阶段',dueDate:p.dueDate,memberIds:['u-engineer']}],
+    ['setTaskReviewer',{id:'t-13',ownerIds:['u-engineer'],reviewerIds:['u-manager']}],
+    ['setMilestoneCoReviewer',{id:'m-site-3',reviewerId:null,memberIds:['u-engineer']}],
+  ];
+  for(const [action,payload] of commands){
+    const denied=await f.call('/api/command',ENGINEER,{revision:current.data.revision,action,payload});
+    assert.equal(denied.status,403,action+' '+JSON.stringify(denied.data));
+    assert.equal(denied.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');
+    assert.deepEqual(f.stored(),before);
+  }
+  const edited=await f.call('/api/command',ENGINEER,{revision:current.data.revision,action:'editTaskContent',payload:{id:'t-13',title:'补充移动端检查',description:'修改文字，不变更参与人'}});
+  assert.equal(edited.status,200,JSON.stringify(edited.data));
+  const created=await f.call('/api/command',ENGINEER,{revision:edited.data.revision,action:'createTask',payload:{...task,title:'现有人员任务',ownerIds:['u-design'],reviewerIds:['u-manager']}});
+  assert.equal(created.status,200,JSON.stringify(created.data));
+  assert.ok(!f.stored().state.projects.find(p=>p.id==='p-site').memberIds.includes('u-engineer'));
+  const pending=await f.call('/api/command',DESIGN,{revision:created.data.revision,action:'requestMilestone',payload:{projectId:p.id,kind:'create',title:'员工拟添加新协作人',dueDate:p.dueDate,memberIds:['u-engineer']}});
+  assert.equal(pending.status,200,JSON.stringify(pending.data));
+  const request=pending.data.state.milestoneRequests[0];
+  const ownerDenied=await f.call('/api/command',MANAGER,{revision:pending.data.revision,action:'reviewMilestoneRequest',payload:{id:request.id,approve:true}});
+  assert.equal(ownerDenied.status,403);assert.equal(ownerDenied.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');
+  const approved=await f.call('/api/command',ADMIN,{revision:pending.data.revision,action:'reviewMilestoneRequest',payload:{id:request.id,approve:true}});
+  assert.equal(approved.status,200,JSON.stringify(approved.data));
+  assert.ok(f.stored().state.projects.find(p=>p.id==='p-site').memberIds.includes('u-engineer'));
+});

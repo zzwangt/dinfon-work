@@ -10,6 +10,13 @@ export function canApproveProject(project, actor, kind = 'plan') {
 
 export const canManageProjectPlan = canApproveProject;
 
+export function canManageProjectParticipants(project, actor) {
+  if (!project || !actor?.id) return false;
+  return isSuperAdminRole(actor.role) || actor.role === 'admin' && (
+    project.ownerId === actor.id || (project.memberIds || []).includes(actor.id)
+  );
+}
+
 export function canApproveRequest(project, request, actor) {
   if (!request || request.projectId !== project?.id || request.status !== 'pending') return false;
   const kind = Object.hasOwn(request, 'newDueDate') ? 'extension' : 'plan';

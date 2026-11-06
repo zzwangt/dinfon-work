@@ -1,7 +1,7 @@
 import { isAdminRole, isSuperAdminRole, ROLE_LABELS } from '../public/client/roles.js';
 import { createSeedState, normalizeState, transact } from '../public/client/domain.js';
 import { sanitizeStateForActor } from '../public/client/access.js';
-import { canApproveProject, canManageProjectPlan, taskOwners, taskReviewers, stageReviewers } from '../public/client/approval-access.js';
+import { canApproveProject, canManageProjectPlan, canManageProjectParticipants, taskOwners, taskReviewers, stageReviewers } from '../public/client/approval-access.js';
 import { AuthError, normalizeLogin, validatePassword, validPasswordHash, hashPassword, verifyPassword, configuredOrigin, sessionCookie, sessionToken, issueSession, readSession, revokeSession, consumeAuthAttempt, clearAuthAttempts } from './auth.mjs';
 import { workspacePayload, appendNotifications, unreadNotifications, markNotificationsRead } from './notifications.mjs';
 import { handleFileApi, initializeFileSchema } from './files.mjs';
@@ -270,13 +270,22 @@ function assignAccountProjects(workspace, user, projectIds, actor) {
   const selected = new Set(projectIds);
   requireValue(projectIds.every((id) => workspace.state.projects.some((project) => project.id === id)), '选择的项目不存在，请刷新后重试');
   requireValue(workspace.state.projects.every((project) => project.ownerId !== user.id || selected.has(project.id)), '项目负责人不能移除自己负责的项目，请先调整项目负责人');
+  // A full project list may preserve memberships outside the actor's projects.
+  // Authorize every actual change before mutating any project, including legacy reviewers.
+  for (const project of workspace.state.projects) {
+    const membershipChanged = project.ownerId !== user.id && project.memberIds.includes(user.id) !== selected.has(project.id);
+    const reviewerRemoved = !selected.has(project.id) && project.reviewerId === user.id;
+    if ((membershipChanged || reviewerRemoved) && !canManageProjectParticipants(project, actor)) {
+      fail(403, 'PROJECT_PARTICIPANT_MANAGER_REQUIRED', '仅总管理员或已参与该项目的管理员可以添加或调整项目参与人');
+    }
+  }
   for (const project of workspace.state.projects) {
     const member = project.memberIds.includes(user.id);
     if (!selected.has(project.id) && project.reviewerId === user.id) {
       project.reviewerId = null;
       log(workspace, actor.id, `移除项目验收人 ${user.name}`, project.id);
     }
-    if (member === selected.has(project.id)) continue;
+    if (project.ownerId === user.id || member === selected.has(project.id)) continue;
     project.memberIds = selected.has(project.id) ? [...project.memberIds, user.id] : project.memberIds.filter((id) => id !== user.id);
     log(workspace, actor.id, `将成员 ${user.name} ${selected.has(project.id) ? '加入' : '移出'}项目“${project.name}”；既有任务负责人保持不变`, project.id);
   }
@@ -442,6 +451,17 @@ export async function handleApi(request, env, authenticatedIdentity) {
       let state;
       try { state = transact(workspace.state, data.action, payload, actor.id); }
       catch (error) { fail(400, 'COMMAND_REJECTED', error instanceof Error ? error.message : '操作未通过校验'); }
+      // Node assignments can add project participants as a side effect. Use the
+      // pre-command membership so an outside admin cannot first assign themselves.
+      for (const previous of workspace.state.projects) {
+        const updated = state.projects.find(project => project.id === previous.id);
+        if (!updated) continue;
+        const existing = new Set([previous.ownerId, ...previous.memberIds]);
+        const added = [updated.ownerId, ...updated.memberIds].some(id => !existing.has(id));
+        if (added && !canManageProjectParticipants(previous, actor)) {
+          fail(403, 'PROJECT_PARTICIPANT_MANAGER_REQUIRED', '仅总管理员或已参与该项目的管理员可以添加项目参与人，请先由项目管理员添加');
+        }
+      }
       if (taskPersonnel || directStage || data.action === 'setMilestoneCoReviewer') {
         const active = await activeLoginUsers(env.DB,workspace,identity);
         const item = taskPersonnel

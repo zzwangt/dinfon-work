@@ -536,7 +536,7 @@ test('only the super administrator can manage administrator accounts; regular ad
     assert.ok([400,403].includes(elevated.status));
   }
   assert.deepEqual(f.stored(),before);assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),credentials);
-  const edited=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,title:'工程师',projectIds:['p-mower']},{cookie:peer.cookie,method:'PATCH'});assert.equal(edited.status,200);
+  const edited=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,title:'工程师'},{cookie:peer.cookie,method:'PATCH'});assert.equal(edited.status,200);
   const reset=await f.call(`/api/accounts/${employee.id}/password`,{revision:edited.data.revision,password:TEMP_PASSWORD},{cookie:peer.cookie});assert.equal(reset.status,200);
   const removed=await f.call(`/api/accounts/${employee.id}`,{revision:reset.data.revision},{cookie:peer.cookie,method:'DELETE'});assert.equal(removed.status,200);
   const latest=await f.call('/api/session',null,{cookie:owner.cookie});
@@ -671,4 +671,51 @@ test('retired manager and additional super administrator roles cannot be created
     assert.equal((await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,role},{cookie:owner.cookie,method:'PATCH'})).status,400);
   }
   assert.deepEqual(f.stored(),before);
+});
+
+test('only participating admins and the super admin may change project participants, preserving other memberships', async t => {
+  const f=await fixture(t),owner=await f.signIn(),peer=await addAdmin(f,owner);
+  const employee=await f.add(owner.cookie);
+  const selected=()=>f.stored().state.projects.filter(p=>p.ownerId===employee.userId||p.memberIds.includes(employee.userId)).map(p=>p.id);
+  let current=await f.call('/api/session',null,{cookie:peer.cookie});
+  let before=f.stored(),credentials=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  const denied=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,projectIds:[...selected(),'p-site']},{cookie:peer.cookie,method:'PATCH'});
+  assert.equal(denied.status,403);assert.equal(denied.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');
+  const deniedCreate=await f.call('/api/accounts',{revision:current.data.revision,login:'outsider-created-worker',password:TEMP_PASSWORD,name:'新员工',role:'member',projectIds:['p-site']},{cookie:peer.cookie});
+  assert.equal(deniedCreate.status,403);assert.equal(deniedCreate.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');
+  assert.deepEqual(f.stored(),before);assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),credentials);
+  const grant=await f.call(`/api/accounts/${peer.data.account.id}`,{revision:current.data.revision,projectIds:['p-site']},{cookie:owner.cookie,method:'PATCH'});
+  assert.equal(grant.status,200,JSON.stringify(grant.data));
+  const participating=await f.signIn('peer-admin',NEW_PASSWORD);
+  const added=await f.call(`/api/accounts/${employee.id}`,{revision:participating.data.revision,projectIds:[...selected(),'p-site']},{cookie:participating.cookie,method:'PATCH'});
+  assert.equal(added.status,200,JSON.stringify(added.data));
+  assert.deepEqual(selected().sort(),['p-mower','p-pcb','p-site']);
+  for(const p of before.state.projects.filter(p=>p.id!=='p-site'))assert.deepEqual(f.stored().state.projects.find(item=>item.id===p.id),p);
+  before=f.stored();credentials=f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all();
+  const removedElsewhere=await f.call(`/api/accounts/${employee.id}`,{revision:added.data.revision,projectIds:['p-pcb','p-site']},{cookie:participating.cookie,method:'PATCH'});
+  assert.equal(removedElsewhere.status,403);assert.deepEqual(f.stored(),before);assert.deepEqual(f.db.sqlite.prepare('SELECT * FROM auth_credentials ORDER BY account_id').all(),credentials);
+  const created=await f.call('/api/accounts',{revision:added.data.revision,login:'project-created-worker',password:TEMP_PASSWORD,name:'项目参与人',role:'member',projectIds:['p-site']},{cookie:participating.cookie});
+  assert.equal(created.status,201,JSON.stringify(created.data));
+  const account=created.data.accounts.find(a=>a.login==='project-created-worker');
+  assert.ok(created.data.state.projects.find(p=>p.id==='p-site').memberIds.includes(account.userId));
+  const superAdded=await f.call(`/api/accounts/${account.id}`,{revision:created.data.revision,projectIds:['p-site','p-delivery']},{cookie:owner.cookie,method:'PATCH'});
+  assert.equal(superAdded.status,200,JSON.stringify(superAdded.data));
+  assert.ok(superAdded.data.state.projects.find(p=>p.id==='p-delivery').memberIds.includes(account.userId));
+});
+
+test('employee project owners cannot add participants and nonparticipating admins cannot remove legacy reviewers', async t => {
+  const f=await fixture(t),owner=await f.signIn(),peer=await addAdmin(f,owner);
+  const employee=await f.add(owner.cookie);
+  await f.add(owner.cookie,'project-manager','u-manager');
+  const initial=await f.signIn('project-manager',TEMP_PASSWORD);
+  const manager=await f.call('/api/auth/password',{currentPassword:TEMP_PASSWORD,newPassword:NEW_PASSWORD},{cookie:initial.cookie});
+  const before=f.stored();
+  const denied=await f.call(`/api/accounts/${employee.id}`,{revision:manager.data.revision,projectIds:['p-mower','p-pcb','p-delivery']},{cookie:manager.cookie,method:'PATCH'});
+  assert.equal(denied.status,403);assert.deepEqual(f.stored(),before);
+  // A historical reviewer may be outside memberIds. Removing that link is still a scoped change.
+  const legacy=f.stored();legacy.state.projects.find(p=>p.id==='p-site').reviewerId=employee.userId;
+  f.db.sqlite.prepare('UPDATE workspace SET payload=?,revision=revision+1 WHERE id=?').run(JSON.stringify(legacy),'main');
+  const current=await f.call('/api/session',null,{cookie:peer.cookie}),snapshot=f.stored();
+  const removed=await f.call(`/api/accounts/${employee.id}`,{revision:current.data.revision,projectIds:['p-mower','p-pcb']},{cookie:peer.cookie,method:'PATCH'});
+  assert.equal(removed.status,403);assert.equal(removed.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');assert.deepEqual(f.stored(),snapshot);
 });

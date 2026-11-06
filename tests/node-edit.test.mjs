@@ -185,8 +185,10 @@ test('local stage-reviewer options expose only minimal profiles of enabled login
   assert.ok(!owner.data.state.users.some(user=>user.id==='eligible'));
   assert.deepEqual((await f.call('/api/session','u-engineer')).data.milestoneReviewerOptions,[]);
   for(const reviewerId of ['unbound','disabled']){
-    assert.equal((await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId},'u-manager')).status,400);
+    assert.equal((await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId},'u-admin')).status,400);
   }
-  const saved=await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId:'eligible'},'u-manager');
+  const forbidden=await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId:'eligible'},'u-manager');
+  assert.equal(forbidden.status,403);assert.equal(forbidden.data.code,'PROJECT_PARTICIPANT_MANAGER_REQUIRED');
+  const saved=await f.command('setMilestoneCoReviewer',{id:'m-mower-2',reviewerId:'eligible'},'u-admin');
   assert.equal(saved.status,200);assert.equal(saved.data.state.milestones.find(node=>node.id==='m-mower-2').coReviewerId,'eligible');
 });

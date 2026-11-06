@@ -170,11 +170,11 @@ test('checkbox assignments replace the former first owner, protect pending work 
   const {ownerId,reviewerId,...base}=taskPayload(f.stored().state);
   const roster={ownerIds:['u-qa','u-engineer'],reviewerIds:['u-manager','u-admin']};
   for(const bad of [{ownerIds:[]},{reviewerIds:[]},{ownerIds:['u-design']},{reviewerIds:['missing']}]){
-    assert.equal((await f.command('createTask',{...base,...roster,...bad})).status,400);
+    assert.equal((await f.command('createTask',{...base,...roster,...bad},'u-admin')).status,400);
   }
-  const created=await f.command('createTask',{...base,...roster});
+  const created=await f.command('createTask',{...base,...roster},'u-admin');
   assert.equal(created.status,200,JSON.stringify(created.data));const id=created.data.state.tasks.at(-1).id;
-  const cmd=(action,payload,actor)=>f.command(action,{id,...payload},actor);
+  const cmd=(action,payload,actor)=>f.command(action,{id,...payload},actor||'u-admin');
   assert.equal((await cmd('submitTask',{deliverable:'测试记录'},'u-qa')).status,200);
   assert.equal((await cmd('setTaskReviewer',{ownerIds:['u-engineer','u-qa'],reviewerIds:['u-admin','u-manager']})).status,400);
   const swapped=await cmd('setTaskReviewer',{ownerIds:['u-engineer','u-manager'],reviewerIds:['u-qa','u-admin']});
@@ -203,7 +203,7 @@ test('an administrator self-approves a plan without a roster; assigned employees
   assert.ok(directory.companyMembers.some(user=>user.id==='u-engineer'));
   assert.ok(directory.companyMembers.every(user=>Object.keys(user).sort().join(',')==='id,name'));
   const input={name:title,ownerId:'u-manager',startDate:'2099-01-01',dueDate:'2099-01-30',stages:[
-    {title:'联调阶段',dueDate:'2099-01-20',memberIds:['u-ops'],extraReviewerIds:['u-ops'],tasks:[
+    {title:'联调阶段',dueDate:'2099-01-20',memberIds:['u-ops','u-qa'],extraReviewerIds:['u-ops'],tasks:[
       {title,ownerIds:['u-ops'],reviewerIds:['u-ops'],acceptance:'交付记录',dueDate:'2099-01-15'}]}]};
   const plan=(await cmd('u-qa','createProject',input)).projectPlans[0];
   const live=await cmd('u-qa','reviewProjectPlan',{id:plan.id,approve:true});

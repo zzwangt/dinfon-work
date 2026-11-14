@@ -10,7 +10,7 @@ import { isAdminRole, normalizeRole } from './roles.js';
 const COLLECTIONS = ['users', 'projects', 'milestones', 'tasks', 'extensions', 'logs'];
 const USER_FIELDS = ['id', 'name', 'role', 'title', 'department', 'color'];
 const ROLES = new Set(['superadmin', 'admin', 'member']);
-const EMPLOYEE_ROUTES = new Set(['overview', 'projects', 'tasks', 'weekly', 'approvals', 'my-account']);
+const EMPLOYEE_ROUTES = new Set(['overview', 'projects', 'tasks', 'daily', 'weekly', 'approvals', 'my-account']);
 const ADMIN_ROUTES = new Set([...EMPLOYEE_ROUTES, 'team', 'accounts']);
 
 function profile(user) {

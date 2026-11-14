@@ -156,7 +156,7 @@ test('sanitized snapshots have no mutable references into server state', () => {
 
 test('employee and manager route policies exclude global administration', () => {
   for (const role of ['member', 'manager']) {
-    for (const route of ['overview', 'projects', 'projects/p-mower', '#projects/p-mower', '/projects/p-mower', 'tasks', 'weekly', 'approvals', 'my-account']) {
+    for (const route of ['overview', 'projects', 'projects/p-mower', '#projects/p-mower', '/projects/p-mower', 'tasks', 'daily', 'weekly', 'approvals', 'my-account']) {
       assert.equal(canAccessRoute({ role }, route), true, `${role}: ${route}`);
     }
     for (const route of ['dashboard', '#dashboard', 'accounts', 'accounts/new', 'team', 'settings', 'unknown', 'my-accounting']) {
@@ -166,7 +166,7 @@ test('employee and manager route policies exclude global administration', () => 
 });
 
 test('administrator routes are allowed and unauthenticated or malformed route requests are denied', () => {
-  for (const route of ['overview', 'approvals', 'accounts', 'accounts/new', 'team', 'my-account', 'projects/p-mower']) {
+  for (const route of ['overview', 'daily', 'approvals', 'accounts', 'accounts/new', 'team', 'my-account', 'projects/p-mower']) {
     assert.equal(canAccessRoute({ role: 'admin' }, route), true);
   }
   for (const actor of [null, undefined, {}, { role: 'root' }]) {

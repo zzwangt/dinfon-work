@@ -21,6 +21,7 @@ import { renderProgressNote, renderProgressTrack } from '../public/client/progre
 import { taskReminderSummary, approvalReminderSummary } from '../public/client/task-reminders.js';
 import { renderMilestoneRequestCard, requestComparison } from '../public/client/milestone-requests.js';
 import { buildWeeklyReport, createWeeklyExport } from '../public/client/weekly-export.js';
+import { buildDailyBrief } from '../public/client/daily-brief.js';
 
 // Exercise the browser controller with controlled network timing. No credentials are real.
 const source = (await readFile(new URL('../public/client/app.js', import.meta.url), 'utf8'))
@@ -52,7 +53,7 @@ function harness(fetchImpl, overrides = {}) {
     setInterval() {}, setTimeout() { return 1; }, clearTimeout() {}, queueMicrotask,
     renderInstallCard:()=>'<aside>手机桌面版</aside>', initPWA() {},
     renderMilestoneProgress, renderProgressNote, renderProgressTrack,
-    taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport,
+    taskReminderSummary, approvalReminderSummary, renderMilestoneRequestCard, requestComparison, buildWeeklyReport, createWeeklyExport, buildDailyBrief,
     renderProjectFlow, renderProjectPeopleSummary, renderNodeFiles, bindProjectFiles, resetProjectFiles, bindFlowCanvas() {},
     ...overrides,
   };
@@ -1200,4 +1201,41 @@ test('a stale participant batch refreshes the checklist and preserves only still
   await assert.rejects(ui.saveProjectMember(input,{accountIds:['a-engineer','a-new-member']},target.id),/勾选已保留/);
   assert.doesNotMatch(choices.innerHTML,/value="a-engineer"/);assert.match(choices.innerHTML,/value="a-new-member" checked/);
   assert.equal(status.textContent,'已选 1 人');assert.equal(input.button.disabled,false);assert.equal(mutations,1);
+});
+
+test('daily brief opens actions and prepares an escaped Agent draft without sending data', async () => {
+  let copied='';
+  const {ui,app,content,location,modal,listeners}=harness(async()=>{throw new Error('Daily preview must not send data');},{
+    navigator:{clipboard:{async writeText(text){copied=text;}}},
+  });
+  const data=session({notifications:[{...notice('daily-notice'),title:'<任务动态>'}]});
+  const waiting=data.state.tasks.find(item=>item.status==='review');
+  waiting.reviewerId=data.actor.id;
+  waiting.reviewSignatures=[];
+  const extension=data.state.extensions.find(item=>item.status==='pending');
+  ui.acceptSession(data);
+
+  ui.render();
+  assert.match(content.innerHTML,/href="#daily">每日简报/);
+  location.hash='#daily';
+  ui.render();
+  assert.match(app.innerHTML,/href="#daily"[^>]*aria-current="page"/);
+  assert.match(content.innerHTML,/待我验收/);
+  assert.ok(content.innerHTML.includes(`data-action="task-detail" data-id="${waiting.id}"`));
+  assert.match(content.innerHTML,/&lt;任务动态&gt;/);
+  const click=(action,id)=>listeners.get('document:click')({target:{closest:selector=>selector==='[data-action]'?{dataset:{action,id},closest:()=>null}:null}});
+  await click('daily-approval-detail',extension.id);
+  assert.match(modal.innerHTML,/批准延期/);
+  await click('daily-agent-preview');
+  assert.match(modal.innerHTML,/id="daily-agent-source"[^>]*readonly/);
+  assert.match(modal.innerHTML,/&lt;任务动态&gt;/);
+  assert.doesNotMatch(modal.innerHTML,/qa-admin|<任务动态>/);
+  assert.match(modal.innerHTML,/补充消息（选填）/);
+  const originalSelector=modal.querySelector;
+  modal.querySelector=selector=>({
+    '#daily-agent-source':{defaultValue:'原始简报资料'},
+    '#daily-agent-messages':{value:'  今天通过企业微信确认的事项  '},
+  })[selector] || originalSelector(selector);
+  await click('copy-daily-brief');
+  assert.equal(copied,'原始简报资料\n\n补充消息（手动粘贴）\n今天通过企业微信确认的事项');
 });

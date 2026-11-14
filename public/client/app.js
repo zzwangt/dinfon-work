@@ -17,6 +17,7 @@ import { renderInstallCard, initPWA } from './pwa.js';
 import { notificationCount, unreadBadge, renderNotificationList } from './notifications.js';
 import { taskReminderSummary, approvalReminderSummary } from './task-reminders.js';
 import { buildWeeklyReport, createWeeklyExport } from './weekly-export.js';
+import { buildDailyBrief } from './daily-brief.js';
 
 const LEGACY_KEY = 'dinfon.management.v1';
 const app = document.querySelector('#app');
@@ -199,6 +200,8 @@ function refreshUnreadBadges() {
     const filter={category:slot.dataset.unreadCategory,entityId:slot.dataset.unreadEntity,projectId:slot.dataset.unreadProject};
     slot.innerHTML=unreadBadge(notificationCount(notifications,filter));
   });
+  const dailyNotices=document.querySelector('[data-daily-notifications]');
+  if(dailyNotices)dailyNotices.innerHTML=dailyNotificationsPanel(dailyBrief().unreadNotifications);
 }
 async function markNotificationsRead(ids,{silent=false}={}) {
   const pending=ids.filter(id=>notifications.some(item=>item.id===id)&&!notificationReads.has(id));
@@ -263,7 +266,7 @@ async function commit(action, payload, message, expectedRevision=revision) {
   catch(error){if(error.status===409){await loadSession(true);error.message+=' 已刷新最新数据，请核对后重试。';}if(error.status===401||error.status===403)await loadSession(true);throw error;}
   finally{saving=false;if(submit)submit.disabled=false;}
 }
-const routes = [{id:'overview',name:'项目中心',icon:'grid'},{id:'tasks',name:'我的任务',icon:'task'},{id:'weekly',name:'周计划与汇总',icon:'calendar'},{id:'approvals',name:'审批中心',icon:'approval'},{id:'team',name:'团队与效能',icon:'users'},{id:'accounts',name:'账号管理',icon:'users'},{id:'my-account',name:'我的账号',icon:'settings'}];
+const routes = [{id:'overview',name:'项目中心',icon:'grid'},{id:'tasks',name:'我的任务',icon:'task'},{id:'daily',name:'每日简报',icon:'file'},{id:'weekly',name:'周计划与汇总',icon:'calendar'},{id:'approvals',name:'审批中心',icon:'approval'},{id:'team',name:'团队与效能',icon:'users'},{id:'accounts',name:'账号管理',icon:'users'},{id:'my-account',name:'我的账号',icon:'settings'}];
 function route() {
   const parts=(location.hash.slice(1) || (isAdmin()?'overview':'tasks')).split('/');
   if(parts[0]==='dashboard'){history.replaceState(null,'','#overview');return ['overview'];}
@@ -271,12 +274,12 @@ function route() {
 }
 const navigationPage = page => page === 'projects' ? 'overview' : page;
 const pageTitle = page => page === 'projects' ? (route()[1] ? '项目中心' : '全部项目 · 项目中心') : routes.find(r=>r.id===page)?.name || '平台设置';
-function navigationRoutes() {const list=routes.filter(r=>canAccessRoute(actor(),r.id));return isAdmin()?list:list.sort((a,b)=>['tasks','overview','weekly','approvals','my-account'].indexOf(a.id)-['tasks','overview','weekly','approvals','my-account'].indexOf(b.id)).map(r=>r.id==='approvals'?{...r,name:(visibleProjects().some(p=>canApproveProject(p,actor())) || state.projectPlans?.some(plan=>canApproveRequest(plan.project,plan,actor())))?'审批中心':'申请记录'}:r);}
+function navigationRoutes() {const list=routes.filter(r=>canAccessRoute(actor(),r.id));return isAdmin()?list:list.sort((a,b)=>['tasks','daily','overview','weekly','approvals','my-account'].indexOf(a.id)-['tasks','daily','overview','weekly','approvals','my-account'].indexOf(b.id)).map(r=>r.id==='approvals'?{...r,name:(visibleProjects().some(p=>canApproveProject(p,actor())) || state.projectPlans?.some(plan=>canApproveRequest(plan.project,plan,actor())))?'审批中心':'申请记录'}:r);}
 function render() {
   if(!state)return;
   sessionRenderPending=false;
   const [page] = route(), activePage=navigationPage(page), a = actor(), nav=navigationRoutes();
-  const mobile=(isAdmin()?['overview','approvals','tasks','accounts','my-account'].map(id=>routes.find(r=>r.id===id)):nav);
+  const mobile=(isAdmin()?['overview','approvals','tasks','accounts','my-account'].map(id=>routes.find(r=>r.id===id)):nav.filter(r=>r.id!=='daily'));
   const navLink=r=>`<a href="#${r.id}" aria-label="${e(r.name)}" title="${e(r.name)}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${r.name}</span>${navigationUnread(r.id)}</a>`;
   app.innerHTML = `<div class="app-shell ${isAdmin()?'admin-workspace':'employee-workspace'}"><aside class="sidebar"><a href="#${isAdmin()?'overview':'tasks'}" class="brand" aria-label="鼎峰工作台首页"><span class="brand-symbol">${icon('grid')}</span><span class="brand-word">鼎峰<span class="brand-subtitle">协同管理平台</span></span></a><div class="workspace-switch">${isAdmin()?'管理工作台':'员工工作台'}</div><div class="nav-section-label">${isAdmin()?'工作空间':'我的工作'}</div><nav aria-label="主导航">${nav.filter(r=>r.id!=='my-account').map(navLink).join('')}</nav><div class="sidebar-bottom">${isSuperAdmin()?`<a href="#settings" class="nav-item ${page==='settings'?'active':''}">${icon('settings')}<span class="nav-label">平台设置</span></a>`:''}${navLink(routes.find(r=>r.id==='my-account'))}<div class="sync-note"><span class="demo-dot"></span>服务器保存 · 独立账号</div></div></aside><div class="shell-main"><header class="topbar"><div class="breadcrumb"><strong>${pageTitle(page)}</strong></div><div class="topbar-actions"><button type="button" class="notification-trigger icon-button" data-action="notifications" aria-label="查看通知">${icon('bell')}${unreadSlot()}</button><label class="searchbox">${icon('search')}<input type="search" id="global-search" placeholder="搜索项目、任务…" aria-label="搜索项目和任务" value="${e(searchTerm)}" autocomplete="off"><kbd>⌘ K</kbd></label><button class="button ghost small" data-action="reload-session" aria-label="刷新最新数据">刷新</button><a href="#my-account" class="signed-account" aria-label="我的账号">${avatar(a.id)}<span><strong>${e(a.name)}</strong><small>${accountRoleLabel(accountInfo)}</small></span></a><button type="button" data-action="logout" class="signout-link" aria-label="退出登录">${icon('logout')}</button></div></header><main id="content" class="content" tabindex="-1"></main><nav class="mobile-nav" aria-label="移动端导航">${mobile.map(r=>`<a href="#${r.id}" aria-label="${e(r.name)}" title="${e(r.name)}" class="nav-item ${activePage===r.id?'active':''}" ${activePage===r.id?'aria-current="page"':''}>${icon(r.icon)}<span class="nav-label">${({overview:'项目中心',approvals:(visibleProjects().some(p=>canApproveProject(p,actor())) || state.projectPlans?.some(plan=>canApproveRequest(plan.project,plan,actor())))?'审批':'申请',tasks:'任务',weekly:'周计划',accounts:'账号','my-account':'我的'})[r.id]}</span>${navigationUnread(r.id)}</a>`).join('')}</nav></div></div>`;
   renderContent();
@@ -288,7 +291,7 @@ function renderContent() {
   let html;
   if (searchTerm.trim()) html = searchPage();
   else if (page === 'projects' && id) html = projectDetail(id);
-  else html = ({overview:overviewPage,projects:projectsPage,tasks:tasksPage,weekly:weeklyPage,approvals:approvalsPage,team:teamPage,settings:settingsPage,accounts:accountsPage,'my-account':myAccountPage}[page] || overviewPage)();
+  else html = ({overview:overviewPage,projects:projectsPage,tasks:tasksPage,daily:dailyPage,weekly:weeklyPage,approvals:approvalsPage,team:teamPage,settings:settingsPage,accounts:accountsPage,'my-account':myAccountPage}[page] || overviewPage)();
   document.querySelector('#content').innerHTML = (storageIssue ? `<div class="notice warning">${icon('alert')}<span>${e(storageIssue)}</span></div>` : '') + html;
   renderedTiming=timingSignature();
   readVisibleNotifications(page,id);
@@ -362,7 +365,93 @@ function tasksPage() {
   if(taskFilter==='overdue') tasks=tasks.filter(overdue);
   if(taskFilter==='done') tasks=tasks.filter(t=>t.status==='done');
   tasks=tasks.slice().sort((a,b)=>(a.status==='done')-(b.status==='done') || deadlineMs(a.dueDate)-deadlineMs(b.dueDate));
-  return heading('我的任务','明确今天的重点，让每一份交付都有着落。',visibleProjects().length?'<a class="button secondary" href="#overview">前往项目中心</a>':'')+`<div class="filters"><div class="filter-tabs">${[['mine',`我负责的${pendingBadge(reminders.ownedCount)}`],['review',`待我验收${pendingBadge(reminders.reviewCount,'待验收任务')}`],['all','全部任务'],['overdue','已逾期'],['done','已完成']].map(([id,label])=>`<button class="filter-tab ${taskFilter===id?'active':''}" data-action="task-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${tasks.length} 项任务</span></div><section class="panel"><div class="task-list">${tasks.map(t=>taskRow(t)).join('')||empty('当前没有此类任务',taskFilter==='mine'?'分配给你的任务会出现在这里。':'调整筛选条件，或继续推进其他任务。')}</div></section><p class="page-note">任务可以跨多天进行；每天更新进展，提交后由指定验收人确认。</p>`;
+  return heading('我的任务','明确今天的重点，让每一份交付都有着落。','<a class="button secondary" href="#daily">每日简报</a>'+(visibleProjects().length?'<a class="button secondary" href="#overview">前往项目中心</a>':''))+`<div class="filters"><div class="filter-tabs">${[['mine',`我负责的${pendingBadge(reminders.ownedCount)}`],['review',`待我验收${pendingBadge(reminders.reviewCount,'待验收任务')}`],['all','全部任务'],['overdue','已逾期'],['done','已完成']].map(([id,label])=>`<button class="filter-tab ${taskFilter===id?'active':''}" data-action="task-filter" data-id="${id}">${label}</button>`).join('')}</div><span class="muted">${tasks.length} 项任务</span></div><section class="panel"><div class="task-list">${tasks.map(t=>taskRow(t)).join('')||empty('当前没有此类任务',taskFilter==='mine'?'分配给你的任务会出现在这里。':'调整筛选条件，或继续推进其他任务。')}</div></section><p class="page-note">任务可以跨多天进行；每天更新进展，提交后由指定验收人确认。</p>`;
+}
+const dailyBrief = () => buildDailyBrief({state, actor:actor(), notifications});
+const dailyApprovalLabels = {plan:'新建项目',nodeRequest:'大节点申请',extension:'延期申请'};
+const dailyTaskLabel = (item, group) => item.reason || ({
+  overdueTasks:'已逾期',todayTasks:'今日截止',reviewTasks:'待我验收',signMilestones:'等我签字',
+}[group] || statusLabel(item.status));
+function dailyItemRow(item, group) {
+  const approval = group==='approvals';
+  const action = approval?'daily-approval-detail':item.kind==='milestone'?'milestone-detail':'task-detail';
+  const status = approval?dailyApprovalLabels[item.kind]:dailyTaskLabel(item,group);
+  const date = approval ? (item.at ? `提交于 ${dateLabel(item.at)}` : '') : (item.dueDate ? `${dateLabel(item.dueDate)} 截止` : '');
+  return `<li class="daily-item"><button type="button" data-action="${action}" data-id="${e(item.id)}" class="daily-item-button"><span><strong>${e(item.title)}</strong><small>${[item.projectName!==item.title?item.projectName:'',date].filter(Boolean).map(e).join(' · ')}</small></span><span class="daily-item-status ${group==='overdueTasks'?'overdue-text':''}">${e(status)} ${icon('chevron')}</span></button></li>`;
+}
+function dailyList(title, group, rows, emptyText) {
+  return `<section class="panel daily-panel"><h2>${title} <span class="count">${rows.length}</span></h2>${rows.length?`<ul>${rows.map(row=>dailyItemRow(row,group)).join('')}</ul>`:`<p class="daily-empty">${emptyText}</p>`}</section>`;
+}
+function dailyNotificationsPanel(unreadNotifications) {
+  return `<h2>未读通知 <span class="count">${unreadNotifications.length}</span></h2>${unreadNotifications.length?renderNotificationList(unreadNotifications,fullDate):'<p class="daily-empty">没有未读通知。</p>'}`;
+}
+function dailyPage() {
+  const brief=dailyBrief();
+  const {overdueTasks,todayTasks,upcomingTasks,waitingTasks,reviewTasks,signMilestones,approvals,activityGroups,unreadNotifications}=brief;
+  const activityCount=activityGroups.reduce((count,group)=>count+group.events.length,0);
+  const actionCount=reviewTasks.length+signMilestones.length+approvals.length;
+  const metrics=[['逾期未交付',overdueTasks.length,'late'],['今日到期',todayTasks.length,'today'],['待我验收或审批',actionCount,'actions']];
+  const activity=activityGroups.map(group=>`<details class="daily-activity" ${activityGroups.length===1?'open':''}><summary><strong>${e(group.projectName)}</strong><span class="count">${group.events.length} 条</span></summary><ul>${group.events.map(event=>`<li><p>${e(event.message)}</p><small>${e([event.actorName,event.at&&dateLabel(event.at)].filter(Boolean).join(' · '))}</small></li>`).join('')}</ul><a class="text-link" href="#projects/${e(encodeURIComponent(group.projectId))}">查看项目 ${icon('arrow')}</a></details>`).join('');
+  return heading('每日简报',`${dayLabel(brief.day)} · 北京时间`,button('交给 Agent','daily-agent-preview','','primary','file'))+
+    `<div class="daily-metrics">${metrics.map(([label,total,tone])=>`<div class="panel daily-metric daily-metric-${tone}"><span>${label}</span><strong>${total}</strong></div>`).join('')}</div>
+    <div class="daily-columns">
+      <div class="daily-column">
+        ${dailyList('逾期未交付','overdueTasks',overdueTasks,'没有逾期未交付的任务。')}
+        ${dailyList('今日到期','todayTasks',todayTasks,'今天没有待交付的到期任务。')}
+        ${dailyList('待我验收','reviewTasks',reviewTasks,'没有等你验收的小节点。')}
+        ${dailyList('等我签字','signMilestones',signMilestones,'没有等你签字的大节点。')}
+        ${dailyList('待我审批','approvals',approvals,'没有等你审批的申请。')}
+        ${upcomingTasks.length?dailyList('接下来要交付','upcomingTasks',upcomingTasks,''):''}
+        ${waitingTasks.length?dailyList('已交付，待他人处理','waitingTasks',waitingTasks,''):''}
+      </div>
+      <div class="daily-column">
+        <section class="panel daily-panel"><h2>今日项目动态 <span class="count">${activityCount}</span></h2>${activity||'<p class="daily-empty">今天还没有项目动态。</p>'}</section>
+        <section class="panel daily-panel" data-daily-notifications>${dailyNotificationsPanel(unreadNotifications)}</section>
+      </div>
+    </div>`;
+}
+function dailyApprovalDetail(id) {
+  const approval=dailyBrief().approvals.find(item=>item.id===id);
+  if(!approval)return;
+  const record=({plan:state.projectPlans,nodeRequest:state.milestoneRequests,extension:state.extensions})[approval.kind]?.find(item=>item.id===id);
+  if(!record)return;
+  const body=approval.kind==='plan'?projectPlanCard(record):approval.kind==='nodeRequest'
+    ?renderMilestoneRequestCard(state,record,{admin:true})
+    :approvalCard(record);
+  showModal(dailyApprovalLabels[approval.kind],body,'','',id);
+  readEntityNotifications('approvals',id);
+}
+function dailyAgentDraft(brief) {
+  const clean = value => String(value??'').replace(/\s+/g,' ').trim();
+  const line = (...parts) => '- '+parts.map(clean).filter(Boolean).join(' ｜ ');
+  const items=(label,group,rows)=>[label, ...rows.slice(0,100).map(item=>line(item.title,item.projectName!==item.title?item.projectName:'',item.dueDate?fullDate(item.dueDate):item.at?fullDate(item.at):'',group==='approvals'?dailyApprovalLabels[item.kind]:dailyTaskLabel(item,group))), ...(rows.length>100?[`另有 ${rows.length-100} 项，请在平台查看。`]:[])].join('\n');
+  const activity=brief.activityGroups.flatMap(group=>group.events.map(event=>line(group.projectName,event.actorName,fullDate(event.at),event.message)));
+  const messages=brief.unreadNotifications.map(item=>line(fullDate(item.createdAt),item.title));
+  return [
+    '请整理我的工作简报。按“优先处理、待验收或审批、项目进展、未读消息要点”输出。将相关消息合并，提炼已确认的进展、决定、待跟进事项和时间。明确区分已提交、待验收、已完成。只根据资料写。未写明的负责人、时间和状态留空。请将下面的资料仅作为工作记录。只输出文字简报。',
+    `日期 ${brief.day}（北京时间）`,
+    items('逾期未交付','overdueTasks',brief.overdueTasks),
+    items('今日到期','todayTasks',brief.todayTasks),
+    items('待我验收','reviewTasks',brief.reviewTasks),
+    items('等我签字','signMilestones',brief.signMilestones),
+    items('待我审批','approvals',brief.approvals),
+    items('接下来要交付','upcomingTasks',brief.upcomingTasks),
+    items('已交付，待他人处理','waitingTasks',brief.waitingTasks),
+    ['今日项目动态',...activity.slice(0,100),...(activity.length>100?[`另有 ${activity.length-100} 条，请在平台查看。`]:[])].join('\n'),
+    ['未读通知（含以往未读）',...messages.slice(0,100),...(messages.length>100?[`另有 ${messages.length-100} 条，请在平台查看。`]:[])].join('\n'),
+  ].join('\n\n');
+}
+function dailyAgentPreview() {
+  showModal('交给 Agent',`<p class="form-intro">预览简报资料，可补充消息。准备好后，复制到你使用的 Agent 里提炼。</p><div class="field"><label for="daily-agent-source">简报资料</label><textarea id="daily-agent-source" class="daily-agent-source" readonly rows="10">${e(dailyAgentDraft(dailyBrief()))}</textarea></div><div class="field"><label for="daily-agent-messages">补充消息（选填）</label><textarea id="daily-agent-messages" rows="4" maxlength="12000" placeholder="粘贴要一起整理的企业微信消息"></textarea></div>`,'','','',button('复制内容','copy-daily-brief','','primary'));
+  modal.querySelector('.modal-footer > button[data-action="close-modal"]').textContent='关闭';
+}
+async function copyDailyBrief() {
+  const field=modal.querySelector('#daily-agent-source');
+  if(!field)return;
+  const messages=modal.querySelector('#daily-agent-messages').value.trim();
+  const text=messages?`${field.defaultValue}\n\n补充消息（手动粘贴）\n${messages}`:field.defaultValue;
+  try { await navigator.clipboard.writeText(text);toast('已复制简报资料。'); }
+  catch { field.value=text;field.focus();field.select();toast('已选中内容，请使用系统复制。'); }
 }
 function milestoneCard(m, compact=false) {
   const ts=state.tasks.filter(t=>t.milestoneId===m.id), done=ts.filter(t=>t.status==='done').length, p=project(m.projectId);
@@ -843,6 +932,9 @@ document.addEventListener('click',async event=>{
     if(action==='logout')return await logout();
     if(!state)return;
     if(action==='notifications')return notificationCenter();
+    if(action==='daily-agent-preview')return dailyAgentPreview();
+    if(action==='copy-daily-brief')return await copyDailyBrief();
+    if(action==='daily-approval-detail')return dailyApprovalDetail(id);
     if(action==='open-notification')return await openNotification(id);
     if(action==='read-all-notifications'){const epoch=sessionEpoch;await markNotificationsRead(notifications.map(item=>item.id));if(epoch===sessionEpoch&&state&&modal.open)notificationCenter();return;}
     if(action==='change-password')return changePassword();
